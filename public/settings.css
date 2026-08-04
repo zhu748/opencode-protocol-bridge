@@ -576,27 +576,32 @@
 }
 
 .cache-meter {
-  display: flex;
   overflow: hidden;
   height: 12px;
   border-radius: 999px;
   background: #252a34;
 }
 
-.cache-meter span {
-  transition: width .35s ease;
+.cache-meter-graphic {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
-.cache-read {
-  background: var(--lime);
+.cache-meter rect {
+  transition: width .35s ease, x .35s ease;
+}
+
+.cache-meter .cache-read {
+  fill: var(--lime);
 }
 
 .cache-write {
   background: var(--purple);
 }
 
-.cache-uncached {
-  background: #3a414f;
+.cache-meter .cache-uncached {
+  fill: #3a414f;
 }
 
 .portion-0 { flex: 0; height: 0; }
@@ -620,10 +625,6 @@
 .portion-18 { flex: 18; height: 90%; }
 .portion-19 { flex: 19; height: 95%; }
 .portion-20 { flex: 20; height: 100%; }
-
-.cache-meter span {
-  height: 100%;
-}
 
 .cache-legend {
   display: flex;

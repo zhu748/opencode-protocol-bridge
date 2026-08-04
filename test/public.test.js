@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 const publicDir = resolve(import.meta.dirname, '../public');
+const projectDir = resolve(publicDir, '..');
 
 test('管理面板脚本引用的静态元素均存在', async () => {
   const [html, script, settings] = await Promise.all([
@@ -22,9 +23,21 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /function filteredLogs\(\)/);
   assert.match(script, /navigator\.clipboard\.writeText\(button\.dataset\.copyValue\)/);
   assert.match(script, /requestLogsToCsv\(items\)/);
+  assert.match(html, /<svg class="cache-meter-graphic" viewBox="0 0 100 12"/);
+  assert.match(script, /querySelector\('\.cache-read'\)\.setAttribute\('width'/);
+  assert.match(script, /querySelector\('\.cache-uncached'\)\.setAttribute\('x'/);
+  assert.doesNotMatch(script, /querySelector\('\.cache-(?:read|uncached)'\)\.className/);
+  assert.match(script, /指标与分组：\$\{range\} · 趋势：\$\{trendRange\}/);
   assert.match(settings, /@media \(max-width: 1200px\)[\s\S]*?\.log-toolbar/);
   assert.match(settings, /@media \(max-width: 1000px\)[\s\S]*?\.log-toolbar/);
   assert.match(settings, /@media \(max-width: 720px\)[\s\S]*?\.log-toolbar/);
+});
+
+test('Render Blueprint 暴露批量 Key 与逐项代理变量', async () => {
+  const blueprint = await readFile(resolve(projectDir, 'render.yaml'), 'utf8');
+  for (const name of ['OPENCODE_ZEN_KEYS', 'OPENCODE_GO_KEYS', 'OPENCODE_ZEN_PROXY_URLS', 'OPENCODE_GO_PROXY_URLS']) {
+    assert.equal((blueprint.match(new RegExp(`key: ${name}\\b`, 'g')) || []).length, 1, `${name} 应出现一次`);
+  }
 });
 
 test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async () => {

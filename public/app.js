@@ -309,15 +309,19 @@ function renderStats(stats) {
   $('#stats-cache-hit-rate').textContent = summary.usageRequests ? formatPercentage(summary.cacheHitRequestRate) : '—';
   $('#stats-cache-hit-detail').textContent = `${formatNumber(summary.cacheHitRequests)} 个请求命中缓存 · ${formatNumber(summary.cacheWriteRequests)} 个请求写入缓存`;
   const totalInput = summary.inputTokens || 0;
-  const readShare = totalInput ? summary.cachedInputTokens / totalInput * 100 : 0;
+  const readShare = totalInput ? Math.min(100, Math.max(0, summary.cachedInputTokens / totalInput * 100)) : 0;
   const writeShare = totalInput ? summary.cacheCreationInputTokens / totalInput * 100 : 0;
-  const uncachedShare = Math.max(0, 100 - readShare);
+  const uncachedShare = totalInput ? 100 - readShare : 0;
   const meter = $('#stats-cache-meter');
-  meter.querySelector('.cache-read').className = `cache-read ${portionClass(readShare, 100)}`;
-  meter.querySelector('.cache-uncached').className = `cache-uncached ${portionClass(totalInput ? uncachedShare : 100, 100)}`;
-  meter.setAttribute('aria-label', `缓存读取 ${summary.cacheReadRate}%，未缓存 ${totalInput ? uncachedShare.toFixed(1) : 0}%；缓存写入 ${totalInput ? (writeShare).toFixed(1) : 0}% 为独立指标`);
+  meter.querySelector('.cache-read').setAttribute('width', readShare.toFixed(4));
+  meter.querySelector('.cache-uncached').setAttribute('x', readShare.toFixed(4));
+  meter.querySelector('.cache-uncached').setAttribute('width', uncachedShare.toFixed(4));
+  meter.setAttribute('aria-label', totalInput
+    ? `缓存读取 ${readShare.toFixed(1)}%，未缓存 ${uncachedShare.toFixed(1)}%；缓存写入 ${writeShare.toFixed(1)}% 为独立指标`
+    : '尚无输入 Token，暂无缓存用量');
   const range = stats.window === 'all' ? '全部保留记录' : stats.window === '24h' ? '最近 24 小时' : '最近 7 天';
-  $('#stats-scope').textContent = `统计范围：${range} · 当前共保留 ${formatNumber(stats.retainedRequests)} 条元数据 · 生成于 ${new Date(stats.generatedAt).toLocaleString()}`;
+  const trendRange = stats.timeline?.range === '24h' ? '最近 24 小时' : stats.timeline?.range === '7d' ? '最近 7 天' : '最近 14 天';
+  $('#stats-scope').textContent = `指标与分组：${range} · 趋势：${trendRange} · 当前共保留 ${formatNumber(stats.retainedRequests)} 条元数据 · 生成于 ${new Date(stats.generatedAt).toLocaleString()}`;
   renderStatsRows('#stats-provider-rows', stats.byProvider);
   renderCredentialRows(stats.byCredential, stats.credentialHealth);
   renderStatsRows('#stats-model-rows', stats.byModel);

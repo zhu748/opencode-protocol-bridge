@@ -32,6 +32,14 @@ services:
         sync: false
       - key: OPENCODE_GO_PROXY_URL
         sync: false
+      - key: OPENCODE_ZEN_KEYS
+        sync: false
+      - key: OPENCODE_GO_KEYS
+        sync: false
+      - key: OPENCODE_ZEN_PROXY_URLS
+        sync: false
+      - key: OPENCODE_GO_PROXY_URLS
+        sync: false
       - key: OPENCODE_ZEN_KEY_1
         sync: false
       - key: OPENCODE_ZEN_KEY_2

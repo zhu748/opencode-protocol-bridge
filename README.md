@@ -86,10 +86,11 @@ Compose 默认只映射到本机 `127.0.0.1:8787`，配置保存在命名卷 `br
 
 - `OPENCODE_BRIDGE_ADMIN_PASSWORD`：**必填，不可留空**的管理面板密码，至少 6 位，仅使用英文字母或数字。
 - `OPENCODE_BRIDGE_CLIENT_TOKEN`：**必填，不可留空**的客户端调用令牌，至少 6 位，仅使用英文字母或数字。
-- `OPENCODE_ZEN_KEY_1...4` / `OPENCODE_GO_KEY_1...4`：按需要填写多把 Key，至少配置一把。
-- 每把 Key 的同编号 `*_PROXY_URL_1...4` 可独立填写 HTTP(S) 或 SOCKS 地址，不需要代理时留空。
+- `OPENCODE_ZEN_KEYS` / `OPENCODE_GO_KEYS`：推荐的批量配置，支持 JSON 数组、逗号或换行分隔，最多 32 把；至少配置一个上游的一把 Key。
+- `OPENCODE_ZEN_PROXY_URLS` / `OPENCODE_GO_PROXY_URLS`：与批量 Key 逐项对应的 HTTP(S) 或 SOCKS 代理列表；需要保留空代理槽位时使用 JSON 数组中的空字符串。
+- `OPENCODE_ZEN_KEY_1...4` / `OPENCODE_GO_KEY_1...4` 及同编号 `*_PROXY_URL_1...4`：少量 Key 的独立输入方式；未使用的槽位留空。
 
-`CONFIG_ENCRYPTION_KEY` 由 Render 自动生成，`HOST=0.0.0.0`、`OPENCODE_BRIDGE_TRUST_PROXY=true` 和 `OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP=true` 已在 Blueprint 中设置，`PORT` 由 Render 自动注入。最后一项会在这两项必填 Secret 缺失时拒绝启动，避免首次公网访问者抢先初始化控制台。可信代理开关使登录限速按 Render 提供的真实客户端地址隔离，普通自托管部署默认不信任转发头。编号环境 Key 在运行时优先于管理面板保存的 Key 池，并按请求轮询；每把 Key 使用同编号代理。面板 Key 池同样最多支持 32 把，每项可单独命名、测试和设置代理；旧版保存的单 Key 会在首次编辑时自动迁移。401/403 会让对应 Key 立即冷却，429 会优先采用上游 `Retry-After`，并在同一请求内安全切换到下一把健康 Key；响应头 `x-opencode-key-attempts` 会在发生切换时给出尝试次数。网络错误或 5xx 不会自动重放推理请求，以避免重复计费或重复工具调用；幂等的模型发现请求则会安全尝试下一把健康 Key。连续三次网络错误或 5xx 后对应 Key 会进入指数冷却。冷却结束后 Key 自动重新参与轮询，也可在管理面板的 Key 健康表中手动重置。健康状态只保存在当前进程内，替换同一槽位的 Key 或代理不会继承旧状态。环境变量引导仅在配置文件中还没有管理密码时执行，不会覆盖已存在的持久化配置。
+`CONFIG_ENCRYPTION_KEY` 由 Render 自动生成，`HOST=0.0.0.0`、`OPENCODE_BRIDGE_TRUST_PROXY=true` 和 `OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP=true` 已在 Blueprint 中设置，`PORT` 由 Render 自动注入。最后一项会在这两项必填 Secret 缺失时拒绝启动，避免首次公网访问者抢先初始化控制台。可信代理开关使登录限速按 Render 提供的真实客户端地址隔离，普通自托管部署默认不信任转发头。批量 `*_KEYS` 非空时优先于编号变量，任一环境变量 Key 池又优先于管理面板保存的 Key 池；Key 按请求轮询，每把使用对应位置或同编号代理。面板 Key 池同样最多支持 32 把，每项可单独命名、测试和设置代理；旧版保存的单 Key 会在首次编辑时自动迁移。401/403 会让对应 Key 立即冷却，429 会优先采用上游 `Retry-After`，并在同一请求内安全切换到下一把健康 Key；响应头 `x-opencode-key-attempts` 会在发生切换时给出尝试次数。网络错误或 5xx 不会自动重放推理请求，以避免重复计费或重复工具调用；幂等的模型发现请求则会安全尝试下一把健康 Key。连续三次网络错误或 5xx 后对应 Key 会进入指数冷却。冷却结束后 Key 自动重新参与轮询，也可在管理面板的 Key 健康表中手动重置。健康状态只保存在当前进程内，替换同一槽位的 Key 或代理不会继承旧状态。环境变量引导仅在配置文件中还没有管理密码时执行，不会覆盖已存在的持久化配置。
 
 Render 免费 Web Service 的文件系统是临时的，闲置 15 分钟后会休眠，休眠、重启或重新部署会丢失管理面板写入的本地配置。因此免费部署应把长期使用的密码、令牌、Key 和代理保存为 Render Secret；实例恢复时项目会从这些变量重新生成加密配置。面板中临时修改的模型路由、替换规则和客户端列表也会在实例文件系统重置后恢复默认；内存中的请求日志、用量/缓存统计、Key 健康与冷却状态，以及最近 Claude system 快照也会清空。即使启用了持久化日志，免费实例重启后该文件同样不会保留。需要永久保留面板修改时，应升级到支持 Persistent Disk 的付费实例并将磁盘挂载到 `/opt/render/project/src/data`。详见 [Render 免费实例限制](https://render.com/docs/free) 与 [Persistent Disks](https://render.com/docs/disks)。
 
