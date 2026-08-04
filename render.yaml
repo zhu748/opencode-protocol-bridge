@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: opencode-protocol-bridge
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 30
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: CONFIG_ENCRYPTION_KEY
+        generateValue: true
+      - key: OPENCODE_BRIDGE_ADMIN_PASSWORD
+        sync: false
+      - key: OPENCODE_BRIDGE_CLIENT_TOKEN
+        sync: false
+      - key: OPENCODE_ZEN_KEY
+        sync: false
+      - key: OPENCODE_GO_KEY
+        sync: false
+      - key: OPENCODE_PROXY_URL
+        sync: false
+      - key: OPENCODE_ZEN_PROXY_URL
+        sync: false
+      - key: OPENCODE_GO_PROXY_URL
+        sync: false

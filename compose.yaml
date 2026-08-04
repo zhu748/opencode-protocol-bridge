@@ -1,0 +1,15 @@
+services:
+  bridge:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - bridge-data:/app/data
+    environment:
+      PORT: "8787"
+      HOST: "0.0.0.0"
+      CONFIG_ENCRYPTION_KEY: "${CONFIG_ENCRYPTION_KEY:-}"
+
+volumes:
+  bridge-data:

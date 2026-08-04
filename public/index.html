@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCode Bridge</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/settings.css">
+</head>
+<body>
+  <div class="glow glow-a"></div><div class="glow glow-b"></div>
+  <div id="auth" class="auth-shell hidden">
+    <section class="auth-card">
+      <div class="mark">OC</div>
+      <p class="eyebrow">OPENCODE PROTOCOL BRIDGE</p>
+      <h1 id="auth-title">欢迎回来</h1>
+      <p id="auth-copy" class="muted">输入管理密码以打开控制台。</p>
+      <form id="auth-form">
+        <label>管理密码<input id="password" type="password" minlength="8" required autocomplete="current-password" placeholder="至少 8 个字符"></label>
+        <button class="primary" type="submit"><span id="auth-action">登录</span><span>→</span></button>
+        <p id="auth-error" class="error"></p>
+      </form>
+    </section>
+  </div>
+
+  <div id="app" class="app hidden">
+    <aside>
+      <div class="brand"><div class="mark small">OC</div><div><strong>Bridge</strong><span>Protocol console</span></div></div>
+      <nav>
+        <button class="active" data-view="overview"><i>⌁</i>概览</button>
+        <button data-view="settings"><i>⚙</i>连接设置</button>
+        <button data-view="routes"><i>↗</i>模型路由</button>
+        <button data-view="prompts"><i>✎</i>提示词规则</button>
+        <button data-view="clients"><i>⌘</i>访问令牌</button>
+        <button data-view="logs"><i>≡</i>请求记录</button>
+        <button data-view="guide"><i>?</i>接入指南</button>
+      </nav>
+      <div class="side-foot"><span class="dot"></span><div><strong>服务在线</strong><small>OpenCode Zen / Go</small></div><button id="logout" class="side-logout" title="退出登录">↪</button></div>
+    </aside>
+    <main>
+      <header><div><p class="eyebrow">CONTROL CENTER</p><h2 id="page-title">运行概览</h2></div><button id="refresh" class="icon-btn" title="刷新">↻</button></header>
+
+      <section id="overview" class="view active">
+        <div class="hero">
+          <div><span id="service-state" class="pill">● READY</span><h1>一个端点，<br><em>三种协议。</em></h1><p>将 Claude Messages、OpenAI Responses 与 Chat Completions 请求无缝转发至 OpenCode 官方服务。</p></div>
+          <div class="protocol-orbit"><div class="core">OC</div><span class="p1">Claude</span><span class="p2">Responses</span><span class="p3">Chat</span></div>
+        </div>
+        <div class="stats">
+          <article><span>接口地址</span><strong id="base-url">—</strong><small>本机中转端点</small></article>
+          <article><span>Zen 密钥</span><strong id="zen-state">未配置</strong><small id="zen-proxy-state">直连</small></article>
+          <article><span>Go 密钥</span><strong id="go-state">未配置</strong><small id="go-proxy-state">直连</small></article>
+          <article><span>最近请求</span><strong id="request-count">0</strong><small id="request-summary">内存日志条目</small></article>
+        </div>
+        <div class="panel"><div class="panel-head"><div><h3>快速接入</h3><p>使用路径明确选择 OpenCode Zen 或 Go</p></div><span class="client-actions"><button class="ghost copy" data-copy="zen">复制 Zen</button><button class="ghost copy" data-copy="go">复制 Go</button></span></div><code id="endpoint-code">http://localhost:8787/zen/v1</code><code id="go-endpoint-code">http://localhost:8787/go/v1</code></div>
+      </section>
+
+      <section id="settings" class="view">
+        <div class="section-intro"><h3>连接设置</h3><p>密钥保存在本机 <code>data/config.json</code>，页面只显示遮罩。<span id="encryption-state" class="security-state"></span></p></div>
+        <form id="settings-form" class="panel form-grid">
+          <label>默认上游<select id="defaultProvider"><option value="zen">OpenCode Zen</option><option value="go">OpenCode Go</option></select></label>
+          <label>默认代理（可选回退）<input id="proxyUrl" autocomplete="off" placeholder="http://127.0.0.1:7890"><small>仅在对应 Key 未设置独立代理时使用；留空保持原值</small><span class="field-tools"><button type="button" class="link-btn clear-proxy" data-provider="default">清除默认代理</button></span></label>
+          <label>Zen API Key<input id="zenKey" type="password" autocomplete="off" placeholder="留空则保持原值"><span class="field-tools"><button type="button" class="link-btn test-key" data-provider="zen">测试连接</button><button type="button" class="link-btn clear-key" data-provider="zen">清除密钥</button></span></label>
+          <label>Zen Key 独立代理<input id="zenProxyUrl" autocomplete="off" placeholder="socks5h://user:pass@127.0.0.1:1080"><small>留空保持原值或使用默认代理；支持 HTTP(S)、SOCKS4/4a/5/5h</small><span class="field-tools"><button type="button" class="link-btn clear-proxy" data-provider="zen">清除 Zen 代理</button></span></label>
+          <label>Go API Key<input id="goKey" type="password" autocomplete="off" placeholder="留空则保持原值"><span class="field-tools"><button type="button" class="link-btn test-key" data-provider="go">测试连接</button><button type="button" class="link-btn clear-key" data-provider="go">清除密钥</button></span></label>
+          <label>Go Key 独立代理<input id="goProxyUrl" autocomplete="off" placeholder="http://user:pass@127.0.0.1:7890"><small>留空保持原值或使用默认代理；支持 HTTP(S)、SOCKS4/4a/5/5h</small><span class="field-tools"><button type="button" class="link-btn clear-proxy" data-provider="go">清除 Go 代理</button></span></label>
+          <label>主访问令牌<input id="clientToken" type="password" autocomplete="off" placeholder="留空则保持原值"></label>
+          <label>日志保留条数<input id="requestLogLimit" type="number" min="10" max="1000"></label>
+          <label class="check-field"><input id="persistLogs" type="checkbox"><span>持久化请求日志<small>仅保存请求元数据，不保存提示词和响应正文</small></span></label>
+          <label>上游超时（毫秒）<input id="upstreamTimeoutMs" type="number" min="1000" max="600000" step="1000"></label>
+          <label>最大并发请求<input id="maxConcurrentRequests" type="number" min="1" max="1000"></label>
+          <div class="form-actions"><button type="button" id="regen-token" class="ghost">重新生成访问令牌</button><button type="submit" class="primary compact">保存设置</button></div>
+        </form>
+        <form id="password-form" class="panel inline-form"><div><h3>修改管理密码</h3><p>修改后所有现有登录会话都会失效。</p></div><input id="currentPassword" type="password" placeholder="当前密码" required><input id="newPassword" type="password" minlength="8" placeholder="新密码" required><button class="ghost" type="submit">修改</button></form>
+      </section>
+
+      <section id="routes" class="view">
+        <div class="section-intro"><h3>模型路由</h3><p>为特定模型覆盖上游、协议或模型名。未匹配时自动判断协议。</p></div>
+        <div class="panel route-builder">
+          <input id="routeModel" placeholder="客户端模型名，例如 coding-model">
+          <select id="routeProvider"><option value="zen">Zen</option><option value="go">Go</option></select>
+          <select id="routeProtocol"><option value="auto">自动协议</option><option value="claude">Claude</option><option value="responses">Responses</option><option value="chat">Chat</option></select>
+          <select id="routeToolChoice"><option value="">标准工具选择</option><option value="auto">工具选择降级为 auto</option></select>
+          <input id="routeUpstream" placeholder="上游模型名（留空则相同）">
+          <button id="add-route" class="ghost" type="button">添加到编辑器</button>
+        </div>
+        <div id="route-list" class="route-list"></div>
+        <div class="panel"><div class="panel-head"><div><h3>路由 JSON</h3><p>protocol 可选 auto / claude / responses / chat；toolChoiceFallback 仅支持 auto</p></div><button id="save-routes" class="primary compact">保存路由</button></div><textarea id="modelRoutes" spellcheck="false" rows="18"></textarea><p class="hint">示例：<code>{ "deepseek-free": { "provider": "zen", "protocol": "chat", "upstreamModel": "deepseek-v4-flash-free", "toolChoiceFallback": "auto" } }</code></p></div>
+      </section>
+
+      <section id="prompts" class="view">
+        <div class="section-intro"><h3>Claude system 提示词规则</h3><p>在发送上游前按顺序执行精确字面量删除或替换。规则写入配置；最近请求原文和结果仅保存在当前进程内。</p></div>
+        <div class="panel">
+          <div class="panel-head"><div><h3>规则管理</h3><p>查找内容按原文精确匹配；替换内容留空即删除。最多 50 条、总内容 1 MiB。</p></div><span class="client-actions"><button id="restore-prompt-rules" class="ghost" type="button">恢复默认</button><button id="save-prompt-rules" class="primary compact" type="button">保存设置</button></span></div>
+          <form id="prompt-rule-form" class="prompt-rule-builder">
+            <input id="promptRuleName" maxlength="100" placeholder="规则名称" required>
+            <label class="prompt-rule-enabled"><input id="promptRuleEnabled" type="checkbox" checked><span>启用</span></label>
+            <label>查找内容<textarea id="promptRuleFind" spellcheck="false" rows="5" placeholder="粘贴要替换或删除的 Claude system 原文" required></textarea></label>
+            <label>替换内容<textarea id="promptRuleReplace" spellcheck="false" rows="5" placeholder="留空表示删除"></textarea></label>
+            <span class="client-actions"><button id="cancel-prompt-rule" class="ghost hidden" type="button">取消编辑</button><button id="submit-prompt-rule" class="primary compact" type="submit">添加规则</button></span>
+          </form>
+          <div id="prompt-rule-list" class="prompt-rule-list"></div>
+          <details class="advanced-editor"><summary>高级：直接编辑规则 JSON</summary><textarea id="promptRules" spellcheck="false" rows="16"></textarea></details>
+        </div>
+        <div class="panel prompt-recent">
+          <div class="panel-head"><div><h3>最近一次 Claude 请求</h3><p>只保存在当前进程内，不写日志或配置文件；最多保留原始与最终提示词各 1 MiB。</p></div><span class="client-actions"><button id="preview-prompt" class="ghost" type="button">预览当前设置</button><button id="refresh-prompt" class="ghost" type="button">刷新</button><button id="clear-prompt" class="ghost danger" type="button">清除</button></span></div>
+          <p id="prompt-meta" class="prompt-meta">还没有收到 Claude Messages 请求</p>
+          <div><h4 class="prompt-status-title">本次请求的规则状态</h4><div id="prompt-rule-results" class="prompt-rule-results"><p class="empty-inline">收到 Claude 请求后显示</p></div></div>
+          <div class="prompt-columns">
+            <label>收到的 Claude 格式 system 提示词<textarea id="promptOriginal" readonly spellcheck="false" rows="18"></textarea><span class="field-tools"><button id="add-prompt-rule" class="link-btn" type="button">用选中内容创建规则</button><button id="copy-prompt-original" class="link-btn" type="button">复制收到内容</button></span></label>
+            <label>最终发送给上游的 system 提示词<textarea id="promptFinal" readonly spellcheck="false" rows="18"></textarea><span class="field-tools"><button id="copy-prompt-final" class="link-btn" type="button">复制发出内容</button></span></label>
+          </div>
+        </div>
+      </section>
+
+      <section id="clients" class="view">
+        <div class="section-intro"><h3>命名客户端令牌</h3><p>为不同 OpenCode 实例创建独立令牌，可单独停用、撤销和限制并发。令牌仅在创建时显示一次。</p></div>
+        <form id="client-form" class="panel client-builder">
+          <input id="clientName" maxlength="64" placeholder="客户端名称，例如 工作电脑" required>
+          <input id="clientConcurrency" type="number" min="1" max="1000" value="5" required>
+          <button class="primary compact" type="submit">生成客户端令牌</button>
+        </form>
+        <div class="panel table-wrap"><table><thead><tr><th>名称</th><th>令牌前缀</th><th>状态</th><th>并发上限</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="client-rows"></tbody></table><div id="empty-clients" class="empty">还没有命名客户端，主令牌仍可正常使用</div></div>
+      </section>
+
+      <section id="logs" class="view">
+        <div class="section-intro row"><div><h3>请求记录</h3><p>仅记录元数据，不记录提示词、响应正文或密钥。</p></div><button id="clear-logs" class="ghost danger">清空记录</button></div>
+        <div class="panel table-wrap"><table><thead><tr><th>时间</th><th>请求 ID</th><th>客户端</th><th>模型</th><th>上游</th><th>协议转换</th><th>状态</th><th>令牌</th><th>耗时</th></tr></thead><tbody id="log-rows"></tbody></table><div id="empty-logs" class="empty">还没有请求记录</div></div>
+      </section>
+
+      <section id="guide" class="view">
+        <div class="section-intro"><h3>接入指南</h3><p>三种常用客户端协议均可直接调用。</p></div>
+        <div class="guide-grid">
+          <article class="panel"><span class="tag purple">CLAUDE</span><h3>Messages API</h3><code>POST /zen/v1/messages</code><pre id="claude-example"></pre></article>
+          <article class="panel"><span class="tag green">OPENAI</span><h3>Responses API</h3><code>POST /zen/v1/responses</code><pre id="responses-example"></pre></article>
+          <article class="panel"><span class="tag orange">COMPATIBLE</span><h3>Chat Completions</h3><code>POST /go/v1/chat/completions</code><pre id="chat-example"></pre></article>
+          <article class="panel"><span class="tag green">OPENCODE</span><h3>opencode.json</h3><code>@ai-sdk/openai-compatible</code><pre id="opencode-example"></pre></article>
+        </div>
+      </section>
+      <div id="toast"></div>
+    </main>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

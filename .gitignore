@@ -1,0 +1,6 @@
+node_modules/
+data/config.json
+data/request-logs.json
+data/*.tmp
+.env
+npm-debug.log*

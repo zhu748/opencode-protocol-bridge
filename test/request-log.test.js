@@ -1,0 +1,71 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { readFile, unlink, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { RequestLogStore } from '../src/request-log.js';
+
+test('持久化日志遵守数量上限并可由新实例恢复', async () => {
+  const file = resolve(import.meta.dirname, `../data/log-${randomUUID()}.json`);
+  try {
+    const store = new RequestLogStore(file);
+    for (let index = 0; index < 15; index++) {
+      await store.add({ requestId: `r${index}`, time: new Date(1_700_000_000_000 + index).toISOString(), status: 200, prompt: '绝不能写入', apiKey: 'secret' }, { persist: true, limit: 20 });
+    }
+    await store.flush();
+    assert.equal(store.list().length, 15);
+    assert.equal(store.list()[0].requestId, 'r14');
+    const persisted = JSON.parse(await readFile(file, 'utf8'));
+    assert.equal(persisted.length, 15);
+    assert.doesNotMatch(JSON.stringify(persisted), /绝不能写入|secret/);
+
+    const reloaded = new RequestLogStore(file);
+    await reloaded.ensureLoaded({ persist: true, limit: 20 });
+    assert.deepEqual(reloaded.list().map((item) => item.requestId), store.list().map((item) => item.requestId));
+    await reloaded.configure({ persist: true, limit: 10 });
+    assert.equal(reloaded.list().length, 10);
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).length, 10);
+    await reloaded.clear({ persist: false, limit: 10 });
+    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), []);
+  } finally {
+    await unlink(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('损坏的日志文件不会阻止服务启动并会暴露诊断信息', async () => {
+  const file = resolve(import.meta.dirname, `../data/log-${randomUUID()}.json`);
+  try {
+    await writeFile(file, '{broken', 'utf8');
+    const store = new RequestLogStore(file);
+    await store.ensureLoaded({ persist: true, limit: 100 });
+    assert.deepEqual(store.list(), []);
+    assert.match(store.lastError, /无法读取持久化日志/);
+    await store.configure({ persist: false, limit: 100 });
+    assert.equal(store.lastError, '');
+  } finally {
+    await unlink(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('日志会保留缓存读取、缓存写入和推理 token', async () => {
+  const store = new RequestLogStore('unused.json');
+  await store.add({ requestId: 'usage', inputTokens: 10, outputTokens: 4, cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningTokens: 1 });
+  assert.deepEqual(store.list()[0], {
+    time: '', requestId: 'usage', clientId: '', clientName: '', model: '', provider: '', protocol: '',
+    status: 0, duration: 0, stream: false, inputTokens: 10, outputTokens: 4,
+    cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningTokens: 1
+  });
+});
+
+test('关闭持久化会取消尚未执行的延迟写盘', async () => {
+  const file = resolve(import.meta.dirname, `../data/log-${randomUUID()}.json`);
+  try {
+    const store = new RequestLogStore(file);
+    await store.add({ requestId: 'pending', status: 200 }, { persist: true, limit: 100 });
+    await store.configure({ persist: false, limit: 100 });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 350));
+    await assert.rejects(readFile(file, 'utf8'), (error) => error.code === 'ENOENT');
+  } finally {
+    await unlink(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
