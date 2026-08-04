@@ -18,6 +18,7 @@ const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('PORT 必须是 1–65535 之间的整数');
 const TRUST_PROXY = /^(?:1|true)$/i.test(String(process.env.OPENCODE_BRIDGE_TRUST_PROXY || ''));
+const REQUIRE_ENV_BOOTSTRAP = /^(?:1|true)$/i.test(String(process.env.OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP || ''));
 const PUBLIC = join(ROOT, 'public');
 const requestLogs = new RequestLogStore(process.env.LOG_FILE || resolve(ROOT, 'data', 'request-logs.json'));
 let setupInProgress = false;
@@ -300,10 +301,13 @@ function runtimePublicConfig(config) {
 }
 
 async function bootstrapConfigFromEnvironment() {
-  const adminPassword = process.env.OPENCODE_BRIDGE_ADMIN_PASSWORD;
-  if (!adminPassword) return;
   const current = await loadConfig();
   if (current.password) return;
+  const adminPassword = String(process.env.OPENCODE_BRIDGE_ADMIN_PASSWORD || '').trim();
+  if (!adminPassword) {
+    if (REQUIRE_ENV_BOOTSTRAP) throw new Error('启用了 OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP 时必须配置 OPENCODE_BRIDGE_ADMIN_PASSWORD');
+    return;
+  }
   if (!validAlphaNumericSecret(adminPassword)) throw new Error('OPENCODE_BRIDGE_ADMIN_PASSWORD 必须是 6–256 位英文字母或数字');
 
   const secret = (name, fallback = '') => {
@@ -311,7 +315,9 @@ async function bootstrapConfigFromEnvironment() {
     if (value.length > 4096) throw new Error(`${name} 不能超过 4096 个字符`);
     return value;
   };
-  const clientToken = secret('OPENCODE_BRIDGE_CLIENT_TOKEN', randomClientToken());
+  const configuredClientToken = secret('OPENCODE_BRIDGE_CLIENT_TOKEN');
+  if (REQUIRE_ENV_BOOTSTRAP && !configuredClientToken) throw new Error('启用了 OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP 时必须配置 OPENCODE_BRIDGE_CLIENT_TOKEN');
+  const clientToken = configuredClientToken || randomClientToken();
   if (!validAlphaNumericSecret(clientToken)) throw new Error('OPENCODE_BRIDGE_CLIENT_TOKEN 必须是 6–256 位英文字母或数字');
   const defaultProvider = String(process.env.OPENCODE_BRIDGE_DEFAULT_PROVIDER || current.defaultProvider).trim().toLowerCase();
   if (!['zen', 'go'].includes(defaultProvider)) throw new Error('OPENCODE_BRIDGE_DEFAULT_PROVIDER 仅支持 zen 或 go');
@@ -610,7 +616,7 @@ async function adminApi(req, res, url, config) {
   }
   if (url.pathname === '/api/logs' && req.method === 'GET') {
     await requestLogs.ensureLoaded({ limit: config.requestLogLimit, persist: config.persistLogs });
-    if (config.persistLogs) await requestLogs.flush();
+    if (config.persistLogs) await requestLogs.flush().catch(() => {});
     return json(res, 200, requestLogs.list(config.requestLogLimit));
   }
   if (url.pathname === '/api/logs' && req.method === 'DELETE') {
@@ -1154,6 +1160,7 @@ function shutdown(signal) {
     }
     await finalizeShutdown(0, forceExit);
   });
+  server.closeIdleConnections?.();
 }
 
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => shutdown(signal));

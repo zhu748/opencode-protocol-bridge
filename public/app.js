@@ -68,7 +68,8 @@ async function refresh() {
   $('#zen-proxy-state').textContent = config.zenProxyConfigured ? '使用 Zen 独立代理' : config.proxyConfigured ? '使用默认代理' : '直连上游';
   $('#go-proxy-state').textContent = config.goProxyConfigured ? '使用 Go 独立代理' : config.proxyConfigured ? '使用默认代理' : '直连上游';
   $('#request-count').textContent = requestLogItems.length;
-  $('#request-summary').textContent = `${status.successRate}% 成功 · 活跃 ${status.activeRequests} · 平均 ${status.averageDuration} ms · ${status.memoryMb} MiB${status.logPersistenceError ? ' · 日志异常' : ''}`;
+  const successSummary = status.requests ? `${formatPercentage(status.successRate)} 成功` : '暂无请求';
+  $('#request-summary').textContent = `${successSummary} · 活跃 ${status.activeRequests} · 平均 ${status.averageDuration} ms · ${status.memoryMb} MiB${status.logPersistenceError ? ' · 日志异常' : ''}`;
   $('#request-summary').title = status.logPersistenceError || '';
   $('#service-state').textContent = status.ready ? '● READY' : '● 待配置';
   $('#service-state').classList.toggle('warning', !status.ready);
@@ -234,7 +235,7 @@ function updateCooldownCountdowns() {
 }
 
 function renderStatsRows(selector, items) {
-  $(selector).innerHTML = items.length ? items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${formatNumber(item.requests)}</td><td>${item.successRate}%</td><td>${formatNumber(item.totalTokens)}</td><td>${item.cacheReadRate}%</td><td>${formatDuration(item.averageDurationMs)}</td></tr>`).join('') : '<tr><td colspan="6" class="stats-empty">暂无数据</td></tr>';
+  $(selector).innerHTML = items.length ? items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${formatNumber(item.requests)}</td><td>${formatPercentage(item.successRate)}</td><td>${formatNumber(item.totalTokens)}</td><td>${formatPercentage(item.cacheReadRate)}</td><td>${formatDuration(item.averageDurationMs)}</td></tr>`).join('') : '<tr><td colspan="6" class="stats-empty">暂无数据</td></tr>';
 }
 
 function renderCredentialRows(history, health) {
@@ -248,7 +249,7 @@ function renderCredentialRows(history, health) {
   };
   const failureLabels = { auth: '鉴权失败', rate_limit: '上游限流', transient: '上游 5xx', network: '网络故障' };
   $('#stats-credential-rows').innerHTML = names.length ? names.map((name) => {
-    const usage = historyByName.get(name) || { requests: 0, successRate: 100, totalTokens: 0, cacheReadRate: 0, averageDurationMs: 0 };
+    const usage = historyByName.get(name) || { requests: 0, successRate: null, totalTokens: 0, cacheReadRate: 0, averageDurationMs: 0 };
     const current = healthByName.get(name);
     const state = current?.state || 'historical';
     const [stateLabel, stateClass] = stateLabels[state] || stateLabels.unknown;
@@ -262,7 +263,7 @@ function renderCredentialRows(history, health) {
     const reset = current && !['healthy', 'unknown'].includes(state)
       ? `<button class="mini-btn reset-credential-health" data-provider="${escapeHtml(current.provider)}" data-credential-id="${escapeHtml(current.credentialId)}" type="button">重置</button>`
       : '';
-    return `<tr><td>${escapeHtml(name)}</td><td><div class="credential-health-state"><span class="credential-state ${stateClass}">${stateLabel}</span>${reset}</div>${cooldown}</td><td>${formatNumber(current?.consecutiveFailures || 0)}</td><td>${formatNumber(usage.requests)}</td><td>${usage.successRate}%</td><td>${formatNumber(usage.totalTokens)}</td><td>${usage.cacheReadRate}%</td><td>${formatDuration(usage.averageDurationMs)}</td><td class="credential-event">${recent}</td></tr>`;
+    return `<tr><td>${escapeHtml(name)}</td><td><div class="credential-health-state"><span class="credential-state ${stateClass}">${stateLabel}</span>${reset}</div>${cooldown}</td><td>${formatNumber(current?.consecutiveFailures || 0)}</td><td>${formatNumber(usage.requests)}</td><td>${formatPercentage(usage.successRate)}</td><td>${formatNumber(usage.totalTokens)}</td><td>${formatPercentage(usage.cacheReadRate)}</td><td>${formatDuration(usage.averageDurationMs)}</td><td class="credential-event">${recent}</td></tr>`;
   }).join('') : '<tr><td colspan="9" class="stats-empty">暂无已配置或历史 Key</td></tr>';
 }
 
@@ -291,8 +292,8 @@ function renderTimeline(timeline) {
 function renderStats(stats) {
   const summary = stats.summary;
   $('#stats-requests').textContent = formatNumber(summary.requests);
-  $('#stats-usage-coverage').textContent = `${summary.usageCoverageRate}% 含用量 · ${formatNumber(summary.missingUsageRequests)} 条缺失`;
-  $('#stats-success-rate').textContent = `${summary.successRate}%`;
+  $('#stats-usage-coverage').textContent = summary.requests ? `${formatPercentage(summary.usageCoverageRate)} 含用量 · ${formatNumber(summary.missingUsageRequests)} 条缺失` : '暂无请求数据';
+  $('#stats-success-rate').textContent = formatPercentage(summary.successRate);
   $('#stats-success-detail').textContent = `${formatNumber(summary.success)} 成功 · ${formatNumber(summary.errors)} 失败 · ${formatNumber(summary.failoverRequests)} 次自动切换`;
   $('#stats-avg-duration').textContent = formatDuration(summary.averageDurationMs);
   $('#stats-p95-duration').textContent = formatDuration(summary.p95DurationMs);
@@ -304,8 +305,8 @@ function renderStats(stats) {
   $('#stats-cached-tokens').textContent = formatNumber(summary.cachedInputTokens);
   $('#stats-cache-write-tokens').textContent = formatNumber(summary.cacheCreationInputTokens);
   $('#stats-uncached-input-tokens').textContent = formatNumber(summary.uncachedInputTokens);
-  $('#stats-cache-rate').textContent = `${summary.cacheReadRate}%`;
-  $('#stats-cache-hit-rate').textContent = `${summary.cacheHitRequestRate}%`;
+  $('#stats-cache-rate').textContent = formatPercentage(summary.cacheReadRate);
+  $('#stats-cache-hit-rate').textContent = summary.usageRequests ? formatPercentage(summary.cacheHitRequestRate) : '—';
   $('#stats-cache-hit-detail').textContent = `${formatNumber(summary.cacheHitRequests)} 个请求命中缓存 · ${formatNumber(summary.cacheWriteRequests)} 个请求写入缓存`;
   const totalInput = summary.inputTokens || 0;
   const readShare = totalInput ? summary.cachedInputTokens / totalInput * 100 : 0;
@@ -330,6 +331,12 @@ async function refreshStats() {
 }
 
 function escapeHtml(value = '') { const node = document.createElement('span'); node.textContent = value; return node.innerHTML; }
+
+function formatPercentage(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const number = Number(value);
+  return Number.isFinite(number) ? `${formatNumber(number)}%` : '—';
+}
 
 function renderProviderCredentials() {
   const groups = ['zen', 'go'].map((provider) => {

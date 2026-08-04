@@ -4,7 +4,8 @@ export function filterRequestLogs(items, { query = '', provider = 'all', status 
   const needle = String(query).trim().toLocaleLowerCase();
   const windowMs = TIME_WINDOWS[timeRange];
   return (Array.isArray(items) ? items : []).filter((item) => {
-    if (windowMs && (!Number.isFinite(Date.parse(item.time)) || Date.parse(item.time) < now - windowMs)) return false;
+    const timestamp = Date.parse(item.time);
+    if (windowMs && (!Number.isFinite(timestamp) || timestamp < now - windowMs || timestamp > now)) return false;
     if (provider !== 'all' && item.provider !== provider) return false;
     if (status === 'success' && !(item.status >= 200 && item.status < 400)) return false;
     if (status === 'client-error' && !(item.status >= 400 && item.status < 500 && item.status !== 429)) return false;

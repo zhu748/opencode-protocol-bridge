@@ -39,6 +39,13 @@ test('统计请求内 Key 自动切换次数', () => {
   assert.equal(result.summary.failoverAttempts, 1);
 });
 
+test('空统计不会把未知成功率或用量覆盖率伪装成 100%', () => {
+  const result = aggregateRequestStats([], 'all', now);
+  assert.equal(result.summary.requests, 0);
+  assert.equal(result.summary.successRate, null);
+  assert.equal(result.summary.usageCoverageRate, null);
+});
+
 test('时间趋势按范围生成固定桶并统计错误与 token', () => {
   const hourly = aggregateRequestStats(logs, '24h', now).timeline;
   assert.equal(hourly.bucket, 'hour');

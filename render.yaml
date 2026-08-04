@@ -16,6 +16,8 @@ services:
         value: 0.0.0.0
       - key: OPENCODE_BRIDGE_TRUST_PROXY
         value: true
+      - key: OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP
+        value: true
       - key: CONFIG_ENCRYPTION_KEY
         generateValue: true
       - key: OPENCODE_BRIDGE_ADMIN_PASSWORD

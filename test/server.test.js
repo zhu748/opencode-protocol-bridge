@@ -5,7 +5,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { once } from 'node:events';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { readFile, unlink } from 'node:fs/promises';
+import { readFile, unlink, writeFile } from 'node:fs/promises';
 
 test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 }, async () => {
   const port = 20_000 + Math.floor(Math.random() * 10_000);
@@ -526,6 +526,113 @@ test('可从 Render 环境变量引导完整配置且敏感值加密落盘', { t
     child.kill();
     await once(child, 'exit').catch(() => {});
     await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('Render 强制环境引导会拒绝缺少管理密码或客户端令牌的启动', { timeout: 10_000 }, async () => {
+  const scenarios = [
+    { name: '管理密码', adminPassword: '', clientToken: 'Api123', pattern: /OPENCODE_BRIDGE_ADMIN_PASSWORD/ },
+    { name: '客户端令牌', adminPassword: 'Admin123', clientToken: '', pattern: /OPENCODE_BRIDGE_CLIENT_TOKEN/ }
+  ];
+  for (const scenario of scenarios) {
+    const configFile = resolve(import.meta.dirname, `../data/render-required-${randomUUID()}.json`);
+    const child = spawn(process.execPath, ['src/server.js'], {
+      cwd: resolve(import.meta.dirname, '..'),
+      env: {
+        ...process.env,
+        HOST: '127.0.0.1', PORT: String(20_000 + Math.floor(Math.random() * 10_000)), CONFIG_FILE: configFile,
+        CONFIG_ENCRYPTION_KEY: 'render-required-master-key',
+        OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP: 'true',
+        OPENCODE_BRIDGE_ADMIN_PASSWORD: scenario.adminPassword,
+        OPENCODE_BRIDGE_CLIENT_TOKEN: scenario.clientToken
+      },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => { output += chunk.toString('utf8'); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString('utf8'); });
+    try {
+      const [code] = await Promise.race([
+        once(child, 'exit'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`缺少${scenario.name}时服务未按预期退出`)), 5_000))
+      ]);
+      assert.notEqual(code, 0);
+      assert.match(output, scenario.pattern);
+    } finally {
+      if (child.exitCode === null) {
+        child.kill();
+        await once(child, 'exit').catch(() => {});
+      }
+      await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    }
+  }
+});
+
+test('日志持久化写盘失败时后台仍可读取内存日志', { timeout: 10_000 }, async () => {
+  const upstream = createHttpServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'chatcmpl-log-failure', object: 'chat.completion', created: 1, model: 'deepseek-v4-flash',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 }
+    }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/log-failure-${randomUUID()}.json`);
+  const blocker = resolve(import.meta.dirname, `../data/log-blocker-${randomUUID()}`);
+  const logFile = resolve(blocker, 'request-logs.json');
+  await writeFile(blocker, 'not a directory', 'utf8');
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'),
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile, LOG_FILE: logFile,
+      CONFIG_ENCRYPTION_KEY: 'log-failure-master-key',
+      OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123', OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+      OPENCODE_BRIDGE_DEFAULT_PROVIDER: 'go', OPENCODE_GO_KEY: 'log-failure-key',
+      OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const proxy = await fetch(`http://127.0.0.1:${port}/go/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', input: 'log this request' })
+    });
+    assert.equal(proxy.status, 200);
+    await proxy.json();
+    const configured = await fetch(`http://127.0.0.1:${port}/api/config`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ defaultProvider: 'go', modelRoutes: {}, persistLogs: true })
+    });
+    assert.equal(configured.status, 200);
+    const logs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } });
+    assert.equal(logs.status, 200);
+    assert.equal((await logs.json()).length, 1);
+    const status = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+    assert.match(status.logPersistenceError, /无法写入持久化日志/);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    await unlink(blocker).catch((error) => { if (error.code !== 'ENOENT') throw error; });
   }
 });
 

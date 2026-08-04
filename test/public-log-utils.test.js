@@ -21,6 +21,15 @@ test('日志筛选可组合关键词、上游与互斥状态', () => {
   assert.deepEqual(filterRequestLogs(logs, { timeRange: '24h', now }).map((item) => item.requestId), ['local-success', 'local-rate']);
 });
 
+test('日志时间筛选不会把未来时间记录混入当前窗口', () => {
+  const now = Date.parse('2026-08-04T12:00:00.000Z');
+  const items = [
+    { time: '2026-08-04T11:00:00.000Z', status: 200 },
+    { time: '2026-08-04T13:00:00.000Z', status: 200 }
+  ];
+  assert.deepEqual(filterRequestLogs(items, { timeRange: '1h', now }), [items[0]]);
+});
+
 test('CSV 导出限定元数据字段并防止公式注入', () => {
   const csv = requestLogsToCsv([{
     time: '2026-08-04T12:00:00Z', requestId: '=HYPERLINK("bad")', upstreamRequestId: '+cmd',
