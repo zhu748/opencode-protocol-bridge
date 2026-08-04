@@ -1,4 +1,5 @@
 import { compactIdentifier, filterRequestLogs, formatCooldownRemaining, requestLogsToCsv } from './log-utils.js';
+import { optionalLoad, summarizeSourceFailures } from './refresh-utils.js';
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -8,6 +9,9 @@ let recentPrompt = {};
 let editingPromptRuleIndex = -1;
 let editingProviderCredential = null;
 let requestLogItems = [];
+let clientItems = [];
+let serviceStatus = null;
+const dataSourceFailures = new Map();
 let toastTimer;
 
 async function api(path, options = {}) {
@@ -24,6 +28,43 @@ function toast(message) {
   const node = $('#toast'); node.textContent = message; node.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => node.classList.remove('show'), 2200);
+}
+
+function renderDataSourceFailures() {
+  const warning = $('#data-source-warning');
+  const summary = summarizeSourceFailures(dataSourceFailures);
+  warning.textContent = summary.message;
+  warning.title = summary.detail;
+  warning.classList.toggle('hidden', !summary.message);
+}
+
+async function loadDataSource(name, loader, fallback) {
+  const result = await optionalLoad(loader, fallback);
+  if (result.fresh) dataSourceFailures.delete(name);
+  else dataSourceFailures.set(name, result.error.message);
+  renderDataSourceFailures();
+  return result;
+}
+
+function renderRuntimeSummary() {
+  $('#request-count').textContent = requestLogItems.length;
+  const statusStale = dataSourceFailures.has('运行状态');
+  const logsStale = dataSourceFailures.has('请求日志');
+  if (serviceStatus) {
+    const successSummary = serviceStatus.requests ? `${formatPercentage(serviceStatus.successRate)} 成功` : '暂无请求';
+    $('#request-summary').textContent = `${successSummary} · 活跃 ${serviceStatus.activeRequests} · 平均 ${serviceStatus.averageDuration} ms · ${serviceStatus.memoryMb} MiB${serviceStatus.logPersistenceError ? ' · 日志异常' : ''}${statusStale ? ' · 状态未更新' : ''}${logsStale ? ' · 日志未更新' : ''}`;
+    $('#request-summary').title = serviceStatus.logPersistenceError || '';
+  } else {
+    $('#request-summary').textContent = `运行状态暂不可用${logsStale ? ' · 日志未更新' : ''}`;
+    $('#request-summary').title = dataSourceFailures.get('运行状态') || '';
+  }
+  if (statusStale || !serviceStatus) {
+    $('#service-state').textContent = serviceStatus ? '● 状态陈旧' : '● 状态未知';
+    $('#service-state').classList.add('warning');
+  } else {
+    $('#service-state').textContent = serviceStatus.ready ? '● READY' : '● 待配置';
+    $('#service-state').classList.toggle('warning', !serviceStatus.ready);
+  }
 }
 
 async function boot() {
@@ -50,11 +91,16 @@ $('#auth-form').addEventListener('submit', async (event) => {
 });
 
 async function refresh() {
-  const [nextConfig, nextRequestLogs, status, clients] = await Promise.all([
-    api('/api/config'), api('/api/logs'), api('/api/status'), api('/api/clients')
+  const [nextConfig, logsResult, statusResult, clientsResult] = await Promise.all([
+    api('/api/config'),
+    loadDataSource('请求日志', () => api('/api/logs'), requestLogItems),
+    loadDataSource('运行状态', () => api('/api/status'), serviceStatus),
+    loadDataSource('客户端列表', () => api('/api/clients'), clientItems)
   ]);
   config = nextConfig;
-  requestLogItems = nextRequestLogs;
+  requestLogItems = logsResult.value;
+  serviceStatus = statusResult.value;
+  clientItems = clientsResult.value;
   $('#base-url').textContent = location.origin;
   $('#endpoint-code').textContent = `${location.origin}/zen/v1`;
   $('#go-endpoint-code').textContent = `${location.origin}/go/v1`;
@@ -67,12 +113,7 @@ async function refresh() {
   $('#go-state').textContent = providerState('go');
   $('#zen-proxy-state').textContent = config.zenProxyConfigured ? '使用 Zen 独立代理' : config.proxyConfigured ? '使用默认代理' : '直连上游';
   $('#go-proxy-state').textContent = config.goProxyConfigured ? '使用 Go 独立代理' : config.proxyConfigured ? '使用默认代理' : '直连上游';
-  $('#request-count').textContent = requestLogItems.length;
-  const successSummary = status.requests ? `${formatPercentage(status.successRate)} 成功` : '暂无请求';
-  $('#request-summary').textContent = `${successSummary} · 活跃 ${status.activeRequests} · 平均 ${status.averageDuration} ms · ${status.memoryMb} MiB${status.logPersistenceError ? ' · 日志异常' : ''}`;
-  $('#request-summary').title = status.logPersistenceError || '';
-  $('#service-state').textContent = status.ready ? '● READY' : '● 待配置';
-  $('#service-state').classList.toggle('warning', !status.ready);
+  renderRuntimeSummary();
   $('#defaultProvider').value = config.defaultProvider;
   for (const [field, configured, fallback] of [['proxyUrl', config.proxyConfigured, 'http://127.0.0.1:7890']]) {
     $(`#${field}`).value = '';
@@ -89,16 +130,22 @@ async function refresh() {
   $('#promptRules').value = JSON.stringify(config.promptRewriteRules || [], null, 2);
   renderPromptRuleList();
   renderRouteList(config.modelRoutes || {});
-  renderClients(clients);
+  renderClients(clientItems);
   renderProviderCredentials();
   renderLogs();
   renderExamples();
-  await refreshPrompt();
-  if ($('#stats').classList.contains('active')) await refreshStats();
+  const secondaryLoads = [loadDataSource('Claude 提示词快照', refreshPrompt, undefined)];
+  if ($('#stats').classList.contains('active')) secondaryLoads.push(loadDataSource('用量统计', refreshStats, undefined));
+  await Promise.all(secondaryLoads);
+  return { degraded: dataSourceFailures.size };
 }
 
 async function refreshPrompt() {
-  recentPrompt = await api('/api/prompt-rewrite/recent');
+  renderRecentPrompt(await api('/api/prompt-rewrite/recent'));
+}
+
+function renderRecentPrompt(snapshot = {}) {
+  recentPrompt = snapshot;
   $('#promptOriginal').value = recentPrompt.original || '';
   $('#promptFinal').value = recentPrompt.final || '';
   if (!recentPrompt.time) {
@@ -473,11 +520,13 @@ $$('nav button').forEach((button) => button.addEventListener('click', async () =
   $$('nav button,.view').forEach((x) => x.classList.remove('active'));
   button.classList.add('active'); $(`#${button.dataset.view}`).classList.add('active'); $('#page-title').textContent = titles[button.dataset.view];
   if (button.dataset.view === 'logs') {
-    requestLogItems = await api('/api/logs');
+    const result = await loadDataSource('请求日志', () => api('/api/logs'), requestLogItems);
+    requestLogItems = result.value;
     renderLogs();
+    renderRuntimeSummary();
   }
-  if (button.dataset.view === 'stats') await refreshStats();
-  if (button.dataset.view === 'prompts') await refreshPrompt();
+  if (button.dataset.view === 'stats') await loadDataSource('用量统计', refreshStats, undefined);
+  if (button.dataset.view === 'prompts') await loadDataSource('Claude 提示词快照', refreshPrompt, undefined);
 }));
 
 $('#settings-form').addEventListener('submit', async (event) => {
@@ -594,12 +643,19 @@ $('#preview-prompt').addEventListener('click', async () => {
   } catch (error) { toast(`预览失败：${error.message}`); }
 });
 
-$('#refresh-prompt').addEventListener('click', () => refreshPrompt().then(() => toast('已刷新最近请求')).catch((error) => toast(error.message)));
+$('#refresh-prompt').addEventListener('click', async () => {
+  const result = await loadDataSource('Claude 提示词快照', refreshPrompt, undefined);
+  toast(result.fresh ? '已刷新最近请求' : '最近请求暂未更新');
+});
 
 $('#clear-prompt').addEventListener('click', async () => {
-  await api('/api/prompt-rewrite/recent', { method: 'DELETE' });
-  await refreshPrompt();
-  toast('内存中的最近请求已清除');
+  try {
+    await api('/api/prompt-rewrite/recent', { method: 'DELETE' });
+    renderRecentPrompt({});
+    dataSourceFailures.delete('Claude 提示词快照');
+    renderDataSourceFailures();
+    toast('内存中的最近请求已清除');
+  } catch (error) { toast(`清除失败：${error.message}`); }
 });
 
 $('#add-prompt-rule').addEventListener('click', () => {
@@ -737,8 +793,11 @@ $('#log-rows').addEventListener('click', async (event) => {
     toast('请求 ID 已复制');
   } catch { toast('复制失败，请手动复制'); }
 });
-$('#refresh-stats').addEventListener('click', () => refreshStats().then(() => toast('统计已刷新')).catch((error) => toast(error.message)));
-$('#stats-window').addEventListener('change', () => refreshStats().catch((error) => toast(error.message)));
+$('#refresh-stats').addEventListener('click', async () => {
+  const result = await loadDataSource('用量统计', refreshStats, undefined);
+  toast(result.fresh ? '统计已刷新' : '统计暂未更新');
+});
+$('#stats-window').addEventListener('change', () => loadDataSource('用量统计', refreshStats, undefined));
 $('#stats-credential-rows').addEventListener('click', async (event) => {
   const button = event.target.closest('.reset-credential-health');
   if (!button) return;
@@ -748,15 +807,14 @@ $('#stats-credential-rows').addEventListener('click', async (event) => {
       method: 'POST',
       body: JSON.stringify({ provider: button.dataset.provider, credentialId: button.dataset.credentialId })
     });
-    toast('Key 健康状态已重置');
-    await refreshStats();
+    const result = await loadDataSource('用量统计', refreshStats, undefined);
+    toast(result.fresh ? 'Key 健康状态已重置' : 'Key 健康状态已重置，统计暂未更新');
   } catch (error) {
-    button.disabled = false;
     toast(error.message);
-  }
+  } finally { button.disabled = false; }
 });
 $('#logout').addEventListener('click', async () => { await api('/api/logout', { method: 'POST' }); location.reload(); });
-$('#refresh').addEventListener('click', () => refresh().then(() => toast('已刷新')).catch((error) => toast(error.message)));
+$('#refresh').addEventListener('click', () => refresh().then((result) => toast(result.degraded ? '已刷新可用数据' : '已刷新')).catch((error) => toast(error.message)));
 $$('.copy').forEach((button) => button.addEventListener('click', () => navigator.clipboard.writeText(`${location.origin}/${button.dataset.copy}/v1`).then(() => toast(`已复制 ${button.dataset.copy === 'go' ? 'Go' : 'Zen'} 地址`))));
 
 setInterval(updateCooldownCountdowns, 1000);
