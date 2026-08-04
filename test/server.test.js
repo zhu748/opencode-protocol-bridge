@@ -141,6 +141,21 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     const models = await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { authorization: `Bearer ${setupBody.clientToken}` } });
     assert.equal(models.status, 503);
 
+    const wrongModelsMethod = await fetch(`http://127.0.0.1:${port}/v1/models`, { method: 'POST' });
+    assert.equal(wrongModelsMethod.status, 405);
+    assert.equal(wrongModelsMethod.headers.get('allow'), 'GET');
+    assert.deepEqual(await wrongModelsMethod.json(), { error: { message: '该接口仅支持 GET', type: 'invalid_request_error', code: null } });
+
+    const wrongClaudeMethod = await fetch(`http://127.0.0.1:${port}/zen/v1/messages`);
+    assert.equal(wrongClaudeMethod.status, 405);
+    assert.equal(wrongClaudeMethod.headers.get('allow'), 'POST');
+    assert.deepEqual(await wrongClaudeMethod.json(), { type: 'error', error: { type: 'invalid_request_error', message: '该接口仅支持 POST' } });
+
+    const wrongResponsesMethod = await fetch(`http://127.0.0.1:${port}/go/v1/responses`);
+    assert.equal(wrongResponsesMethod.status, 405);
+    assert.equal(wrongResponsesMethod.headers.get('allow'), 'POST');
+    assert.deepEqual(await wrongResponsesMethod.json(), { error: { message: '该接口仅支持 POST', type: 'invalid_request_error', code: null } });
+
     const unauthorizedClaude = await fetch(`http://127.0.0.1:${port}/zen/v1/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'x', messages: [] }) });
     assert.equal(unauthorizedClaude.status, 401);
     assert.deepEqual(await unauthorizedClaude.json(), { type: 'error', error: { type: 'authentication_error', message: '访问令牌无效' } });

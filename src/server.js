@@ -43,9 +43,9 @@ const json = (res, status, data, headers = {}) => {
   res.end(payload);
 };
 
-function protocolError(res, status, protocol, message, type = 'invalid_request_error') {
-  if (protocol === 'claude') return json(res, status, { type: 'error', error: { type, message } });
-  return json(res, status, { error: { message, type, code: null } });
+function protocolError(res, status, protocol, message, type = 'invalid_request_error', headers = {}) {
+  if (protocol === 'claude') return json(res, status, { type: 'error', error: { type, message } }, headers);
+  return json(res, status, { error: { message, type, code: null } }, headers);
 }
 
 function streamProtocolError(protocol, message) {
@@ -960,6 +960,10 @@ const server = createServer(async (req, res) => {
     if (apiScope) {
       const modelsPath = `${apiScope.base}/models`;
       const modelPrefix = `${modelsPath}/`;
+      const modelEndpoint = url.pathname === modelsPath || url.pathname.startsWith(modelPrefix);
+      if (modelEndpoint && req.method !== 'GET') {
+        return protocolError(res, 405, 'chat', '该接口仅支持 GET', 'invalid_request_error', { allow: 'GET' });
+      }
       if (url.pathname.startsWith(modelPrefix) && req.method === 'GET') {
         if (!clientAuthorized(req, config)) return json(res, 401, { error: { type: 'authentication_error', message: '访问令牌无效' } });
         let requestedModel;
@@ -1049,7 +1053,9 @@ const server = createServer(async (req, res) => {
       if (![`${apiScope.base}/messages`, `${apiScope.base}/responses`, `${apiScope.base}/chat/completions`].includes(url.pathname)) {
         return json(res, 404, { error: '接口不存在' });
       }
-      if (req.method !== 'POST') return json(res, 405, { error: '该接口仅支持 POST' });
+      if (req.method !== 'POST') {
+        return protocolError(res, 405, detectProtocol(url.pathname), '该接口仅支持 POST', 'invalid_request_error', { allow: 'POST' });
+      }
       return await limitedProxyRequest(req, res, url, config, apiScope.provider);
     }
     if (req.method === 'GET') return await staticFile(req, res, url);

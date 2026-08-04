@@ -249,6 +249,7 @@ OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变�
 
 - 本项目覆盖 Claude Messages、OpenAI Responses 和 Chat Completions 三个协议族；OpenCode 中使用 Google `generateContent` 原生端点的 Gemini 模型不在当前转换范围内。
 - 单个 JSON 请求体上限为 10 MiB，模型 ID 上限为 256 个字符；更大的 PDF 或其他文件应先使用目标服务的 Files API 上传，再通过 file ID 引用。
+- `/models` 与 `/models/{model}` 仅接受 GET，三个推理端点仅接受 POST；方法错误会返回 HTTP 405、标准 `Allow` 头以及目标协议可识别的错误体。
 - 同协议请求和非流式响应会在最小结构校验后保留厂商扩展字段；同协议流式响应原样透传。跨协议转换覆盖系统提示、文本、拒绝内容、图片及其 `detail`、Claude Documents/Responses 文件块、采样参数、函数工具、工具选择、新旧工具调用、工具结果、推理强度及 usage；Claude 的 `tool_result + 后续用户文本` 转 Chat 时会保持合法的 tool → user 顺序。停止词会在 Claude/Chat 目标间转换；Responses 不支持 stop，收到跨协议停止词时返回明确的 400。Claude 转 Chat 时保留兼容代理使用的 `cache_control`，转 Responses 时会移除该非标准字段；转 Claude 时 metadata 只保留合法的 `user_id`。Responses 内置工具/custom tool、Claude server tool、未知内容块、Chat 文件输入及 Chat 无法表达的图片 `file_id` 在跨协议请求时返回 400；上游响应包含目标协议无法表达的图片、文档或流式媒体块时返回明确的转换错误，避免静默丢失内容。其他非内容类厂商专属字段会被忽略。
 - DeepSeek V4 Flash / V4 Flash Free 的 Chat 工具调用在未显式请求推理时会自动设置 `reasoning_effort: "none"`，避免模型默认 Thinking 模式拒绝工具；客户端显式启用 Claude thinking 时不会静默覆盖其选择。
 - 请求日志默认仅保存在内存中；管理面板可启用有界持久化，文件为 `data/request-logs.json`。日志不包含提示词、响应正文或密钥，写盘会在短时间窗口内合并，并在管理读取或服务正常退出时强制刷新。关闭持久化会取消尚未执行的延迟写盘，但不会自动删除已有文件；需要删除历史内容时再点击“清空记录”。

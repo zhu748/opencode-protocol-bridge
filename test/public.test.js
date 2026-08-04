@@ -39,6 +39,10 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.equal(spec.components.headers.KeyAttempts.schema.minimum, 2);
   assert.equal(spec.components.headers.UpstreamRequestId.schema.maxLength, 256);
   assert.equal(spec.components.responses.RateLimited.headers['Retry-After'].$ref, '#/components/headers/RetryAfter');
+  assert.equal(spec.components.responses.MethodNotAllowed.headers.Allow.$ref, '#/components/headers/Allow');
+  for (const [path, method] of [['/models', 'get'], ['/models/{model}', 'get'], ['/messages', 'post'], ['/responses', 'post'], ['/chat/completions', 'post']]) {
+    assert.equal(spec.paths[path][method].responses['405'].$ref, '#/components/responses/MethodNotAllowed');
+  }
   assert.deepEqual(spec.servers.map((server) => server.url), ['/zen/v1', '/go/v1', '/v1']);
   assert.ok(spec.components.securitySchemes.bearerAuth);
   assert.ok(spec.components.securitySchemes.apiKeyAuth);
