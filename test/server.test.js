@@ -205,8 +205,16 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
   let resolveDelayedRequest;
   const delayedRequest = new Promise((resolveRequest) => { resolveDelayedRequest = resolveRequest; });
   const upstream = createHttpServer((req, res) => {
+    if (req.url === '/responses') {
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+      res.write(`event: response.created\ndata: ${JSON.stringify({
+        type: 'response.created', sequence_number: 12,
+        response: { id: 'resp_broken', object: 'response', status: 'in_progress', model: 'response-stream', output: [] }
+      })}\n\n`);
+      return res.end();
+    }
     upstreamCalls++;
-    if (upstreamCalls === 6) {
+    if (upstreamCalls === 7) {
       resolveDelayedRequest();
       const delayedResponse = setTimeout(() => {
         if (!res.destroyed) res.end(JSON.stringify({ error: { message: '不应到达客户端' } }));
@@ -220,7 +228,7 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
       choices: [{ index: 0, delta: { role: 'assistant', content: 'partial' }, finish_reason: null }]
     })}\n\n`);
     if (upstreamCalls <= 2) setImmediate(() => res.destroy());
-    else if (upstreamCalls === 4) {
+    else if (upstreamCalls === 4 || upstreamCalls === 6) {
       res.end(`data: ${JSON.stringify({
         id: 'chat_media', model: 'deepseek-v4-flash',
         choices: [{ index: 0, delta: { content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/x.png' } }] }, finish_reason: null }]
@@ -328,6 +336,31 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     assert.equal(truncatedStats.summary.errors, 4);
     assert.equal(truncatedStats.credentialHealth[0].consecutiveFailures, 1);
 
+    const crossProtocolTruncated = await fetch(`http://127.0.0.1:${port}/zen/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, input: 'trigger unsupported stream content' })
+    });
+    const crossProtocolText = await crossProtocolTruncated.text();
+    assert.equal(crossProtocolTruncated.status, 200);
+    const crossProtocolEvents = crossProtocolText.split(/\n\n/).filter(Boolean).map((block) => JSON.parse(block.split(/\r?\n/).find((line) => line.startsWith('data: ')).slice(6)));
+    assert.deepEqual(crossProtocolEvents.map((event) => event.sequence_number), [0, 1, 2, 3, 4]);
+    assert.deepEqual(crossProtocolEvents.at(-1), { type: 'error', code: 'upstream_error', message: '跨协议转换无法表达 Chat 流式内容块：image_url', param: null, sequence_number: 4 });
+
+    const responseRoute = await fetch(`http://127.0.0.1:${port}/api/config`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: { 'response-stream': { protocol: 'responses' } } })
+    });
+    assert.equal(responseRoute.status, 200);
+    const responsesTruncated = await fetch(`http://127.0.0.1:${port}/zen/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'response-stream', stream: true, input: 'truncate Responses stream' })
+    });
+    const responsesTruncatedText = await responsesTruncated.text();
+    assert.equal(responsesTruncated.status, 200);
+    const responseEvents = responsesTruncatedText.split(/\n\n/).filter(Boolean).map((block) => JSON.parse(block.split(/\r?\n/).find((line) => line.startsWith('data: ')).slice(6)));
+    assert.deepEqual(responseEvents.map((event) => event.sequence_number), [12, 13]);
+    assert.deepEqual(responseEvents.at(-1), { type: 'error', code: 'upstream_error', message: '上游 SSE 在完成事件前结束', param: null, sequence_number: 13 });
+
     const cancellation = new AbortController();
     const canceledRequest = fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
       method: 'POST', signal: cancellation.signal,
@@ -340,12 +373,12 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     let canceledStats;
     for (let attempt = 0; attempt < 20; attempt++) {
       canceledStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
-      if (canceledStats.summary.requests === 6) break;
+      if (canceledStats.summary.requests === 8) break;
       await new Promise((resolveWait) => setTimeout(resolveWait, 10));
     }
-    assert.equal(canceledStats.summary.requests, 6);
-    assert.equal(canceledStats.summary.errors, 5);
-    assert.equal(canceledStats.credentialHealth[0].consecutiveFailures, 1);
+    assert.equal(canceledStats.summary.requests, 8);
+    assert.equal(canceledStats.summary.errors, 7);
+    assert.equal(canceledStats.credentialHealth[0].consecutiveFailures, 2);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});

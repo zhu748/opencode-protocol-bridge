@@ -40,7 +40,7 @@ async function* parseSse(body) {
   if (parsed) yield parsed;
 }
 
-async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsupportedContent = false } = {}) {
+async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsupportedContent = false, onSseData } = {}) {
   let started = false;
   let id;
   let model = fallbackModel;
@@ -59,6 +59,7 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
   let terminal = false;
 
   for await (const { data } of parseSse(response.body)) {
+    onSseData?.(data);
     if (data.error || data.type === 'error') {
       terminal = true;
       yield { type: 'error', error: data.error || data };
@@ -96,7 +97,7 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
         usageObserved ||= hasUsageData(data.response);
         inputTokens = data.response?.usage?.input_tokens ?? data.response?.usage?.prompt_tokens ?? 0;
         cachedInputTokens = data.response?.usage?.cache_read_input_tokens || data.response?.usage?.prompt_cache_hit_tokens || data.response?.usage?.input_tokens_details?.cached_tokens || data.response?.usage?.prompt_tokens_details?.cached_tokens || 0;
-        cacheCreationInputTokens = data.response?.usage?.cache_creation_input_tokens || data.response?.usage?.input_tokens_details?.cache_creation_tokens || data.response?.usage?.prompt_tokens_details?.cache_creation_tokens || 0;
+        cacheCreationInputTokens = data.response?.usage?.cache_creation_input_tokens || data.response?.usage?.input_tokens_details?.cache_write_tokens || data.response?.usage?.input_tokens_details?.cache_creation_tokens || data.response?.usage?.prompt_tokens_details?.cache_write_tokens || data.response?.usage?.prompt_tokens_details?.cache_creation_tokens || 0;
         yield { type: 'start', id, model, inputTokens, cachedInputTokens, cacheCreationInputTokens };
       } else if (data.type === 'response.output_item.added') {
         const item = data.item || {};
@@ -148,7 +149,7 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
         if (usage) {
           inputTokens = usage.input_tokens ?? usage.prompt_tokens ?? inputTokens;
           cachedInputTokens = usage.cache_read_input_tokens ?? usage.prompt_cache_hit_tokens ?? usage.input_tokens_details?.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? cachedInputTokens;
-          cacheCreationInputTokens = usage.cache_creation_input_tokens ?? usage.input_tokens_details?.cache_creation_tokens ?? usage.prompt_tokens_details?.cache_creation_tokens ?? cacheCreationInputTokens;
+          cacheCreationInputTokens = usage.cache_creation_input_tokens ?? usage.input_tokens_details?.cache_write_tokens ?? usage.input_tokens_details?.cache_creation_tokens ?? usage.prompt_tokens_details?.cache_write_tokens ?? usage.prompt_tokens_details?.cache_creation_tokens ?? cacheCreationInputTokens;
           reasoningTokens = usage.output_tokens_details?.reasoning_tokens ?? usage.completion_tokens_details?.reasoning_tokens ?? reasoningTokens;
         }
         terminal = true;
@@ -172,14 +173,14 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
       inputTokens = data.usage.prompt_tokens ?? data.usage.input_tokens ?? inputTokens;
       chatOutputTokens = data.usage.completion_tokens ?? data.usage.output_tokens ?? chatOutputTokens;
       cachedInputTokens = data.usage.cache_read_input_tokens || data.usage.prompt_cache_hit_tokens || data.usage.prompt_tokens_details?.cached_tokens || cachedInputTokens;
-      cacheCreationInputTokens = data.usage.cache_creation_input_tokens || data.usage.prompt_tokens_details?.cache_creation_tokens || cacheCreationInputTokens;
+      cacheCreationInputTokens = data.usage.cache_creation_input_tokens || data.usage.prompt_tokens_details?.cache_write_tokens || data.usage.prompt_tokens_details?.cache_creation_tokens || cacheCreationInputTokens;
       reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens || reasoningTokens;
     }
     if (!started) {
       started = true; id = data.id; model = data.model || model;
       inputTokens = data.usage?.prompt_tokens ?? data.usage?.input_tokens ?? inputTokens;
       cachedInputTokens = data.usage?.cache_read_input_tokens || data.usage?.prompt_cache_hit_tokens || data.usage?.prompt_tokens_details?.cached_tokens || cachedInputTokens;
-      cacheCreationInputTokens = data.usage?.cache_creation_input_tokens || data.usage?.prompt_tokens_details?.cache_creation_tokens || cacheCreationInputTokens;
+      cacheCreationInputTokens = data.usage?.cache_creation_input_tokens || data.usage?.prompt_tokens_details?.cache_write_tokens || data.usage?.prompt_tokens_details?.cache_creation_tokens || cacheCreationInputTokens;
       yield { type: 'start', id, model, inputTokens, cachedInputTokens, cacheCreationInputTokens };
     }
     const reasoningDelta = choice?.delta?.reasoning_content || choice?.delta?.reasoning;
@@ -286,6 +287,15 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
   const indices = new Map();
   const blocks = new Map();
   let responseStarted = false;
+  let responseSequenceNumber = 0;
+  const responseParallelToolCalls = typeof options.responsesOptions?.parallelToolCalls === 'boolean' ? options.responsesOptions.parallelToolCalls : true;
+  const responseToolChoice = options.responsesOptions?.toolChoice ?? 'auto';
+  const responseTools = Array.isArray(options.responsesOptions?.tools) ? options.responsesOptions.tools : [];
+  const responseSse = (event, data) => {
+    const sequenceNumber = responseSequenceNumber++;
+    options.onResponsesSequenceNumber?.(responseSequenceNumber);
+    return sse(event, { ...data, sequence_number: sequenceNumber });
+  };
 
   for await (const event of canonicalEvents(response, sourceProtocol, fallbackModel, { rejectUnsupportedContent: sourceProtocol !== targetProtocol })) {
     if (event.type === 'error') {
@@ -293,6 +303,10 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       if (targetProtocol === 'chat') {
         yield chatSse({ error: event.error });
         yield 'data: [DONE]\n\n';
+      } else if (targetProtocol === 'responses') {
+        const message = event.error?.message || String(event.error || '上游流式响应失败');
+        const code = event.error?.code || event.error?.type || 'upstream_error';
+        yield responseSse('error', { type: 'error', code, message, param: event.error?.param ?? null });
       } else yield sse('error', { type: 'error', error: event.error });
       return;
     }
@@ -300,7 +314,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       responseStarted = true;
       responseId = event.id || responseId; model = event.model || model; inputTokens = event.inputTokens || 0; cachedInputTokens = event.cachedInputTokens || 0; cacheCreationInputTokens = event.cacheCreationInputTokens || 0;
       if (targetProtocol === 'claude') yield sse('message_start', { type: 'message_start', message: { id: responseId, type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: inputTokens, output_tokens: 0, ...(cachedInputTokens ? { cache_read_input_tokens: cachedInputTokens } : {}), ...(cacheCreationInputTokens ? { cache_creation_input_tokens: cacheCreationInputTokens } : {}) } } });
-      else if (targetProtocol === 'responses') yield sse('response.created', { type: 'response.created', response: { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), status: 'in_progress', model, output: [], usage: null } });
+      else if (targetProtocol === 'responses') yield responseSse('response.created', { type: 'response.created', response: { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), status: 'in_progress', model, output: [], parallel_tool_calls: responseParallelToolCalls, tool_choice: responseToolChoice, tools: responseTools, usage: null } });
       else yield chatSse({ id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] });
       continue;
     }
@@ -321,9 +335,9 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
             ? { id: `rs_${randomUUID().replaceAll('-', '')}`, type: 'reasoning', status: 'in_progress', summary: [] }
             : { id: `msg_${randomUUID().replaceAll('-', '')}`, type: 'message', status: 'in_progress', role: 'assistant', content: [] };
         blocks.get(index).item = item;
-        yield sse('response.output_item.added', { type: 'response.output_item.added', output_index: index, item });
-        if (event.blockType === 'text') yield sse('response.content_part.added', { type: 'response.content_part.added', item_id: item.id, output_index: index, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });
-        if (event.blockType === 'reasoning') yield sse('response.reasoning_summary_part.added', { type: 'response.reasoning_summary_part.added', item_id: item.id, output_index: index, summary_index: 0, part: { type: 'summary_text', text: '' } });
+        yield responseSse('response.output_item.added', { type: 'response.output_item.added', output_index: index, item });
+        if (event.blockType === 'text') yield responseSse('response.content_part.added', { type: 'response.content_part.added', item_id: item.id, output_index: index, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });
+        if (event.blockType === 'reasoning') yield responseSse('response.reasoning_summary_part.added', { type: 'response.reasoning_summary_part.added', item_id: item.id, output_index: index, summary_index: 0, part: { type: 'summary_text', text: '' } });
       } else if (targetProtocol === 'chat' && event.blockType === 'tool') {
         const block = blocks.get(index);
         yield chatSse({ id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { tool_calls: [{ index: block.chatToolIndex, id: block.id, type: 'function', function: { name: block.name, arguments: '' } }] }, finish_reason: null }] });
@@ -346,7 +360,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
         const name = event.type === 'text_delta' ? 'response.output_text.delta'
           : event.type === 'reasoning_delta' ? 'response.reasoning_summary_text.delta'
             : 'response.function_call_arguments.delta';
-        yield sse(name, { type: name, item_id: block.item.id, output_index: index, ...(event.type === 'text_delta' ? { content_index: 0 } : {}), ...(event.type === 'reasoning_delta' ? { summary_index: 0 } : {}), delta: event.delta });
+        yield responseSse(name, { type: name, item_id: block.item.id, output_index: index, ...(event.type === 'text_delta' ? { content_index: 0, logprobs: [] } : {}), ...(event.type === 'reasoning_delta' ? { summary_index: 0 } : {}), delta: event.delta });
       } else if (event.type === 'text_delta') {
         yield chatSse({ id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: event.delta }, finish_reason: null }] });
       } else if (event.type === 'reasoning_delta') {
@@ -378,20 +392,20 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       else if (targetProtocol === 'responses') {
         if (block.type === 'text') {
           const part = { type: 'output_text', text: block.text, annotations: [] };
-          yield sse('response.output_text.done', { type: 'response.output_text.done', item_id: block.item.id, output_index: index, content_index: 0, text: block.text });
-          yield sse('response.content_part.done', { type: 'response.content_part.done', item_id: block.item.id, output_index: index, content_index: 0, part });
+          yield responseSse('response.output_text.done', { type: 'response.output_text.done', item_id: block.item.id, output_index: index, content_index: 0, text: block.text, logprobs: [] });
+          yield responseSse('response.content_part.done', { type: 'response.content_part.done', item_id: block.item.id, output_index: index, content_index: 0, part });
           block.item.content = [part];
         } else if (block.type === 'reasoning') {
           const part = { type: 'summary_text', text: block.text };
-          yield sse('response.reasoning_summary_text.done', { type: 'response.reasoning_summary_text.done', item_id: block.item.id, output_index: index, summary_index: 0, text: block.text });
-          yield sse('response.reasoning_summary_part.done', { type: 'response.reasoning_summary_part.done', item_id: block.item.id, output_index: index, summary_index: 0, part });
+          yield responseSse('response.reasoning_summary_text.done', { type: 'response.reasoning_summary_text.done', item_id: block.item.id, output_index: index, summary_index: 0, text: block.text });
+          yield responseSse('response.reasoning_summary_part.done', { type: 'response.reasoning_summary_part.done', item_id: block.item.id, output_index: index, summary_index: 0, part });
           block.item.summary = [part];
         } else {
-          yield sse('response.function_call_arguments.done', { type: 'response.function_call_arguments.done', item_id: block.item.id, output_index: index, arguments: block.arguments });
+          yield responseSse('response.function_call_arguments.done', { type: 'response.function_call_arguments.done', item_id: block.item.id, output_index: index, arguments: block.arguments });
           block.item.arguments = block.arguments;
         }
         block.item.status = 'completed';
-        yield sse('response.output_item.done', { type: 'response.output_item.done', output_index: index, item: block.item });
+        yield responseSse('response.output_item.done', { type: 'response.output_item.done', output_index: index, item: block.item });
       }
       continue;
     }
@@ -406,9 +420,8 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       } else if (targetProtocol === 'responses') {
         const output = [...blocks.values()].map((block) => block.item).filter(Boolean);
         const incomplete = ['length', 'max_tokens', 'max_output_tokens'].includes(event.stopReason);
-        const inputDetails = (cachedInputTokens || cacheCreationInputTokens) ? { ...(cachedInputTokens ? { cached_tokens: cachedInputTokens } : {}), ...(cacheCreationInputTokens ? { cache_creation_tokens: cacheCreationInputTokens } : {}) } : undefined;
-        const final = { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), status: incomplete ? 'incomplete' : 'completed', ...(incomplete ? { incomplete_details: { reason: 'max_output_tokens' } } : {}), model, output, usage: { input_tokens: inputTokens, output_tokens: outputTokens, total_tokens: inputTokens + outputTokens, ...(inputDetails ? { input_tokens_details: inputDetails } : {}), ...(reasoningTokens ? { output_tokens_details: { reasoning_tokens: reasoningTokens } } : {}) } };
-        yield sse(incomplete ? 'response.incomplete' : 'response.completed', { type: incomplete ? 'response.incomplete' : 'response.completed', response: final });
+        const final = { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), status: incomplete ? 'incomplete' : 'completed', ...(incomplete ? { incomplete_details: { reason: 'max_output_tokens' } } : {}), model, output, parallel_tool_calls: responseParallelToolCalls, tool_choice: responseToolChoice, tools: responseTools, usage: { input_tokens: inputTokens, input_tokens_details: { cached_tokens: cachedInputTokens, cache_write_tokens: cacheCreationInputTokens }, output_tokens: outputTokens, output_tokens_details: { reasoning_tokens: reasoningTokens }, total_tokens: inputTokens + outputTokens } };
+        yield responseSse(incomplete ? 'response.incomplete' : 'response.completed', { type: incomplete ? 'response.incomplete' : 'response.completed', response: final });
       } else {
         const promptDetails = (cachedInputTokens || cacheCreationInputTokens) ? { ...(cachedInputTokens ? { cached_tokens: cachedInputTokens } : {}), ...(cacheCreationInputTokens ? { cache_creation_tokens: cacheCreationInputTokens } : {}) } : undefined;
         yield chatSse({ id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: {}, finish_reason: hasTools ? 'tool_calls' : (['length', 'max_tokens', 'max_output_tokens'].includes(event.stopReason) ? 'length' : 'stop') }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: inputTokens + outputTokens, ...(promptDetails ? { prompt_tokens_details: promptDetails } : {}), ...(reasoningTokens ? { completion_tokens_details: { reasoning_tokens: reasoningTokens } } : {}) } });
@@ -421,8 +434,14 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
 export async function observeSse(response, protocol, fallbackModel, options = {}) {
   let usage = {};
   let error;
+  let nextSequenceNumber = 0;
+  const observeSequenceNumber = (data) => {
+    if (protocol !== 'responses') return;
+    const sequenceNumber = data?.sequence_number;
+    if (Number.isSafeInteger(sequenceNumber) && sequenceNumber >= nextSequenceNumber) nextSequenceNumber = sequenceNumber + 1;
+  };
   try {
-    for await (const event of canonicalEvents(response, protocol, fallbackModel)) {
+    for await (const event of canonicalEvents(response, protocol, fallbackModel, { onSseData: observeSequenceNumber })) {
       if (event.type === 'done') {
         if (event.hasUsage) {
           usage = {
@@ -440,9 +459,9 @@ export async function observeSse(response, protocol, fallbackModel, options = {}
       }
     }
   } catch (caught) {
-    if (caught.code === 'UPSTREAM_SSE_EVENT_TOO_LARGE') return { usage, error: undefined, observationSkipped: caught.message };
+    if (caught.code === 'UPSTREAM_SSE_EVENT_TOO_LARGE') return { usage, error: undefined, observationSkipped: caught.message, ...(protocol === 'responses' ? { nextSequenceNumber } : {}) };
     error = { type: 'upstream_error', message: caught.message };
     options.onError?.(error);
   }
-  return { usage, error };
+  return { usage, error, ...(protocol === 'responses' ? { nextSequenceNumber } : {}) };
 }

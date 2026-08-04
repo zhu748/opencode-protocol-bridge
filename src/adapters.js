@@ -458,7 +458,7 @@ export function hasUsageData(body) {
     .some((field) => Object.hasOwn(usage, field))) return true;
   return [usage.input_tokens_details, usage.prompt_tokens_details, usage.output_tokens_details, usage.completion_tokens_details]
     .some((details) => details && typeof details === 'object' && !Array.isArray(details)
-      && ['cached_tokens', 'cache_creation_tokens', 'reasoning_tokens'].some((field) => Object.hasOwn(details, field)));
+      && ['cached_tokens', 'cache_write_tokens', 'cache_creation_tokens', 'reasoning_tokens'].some((field) => Object.hasOwn(details, field)));
 }
 
 function applyCompatibilityOptions(body, protocol, options) {
@@ -497,7 +497,7 @@ export function normalizeResponse(body, protocol, fallbackModel = '', { rejectUn
       id: body.id, model: body.model || fallbackModel, parts,
       inputTokens: body.usage?.input_tokens ?? body.usage?.prompt_tokens ?? 0, outputTokens: body.usage?.output_tokens ?? body.usage?.completion_tokens ?? 0,
       cachedInputTokens: body.usage?.cache_read_input_tokens || body.usage?.prompt_cache_hit_tokens || body.usage?.input_tokens_details?.cached_tokens || body.usage?.prompt_tokens_details?.cached_tokens || 0,
-      cacheCreationInputTokens: body.usage?.cache_creation_input_tokens || body.usage?.input_tokens_details?.cache_creation_tokens || body.usage?.prompt_tokens_details?.cache_creation_tokens || 0,
+      cacheCreationInputTokens: body.usage?.cache_creation_input_tokens || body.usage?.input_tokens_details?.cache_write_tokens || body.usage?.input_tokens_details?.cache_creation_tokens || body.usage?.prompt_tokens_details?.cache_write_tokens || body.usage?.prompt_tokens_details?.cache_creation_tokens || 0,
       reasoningTokens: body.usage?.output_tokens_details?.reasoning_tokens || body.usage?.completion_tokens_details?.reasoning_tokens || 0,
       stopReason: responsesStopReason(body)
     };
@@ -514,13 +514,13 @@ export function normalizeResponse(body, protocol, fallbackModel = '', { rejectUn
     id: body.id, model: body.model || fallbackModel, parts,
     inputTokens: body.usage?.prompt_tokens ?? body.usage?.input_tokens ?? 0, outputTokens: body.usage?.completion_tokens ?? body.usage?.output_tokens ?? 0,
     cachedInputTokens: body.usage?.cache_read_input_tokens || body.usage?.prompt_cache_hit_tokens || body.usage?.prompt_tokens_details?.cached_tokens || 0,
-    cacheCreationInputTokens: body.usage?.cache_creation_input_tokens || body.usage?.prompt_tokens_details?.cache_creation_tokens || 0,
+    cacheCreationInputTokens: body.usage?.cache_creation_input_tokens || body.usage?.prompt_tokens_details?.cache_write_tokens || body.usage?.prompt_tokens_details?.cache_creation_tokens || 0,
     reasoningTokens: body.usage?.completion_tokens_details?.reasoning_tokens || 0,
     stopReason: choice.finish_reason
   };
 }
 
-export function formatResponse(response, protocol) {
+export function formatResponse(response, protocol, responsesOptions = {}) {
   if (protocol === 'claude') return {
     id: response.id || `msg_${randomUUID().replaceAll('-', '')}`, type: 'message', role: 'assistant', model: response.model,
     content: claudeContent(response.parts, { includeReasoning: true }), stop_reason: response.parts.some((x) => x.type === 'tool_call') ? 'tool_use' : claudeStopReason(response.stopReason), stop_sequence: null,
@@ -536,6 +536,8 @@ export function formatResponse(response, protocol) {
     return {
     id: response.id || `resp_${randomUUID().replaceAll('-', '')}`, object: 'response', created_at: Math.floor(Date.now() / 1000), status: 'completed', model: response.model,
     ...(incomplete ? { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } } : {}),
+    parallel_tool_calls: typeof responsesOptions.parallelToolCalls === 'boolean' ? responsesOptions.parallelToolCalls : true,
+    tool_choice: responsesOptions.toolChoice ?? 'auto', tools: Array.isArray(responsesOptions.tools) ? responsesOptions.tools : [],
     output: response.parts.flatMap((part, index) => {
       if (part.type === 'tool_call') return { id: `fc_${index}`, type: 'function_call', status: 'completed', call_id: part.id, name: part.name, arguments: canonicalJsonString(part.arguments) };
       if (part.type === 'reasoning') return { id: `rs_${index}`, type: 'reasoning', status: 'completed', summary: [{ type: 'summary_text', text: part.text || '' }] };
@@ -544,11 +546,8 @@ export function formatResponse(response, protocol) {
     }),
     usage: {
       input_tokens: response.inputTokens, output_tokens: response.outputTokens, total_tokens: response.inputTokens + response.outputTokens,
-      ...((response.cachedInputTokens || response.cacheCreationInputTokens) ? { input_tokens_details: {
-        ...(response.cachedInputTokens ? { cached_tokens: response.cachedInputTokens } : {}),
-        ...(response.cacheCreationInputTokens ? { cache_creation_tokens: response.cacheCreationInputTokens } : {})
-      } } : {}),
-      ...(response.reasoningTokens ? { output_tokens_details: { reasoning_tokens: response.reasoningTokens } } : {})
+      input_tokens_details: { cached_tokens: response.cachedInputTokens || 0, cache_write_tokens: response.cacheCreationInputTokens || 0 },
+      output_tokens_details: { reasoning_tokens: response.reasoningTokens || 0 }
     }
     };
   }

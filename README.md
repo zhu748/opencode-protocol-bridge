@@ -14,7 +14,7 @@
 - Claude thinking/output effort 到 OpenAI reasoning effort 的模型感知映射
 - DeepSeek / Kimi / Moonshot 工具历史 reasoning_content 兼容
 - o1/o3/o4 Chat 参数、兼容代理 cache_control 与缓存 token 统计
-- refusal、旧版 function_call、usage 字段别名与 Chat 分段内容兼容
+- refusal、旧版 function_call、Responses `cache_write_tokens` 及其它 usage 字段别名与 Chat 分段内容兼容
 - 同协议安全透传 `anthropic-version`、`anthropic-beta` 与 `openai-beta` 功能协商头
 - Claude system 提示词精确删除/替换规则与进程内最近请求对比
 - 流式事件乱序缓冲、done 内容兜底、Read 参数清理与稳定 JSON 序列化
@@ -237,6 +237,7 @@ OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变�
 
 - 客户端协议与上游协议相同时，正常 SSE 数据实时原样透传；服务通过并行观察流记录 usage。若上游在完成事件前中断，服务会追加目标协议可识别的错误帧，避免客户端把截断内容误判为成功。
 - 跨协议时，服务会维护内容块索引和工具调用状态，将上游事件逐条转换为目标协议事件，不再缓存完整响应；SSE 解析兼容 LF、CRLF 和 CR 换行。流式请求要求上游返回标准 `text/event-stream`，避免把 HTTP 200 的普通 JSON 错误误判为空流；同协议 Chat 流也会主动请求 usage，只有上游确实返回 token 字段时才计入面板用量覆盖率，缺失 usage 不会伪记为零 token；客户端断开时，上游请求会被取消。
+- 生成的 Responses SSE 从 `0` 开始连续递增 `sequence_number`；文本 `delta`/`done` 带 `logprobs: []`，错误使用顶层 `type`、`code`、`message`、`param` 字段，终态 Response 始终带完整的 usage 明细与 `parallel_tool_calls`、`tool_choice`、`tools` 核心字段。若透传 Responses 流在完成前截断，追加错误会接续上游最后一个序号。
 - 跨协议流会保留 `completed`/`incomplete`、token 上限停止原因、缓存读取/写入 token 和推理 token；上游错误会使用目标协议可识别的 SSE 帧返回。单个上游 SSE 事件最多缓冲 8 MiB，超限会终止转换，防止异常上游无限占用内存。
 - 流式请求只有在完整结束后才会把对应 Key 记为健康；包括正常关闭连接但缺少完成事件的截断流，都会写入失败日志、返回错误帧并参与连续失败熔断。客户端主动断开记为内部状态 499，但不会惩罚 Key，也不会让冷却后的半开探测槽位永久占用。
 
@@ -254,7 +255,7 @@ OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变�
 - 同协议请求和非流式响应会在最小结构校验后保留厂商扩展字段；同协议流式响应原样透传。跨协议转换覆盖系统提示、文本、拒绝内容、图片及其 `detail`、Claude Documents/Responses 文件块、采样参数、函数工具、工具选择、新旧工具调用、工具结果、推理强度及 usage；Claude 的 `tool_result + 后续用户文本` 转 Chat 时会保持合法的 tool → user 顺序。停止词会在 Claude/Chat 目标间转换；Responses 不支持 stop，收到跨协议停止词时返回明确的 400。Claude 转 Chat 时保留兼容代理使用的 `cache_control`，转 Responses 时会移除该非标准字段；转 Claude 时 metadata 只保留合法的 `user_id`。Responses 内置工具/custom tool、Claude server tool、未知内容块、Chat 文件输入及 Chat 无法表达的图片 `file_id` 在跨协议请求时返回 400；上游响应包含目标协议无法表达的图片、文档或流式媒体块时返回明确的转换错误，避免静默丢失内容。其他非内容类厂商专属字段会被忽略。
 - DeepSeek V4 Flash / V4 Flash Free 的 Chat 工具调用在未显式请求推理时会自动设置 `reasoning_effort: "none"`，避免模型默认 Thinking 模式拒绝工具；客户端显式启用 Claude thinking 时不会静默覆盖其选择。
 - 请求日志默认仅保存在内存中；管理面板可启用有界持久化，文件为 `data/request-logs.json`。日志不包含提示词、响应正文或密钥，启动时的并发请求只共享一次旧日志加载，写盘会在短时间窗口内合并，并在管理读取或服务正常退出时强制刷新；临时写盘失败会保留待写状态供下次刷新重试。关闭持久化会取消尚未执行的延迟写盘，但不会自动删除已有文件；需要删除历史内容时再点击“清空记录”。
-- 管理面板“用量统计”按全部记录、最近 24 小时或最近 7 天汇总请求数、成功率、自动 Key 切换次数、平均/P95 耗时以及输入、输出、缓存读取、缓存写入和推理 token，并可按上游、实际模型、协议转换、客户端和 Key 槽位拆分；Key 表还展示当前健康状态、连续失败、冷却截止时间、实时剩余时间与最近事件。Key 统计只保存“环境变量编号/面板 Key”等安全标识，不保存密钥内容。请求记录会同时显示本地请求 ID、最终上游请求 ID 和限流等待时间，支持按关键词、时间、上游、成功/4xx/429/5xx 组合筛选，可复制两类请求 ID，并能将当前筛选结果导出为防公式注入的 UTF-8 CSV，便于关联排障。页面提供最近 24 小时、7 天或 14 天的请求/Token 趋势。统计会统一 OpenAI“缓存是输入子集”和 Claude“缓存字段独立于普通输入”的两种 usage 口径，提供缓存 Token 覆盖率和命中请求率。统计只基于当前最多 1000 条保留日志；推理 token 是输出 token 的明细项，不会重复加总。上游没有返回 usage 时会计入“缺失用量”的请求数。由于 OpenCode 各模型的缓存价格会变化，面板不估算账单金额，应以 OpenCode 官方账单为准。
+- 管理面板“用量统计”按全部记录、最近 24 小时或最近 7 天汇总请求数、成功率、自动 Key 切换次数、平均/P95 耗时以及输入、输出、缓存读取、缓存写入和推理 token，并可按上游、实际模型、协议转换、客户端和 Key 槽位拆分；Key 表还展示当前健康状态、连续失败、冷却截止时间、实时剩余时间与最近事件。Key 统计只保存“环境变量编号/面板 Key”等安全标识，不保存密钥内容。请求记录会同时显示本地请求 ID、最终上游请求 ID 和限流等待时间，支持按关键词、时间、上游、成功/4xx/429/5xx 组合筛选，可复制两类请求 ID，并能将当前筛选结果导出为防公式注入的 UTF-8 CSV，便于关联排障。页面提供最近 24 小时、7 天或 14 天的请求/Token 趋势。统计会统一 OpenAI“缓存读取是输入子集、缓存写入为独立指标”和 Claude“缓存创建字段独立于普通输入”的两种 usage 口径：缓存写入不再从 OpenAI 的未缓存输入中重复扣除。统计只基于当前最多 1000 条保留日志；推理 token 是输出 token 的明细项，不会重复加总。上游没有返回 usage 时会计入“缺失用量”的请求数。由于 OpenCode 各模型的缓存价格会变化，面板不估算账单金额，应以 OpenCode 官方账单为准。
 
 ## 安全建议
 
@@ -282,4 +283,4 @@ npm run check
 
 默认测试不调用真实 OpenCode 接口，因此不会产生费用。
 
-如需用临时 Go Key 对官方 `deepseek-v4-flash` 做小额度在线冒烟测试，可在当前 PowerShell 会话设置 `OPENCODE_GO_KEY` 后运行 `npm run test:live:go`。脚本会通过本地 `/go/v1` 验证模型发现、Responses 正文、Claude 工具名与参数、Chat SSE 正文与 usage，并登录临时管理会话核对三种请求的统计守恒；只输出状态和 usage，Key 不写入项目配置或日志，临时加密配置会在结束时删除。测试后可执行 `Remove-Item Env:OPENCODE_GO_KEY` 清除当前会话变量。
+如需用临时 Go Key 对官方 `deepseek-v4-flash` 做小额度在线冒烟测试，可在当前 PowerShell 会话设置 `OPENCODE_GO_KEY` 后运行 `npm run test:live:go`。脚本会通过本地 `/go/v1` 验证模型发现、Responses 非流式正文与标准流事件、Claude 工具名与参数、Claude 工具结果回送后的续答、Chat SSE 正文与 usage，并登录临时管理会话核对五次请求的统计守恒；只输出状态和 usage，Key 不写入项目配置或日志，临时加密配置会在结束时删除。默认单请求超时为 60 秒；若上游临时拥塞，可在当前会话设置 `OPENCODE_LIVE_TIMEOUT_MS`（10000–600000）后重试。仅在模型列表端点拥塞、且已知模型名正确时，可临时设置 `OPENCODE_LIVE_SKIP_MODEL_DISCOVERY=1` 继续验证五项实际生成协议；该模式会在输出中明确标记跳过了模型发现。测试后可执行 `Remove-Item Env:OPENCODE_GO_KEY` 清除当前会话变量。

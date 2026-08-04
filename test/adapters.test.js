@@ -255,6 +255,7 @@ test('同协议流式 Chat 也会请求 usage 且只把真实 token 字段算作
   assert.equal(hasUsageData({ usage: {} }), false);
   assert.equal(hasUsageData({ usage: { prompt_tokens: 0, completion_tokens: 0 } }), true);
   assert.equal(hasUsageData({ usage: { prompt_tokens_details: { cached_tokens: 0 } } }), true);
+  assert.equal(hasUsageData({ usage: { input_tokens_details: { cache_write_tokens: 0 } } }), true);
   assert.equal(hasUsageData({ usage: { prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0 } }), true);
 });
 
@@ -460,7 +461,7 @@ test('停止原因转换为目标协议的合法枚举', () => {
 test('响应转换保留缓存创建 token 并规范 Responses 停止原因', () => {
   const source = {
     id: 'resp_cache', model: 'gpt-test', status: 'incomplete', incomplete_details: {}, output: [],
-    usage: { input_tokens: 12, output_tokens: 4, cache_creation_input_tokens: 3, input_tokens_details: { cached_tokens: 5 } }
+    usage: { input_tokens: 12, output_tokens: 4, input_tokens_details: { cached_tokens: 5, cache_write_tokens: 3 } }
   };
   const normalized = normalizeResponse(source, 'responses');
   assert.equal(normalized.stopReason, 'max_tokens');
@@ -468,6 +469,32 @@ test('响应转换保留缓存创建 token 并规范 Responses 停止原因', ()
   assert.equal(claude.stop_reason, 'max_tokens');
   assert.equal(claude.usage.cache_read_input_tokens, 5);
   assert.equal(claude.usage.cache_creation_input_tokens, 3);
+  const responses = formatResponse(normalized, 'responses');
+  assert.equal(responses.usage.input_tokens_details.cache_write_tokens, 3);
+  assert.equal('cache_creation_tokens' in responses.usage.input_tokens_details, false);
+});
+
+test('转换到 Responses 始终保留标准零值 usage 明细', () => {
+  const response = formatResponse({ id: 'resp_zero_usage', model: 'gpt-test', parts: [], inputTokens: 2, outputTokens: 1, cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0, stopReason: 'end_turn' }, 'responses');
+  assert.deepEqual(response.usage, {
+    input_tokens: 2,
+    input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+    output_tokens: 1,
+    output_tokens_details: { reasoning_tokens: 0 },
+    total_tokens: 3
+  });
+});
+
+test('转换到 Responses 保留客户端的工具和并行设置', () => {
+  const tools = [{ type: 'function', name: 'lookup', description: '查找信息', parameters: { type: 'object' } }];
+  const response = formatResponse({ id: 'resp_tools', model: 'gpt-test', parts: [], inputTokens: 2, outputTokens: 1, cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0, stopReason: 'end_turn' }, 'responses', {
+    parallelToolCalls: false,
+    toolChoice: { type: 'function', name: 'lookup' },
+    tools
+  });
+  assert.equal(response.parallel_tool_calls, false);
+  assert.deepEqual(response.tool_choice, { type: 'function', name: 'lookup' });
+  assert.deepEqual(response.tools, tools);
 });
 
 test('Responses 输入项保持文本、工具调用和工具结果的语义顺序', () => {
@@ -575,4 +602,7 @@ test('Claude thinking 可转换为 Responses reasoning 输出项', () => {
   assert.equal(output.output[0].type, 'reasoning');
   assert.equal(output.output[0].summary[0].text, '检查约束');
   assert.equal(output.usage.input_tokens_details.cached_tokens, 2);
+  assert.equal(output.parallel_tool_calls, true);
+  assert.equal(output.tool_choice, 'auto');
+  assert.deepEqual(output.tools, []);
 });

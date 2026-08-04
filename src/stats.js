@@ -106,13 +106,13 @@ function tokenUsage(item) {
     ? item.inputTokensIncludeCache
     : !String(item.protocol || '').split('→').at(-1)?.trim().startsWith('claude');
   const uncachedInputTokens = inputTokensIncludeCache
-    ? Math.max(0, rawInputTokens - cachedInputTokens - cacheCreationInputTokens)
+    ? Math.max(0, rawInputTokens - cachedInputTokens)
     : rawInputTokens;
   return {
     uncachedInputTokens,
     cachedInputTokens,
     cacheCreationInputTokens,
-    inputTokens: uncachedInputTokens + cachedInputTokens + cacheCreationInputTokens
+    inputTokens: inputTokensIncludeCache ? rawInputTokens : uncachedInputTokens + cachedInputTokens + cacheCreationInputTokens
   };
 }
 

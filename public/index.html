@@ -151,12 +151,12 @@
           <div class="cache-summary">
             <span class="cache-kicker">OPENCODE CACHE</span>
             <h3>缓存效率</h3>
-            <p>缓存覆盖率按缓存读取 Token ÷ 总输入 Token 计算；缓存写入单独展示，不估算因模型价格变化产生的费用。</p>
+            <p>缓存覆盖率按缓存读取 Token ÷ 总输入 Token 计算；缓存写入是独立计费/写入指标，可能与输入 Token 重叠，因此不作为输入分段扣除。</p>
             <div class="cache-scores"><div><strong id="stats-cache-rate">0%</strong><span>Token 覆盖率</span></div><div><strong id="stats-cache-hit-rate">0%</strong><span>命中请求率</span></div></div>
           </div>
           <div class="cache-detail">
-            <div id="stats-cache-meter" class="cache-meter" role="img" aria-label="尚无缓存用量"><span class="cache-read"></span><span class="cache-write"></span><span class="cache-uncached"></span></div>
-            <div class="cache-legend"><span><i class="read"></i>缓存读取</span><span><i class="write"></i>缓存写入</span><span><i class="uncached"></i>未缓存输入</span></div>
+            <div id="stats-cache-meter" class="cache-meter" role="img" aria-label="尚无缓存用量"><span class="cache-read"></span><span class="cache-uncached"></span></div>
+            <div class="cache-legend"><span><i class="read"></i>缓存读取</span><span><i class="uncached"></i>未缓存输入</span><span><i class="write"></i>缓存写入（独立指标）</span></div>
             <div class="cache-kpis">
               <div><span>缓存读取</span><strong id="stats-cached-tokens">0</strong></div>
               <div><span>缓存写入</span><strong id="stats-cache-write-tokens">0</strong></div>

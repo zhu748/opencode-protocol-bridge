@@ -18,7 +18,7 @@ test('统计汇总不会重复计算缓存和推理 token', () => {
     usageRequests: 2, missingUsageRequests: 1,
     usageCoverageRate: 66.7, cacheHitRequests: 1, cacheWriteRequests: 1, cacheHitRequestRate: 50,
     credentialAttempts: 3, failoverRequests: 0, failoverAttempts: 0,
-    inputTokens: 15, uncachedInputTokens: 10, outputTokens: 5, cachedInputTokens: 3,
+    inputTokens: 15, uncachedInputTokens: 12, outputTokens: 5, cachedInputTokens: 3,
     cacheCreationInputTokens: 2, reasoningTokens: 2, cacheReadRate: 20, totalTokens: 20,
     averageTokensPerUsageRequest: 10
   });
@@ -52,6 +52,17 @@ test('时间趋势按范围生成固定桶并统计错误与 token', () => {
   assert.equal(all.range, '14d');
   assert.equal(all.buckets.length, 14);
   assert.equal(all.buckets.reduce((sum, item) => sum + item.requests, 0), 3);
+});
+
+test('OpenAI 缓存写入是独立指标，不会从原始输入的未缓存部分重复扣除', () => {
+  const result = aggregateRequestStats([
+    { time: '2026-08-04T11:00:00.000Z', status: 200, protocol: 'responses → chat', inputTokens: 100, outputTokens: 5, cachedInputTokens: 20, cacheCreationInputTokens: 30, inputTokensIncludeCache: true }
+  ], 'all', now);
+  assert.equal(result.summary.inputTokens, 100);
+  assert.equal(result.summary.cachedInputTokens, 20);
+  assert.equal(result.summary.uncachedInputTokens, 80);
+  assert.equal(result.summary.cacheCreationInputTokens, 30);
+  assert.equal(result.summary.totalTokens, 105);
 });
 
 test('Claude 缓存字段按独立输入口径汇总并兼容旧日志', () => {

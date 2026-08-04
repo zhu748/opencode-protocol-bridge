@@ -28,13 +28,28 @@ test('Claude SSE 可逐事件转换为 Responses SSE', async () => {
     ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } }],
     ['message_stop', { type: 'message_stop' }]
   ]);
-  const output = await collect(translateSse(source, 'claude', 'responses', 'alias'));
+  const responseTools = [{ type: 'function', name: 'lookup', description: '查找信息', parameters: { type: 'object' } }];
+  const output = await collect(translateSse(source, 'claude', 'responses', 'alias', {
+    responsesOptions: { parallelToolCalls: false, toolChoice: { type: 'function', name: 'lookup' }, tools: responseTools }
+  }));
   assert.match(output, /response\.created/);
   assert.match(output, /response\.output_text\.delta/);
   assert.match(output, /"delta":"你"/);
   assert.match(output, /"delta":"好"/);
   assert.match(output, /response\.completed/);
   assert.match(output, /"output_tokens":2/);
+  const events = output.split(/\n\n/).filter(Boolean).map((block) => JSON.parse(block.split(/\r?\n/).find((line) => line.startsWith('data: ')).slice(6)));
+  assert.deepEqual(events.map((event) => event.sequence_number), events.map((_, index) => index));
+  assert.equal(events[0].response.parallel_tool_calls, false);
+  assert.deepEqual(events[0].response.tool_choice, { type: 'function', name: 'lookup' });
+  assert.deepEqual(events[0].response.tools, responseTools);
+  assert.ok(events.filter((event) => event.type === 'response.output_text.delta').every((event) => Array.isArray(event.logprobs)));
+  const completed = events.find((event) => event.type === 'response.completed');
+  assert.equal(completed.response.parallel_tool_calls, false);
+  assert.deepEqual(completed.response.tool_choice, { type: 'function', name: 'lookup' });
+  assert.deepEqual(completed.response.tools, responseTools);
+  assert.deepEqual(completed.response.usage.input_tokens_details, { cached_tokens: 0, cache_write_tokens: 0 });
+  assert.deepEqual(completed.response.usage.output_tokens_details, { reasoning_tokens: 0 });
 });
 
 test('Chat SSE 工具调用可转换为 Claude SSE', async () => {
@@ -360,14 +375,15 @@ test('Responses incomplete 与 failed 流不会静默结束', async () => {
 
 test('流式缓存创建 token 与 incomplete 状态会保留到目标协议', async () => {
   const source = responseFrom([
-    ['response.created', { type: 'response.created', response: { id: 'resp_cache', model: 'gpt', usage: { input_tokens: 8, cache_creation_input_tokens: 3, input_tokens_details: { cached_tokens: 2 } } } }],
-    ['response.incomplete', { type: 'response.incomplete', response: { id: 'resp_cache', incomplete_details: { reason: 'max_output_tokens' }, usage: { input_tokens: 8, output_tokens: 4, cache_creation_input_tokens: 3, input_tokens_details: { cached_tokens: 2 } } } }]
+    ['response.created', { type: 'response.created', response: { id: 'resp_cache', model: 'gpt', usage: { input_tokens: 8, input_tokens_details: { cached_tokens: 2, cache_write_tokens: 3 } } } }],
+    ['response.incomplete', { type: 'response.incomplete', response: { id: 'resp_cache', incomplete_details: { reason: 'max_output_tokens' }, usage: { input_tokens: 8, output_tokens: 4, input_tokens_details: { cached_tokens: 2, cache_write_tokens: 3 } } } }]
   ]);
   let usage;
   const output = await collect(translateSse(source, 'responses', 'responses', 'alias', { onUsage: (value) => { usage = value; } }));
   assert.match(output, /event: response\.incomplete/);
   assert.match(output, /"status":"incomplete"/);
-  assert.match(output, /"cache_creation_tokens":3/);
+  assert.match(output, /"cache_write_tokens":3/);
+  assert.doesNotMatch(output, /"cache_creation_tokens":/);
   assert.deepEqual(usage, { inputTokens: 8, outputTokens: 4, cachedInputTokens: 2, cacheCreationInputTokens: 3, reasoningTokens: 0 });
 });
 
@@ -394,6 +410,41 @@ test('转换到 Chat 的流式错误使用 data 帧并正常结束', async () =>
   assert.doesNotMatch(output, /event: error/);
   assert.match(output, /^data: \{"error":/);
   assert.match(output, /data: \[DONE\]/);
+});
+
+test('转换到 Responses 的流式错误使用标准顶层字段和序号', async () => {
+  const source = responseFrom([
+    ['message_start', { type: 'message_start', message: { id: 'msg_error', model: 'claude-test', usage: { input_tokens: 1 } } }],
+    ['error', { type: 'error', error: { type: 'overloaded_error', message: '上游繁忙' } }]
+  ]);
+  const output = await collect(translateSse(source, 'claude', 'responses', 'alias'));
+  const errorBlock = output.split(/\n\n/).find((block) => block.startsWith('event: error'));
+  const error = JSON.parse(errorBlock.split(/\r?\n/).find((line) => line.startsWith('data: ')).slice(6));
+  assert.deepEqual(error, { type: 'error', code: 'overloaded_error', message: '上游繁忙', param: null, sequence_number: 1 });
+  assert.equal('error' in error, false);
+});
+
+test('转换到 Responses 在异常前公开下一个序号', async () => {
+  const source = responseFrom([
+    ['message', { id: 'chat_started', model: 'chat-test', choices: [{ delta: { role: 'assistant', content: '已开始' }, finish_reason: null }] }],
+    ['message', { id: 'chat_started', choices: [{ delta: { content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/x.png' } }] }, finish_reason: null }] }]
+  ]);
+  let nextSequenceNumber = 0;
+  await assert.rejects(
+    collect(translateSse(source, 'chat', 'responses', 'alias', { onResponsesSequenceNumber: (next) => { nextSequenceNumber = next; } })),
+    (error) => error.code === 'UPSTREAM_UNSUPPORTED_STREAM_CONTENT'
+  );
+  assert.equal(nextSequenceNumber, 4);
+});
+
+test('同协议 Responses 观察器保留追加错误所需的下一个序号', async () => {
+  const source = responseFrom([
+    ['response.created', { type: 'response.created', sequence_number: 7, response: { id: 'resp_truncated', model: 'gpt' } }],
+    ['response.output_item.added', { type: 'response.output_item.added', sequence_number: 8, output_index: 0, item: { id: 'msg_truncated', type: 'message', role: 'assistant', content: [] } }]
+  ]);
+  const observed = await observeSse(source, 'responses', 'alias');
+  assert.equal(observed.error.message, '上游 SSE 在完成事件前结束');
+  assert.equal(observed.nextSequenceNumber, 9);
 });
 
 test('上游 SSE 提前断开会生成明确错误', async () => {

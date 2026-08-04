@@ -51,9 +51,10 @@ function protocolError(res, status, protocol, message, type = 'invalid_request_e
   return json(res, status, { error: { message, type, code: null } }, headers);
 }
 
-function streamProtocolError(protocol, message) {
+function streamProtocolError(protocol, message, responseSequenceNumber = 0) {
   const error = { message, type: 'upstream_error', code: null };
   if (protocol === 'chat') return `data: ${JSON.stringify({ error })}\n\ndata: [DONE]\n\n`;
+  if (protocol === 'responses') return `event: error\ndata: ${JSON.stringify({ type: 'error', code: 'upstream_error', message, param: null, sequence_number: Number.isSafeInteger(responseSequenceNumber) && responseSequenceNumber >= 0 ? responseSequenceNumber : 0 })}\n\n`;
   return `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: error.type, message } })}\n\n`;
 }
 
@@ -715,6 +716,15 @@ function upstreamSystemText(body, protocol) {
     .filter(Boolean).join('\n');
 }
 
+function responsesOutputOptions(body, protocol) {
+  if (protocol !== 'responses') return {};
+  return {
+    parallelToolCalls: typeof body.parallel_tool_calls === 'boolean' ? body.parallel_tool_calls : true,
+    toolChoice: body.tool_choice ?? 'auto',
+    tools: Array.isArray(body.tools) ? body.tools : []
+  };
+}
+
 async function proxyRequest(req, res, url, config, client, forcedProvider) {
   const incomingProtocol = detectProtocol(url.pathname);
   if (!incomingProtocol) return protocolError(res, 404, 'chat', '仅支持 messages、responses 和 chat/completions 端点');
@@ -730,6 +740,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
     body.system = promptRewrite.system;
   }
   const route = resolveRoute(body.model, config, forcedProvider);
+  const responseOptions = responsesOutputOptions(body, incomingProtocol);
   if (!route.upstreamModel) return protocolError(res, 400, incomingProtocol, '上游模型名不能为空');
   let upstreamBody;
   try {
@@ -836,11 +847,12 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
       }
     } catch (error) {
       const failure = streamFailure(error, res, abort);
+      const observed = failure.status === 499 ? undefined : await observation;
       if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
       else credentialHealth.releaseProbe(route.provider, credential);
       await writeLog({ status: failure.status, stream: true, error: failure.message });
       if (!res.writableEnded && !res.destroyed) {
-        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message));
+        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message, observed?.nextSequenceNumber));
         res.end();
       }
       return;
@@ -848,7 +860,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
     const observed = await observation;
     if (isIncompleteSseError(observed.error)) {
       credentialHealth.recordNetworkFailure(route.provider, credential, 502);
-      if (!res.writableEnded && !res.destroyed) res.write(streamProtocolError(incomingProtocol, observed.error.message));
+      if (!res.writableEnded && !res.destroyed) res.write(streamProtocolError(incomingProtocol, observed.error.message, observed.nextSequenceNumber));
     }
     else if (observed.error) credentialHealth.releaseProbe(route.provider, credential);
     else recordCredentialResponse(route.provider, credential, upstream);
@@ -858,11 +870,14 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
   if (body.stream) {
     let streamUsage = {};
     let streamError;
+    let responseSequenceNumber = 0;
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' });
     try {
       for await (const event of translateSse(upstream, route.protocol, incomingProtocol, body.model, {
         onUsage: (usage) => { streamUsage = usage; },
-        onError: (error) => { streamError = error; }
+        onError: (error) => { streamError = error; },
+        onResponsesSequenceNumber: (nextSequenceNumber) => { responseSequenceNumber = nextSequenceNumber; },
+        responsesOptions: responseOptions
       })) {
         await writeChunk(res, event);
       }
@@ -872,7 +887,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
       else credentialHealth.releaseProbe(route.provider, credential);
       await writeLog({ status: failure.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', error: failure.message, ...streamUsage });
       if (!res.writableEnded && !res.destroyed) {
-        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message));
+        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message, responseSequenceNumber));
         res.end();
       }
       return;
@@ -894,7 +909,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
   let clientResponse;
   try {
     normalizedResponse = normalizeResponse(upstreamJson, route.protocol, body.model, { rejectUnknown: incomingProtocol !== route.protocol });
-    clientResponse = incomingProtocol === route.protocol ? upstreamJson : formatResponse(normalizedResponse, incomingProtocol);
+    clientResponse = incomingProtocol === route.protocol ? upstreamJson : formatResponse(normalizedResponse, incomingProtocol, responseOptions);
   } catch (error) {
     await writeLog({ status: 502, stream: false, error: error.message });
     return protocolError(res, 502, incomingProtocol, `上游响应结构无效：${error.message}`, 'upstream_error');

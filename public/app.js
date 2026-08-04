@@ -310,12 +310,11 @@ function renderStats(stats) {
   const totalInput = summary.inputTokens || 0;
   const readShare = totalInput ? summary.cachedInputTokens / totalInput * 100 : 0;
   const writeShare = totalInput ? summary.cacheCreationInputTokens / totalInput * 100 : 0;
-  const uncachedShare = Math.max(0, 100 - readShare - writeShare);
+  const uncachedShare = Math.max(0, 100 - readShare);
   const meter = $('#stats-cache-meter');
   meter.querySelector('.cache-read').className = `cache-read ${portionClass(readShare, 100)}`;
-  meter.querySelector('.cache-write').className = `cache-write ${portionClass(writeShare, 100)}`;
   meter.querySelector('.cache-uncached').className = `cache-uncached ${portionClass(totalInput ? uncachedShare : 100, 100)}`;
-  meter.setAttribute('aria-label', `缓存读取 ${summary.cacheReadRate}%，缓存写入 ${totalInput ? (writeShare).toFixed(1) : 0}%，未缓存 ${totalInput ? uncachedShare.toFixed(1) : 0}%`);
+  meter.setAttribute('aria-label', `缓存读取 ${summary.cacheReadRate}%，未缓存 ${totalInput ? uncachedShare.toFixed(1) : 0}%；缓存写入 ${totalInput ? (writeShare).toFixed(1) : 0}% 为独立指标`);
   const range = stats.window === 'all' ? '全部保留记录' : stats.window === '24h' ? '最近 24 小时' : '最近 7 天';
   $('#stats-scope').textContent = `统计范围：${range} · 当前共保留 ${formatNumber(stats.retainedRequests)} 条元数据 · 生成于 ${new Date(stats.generatedAt).toLocaleString()}`;
   renderStatsRows('#stats-provider-rows', stats.byProvider);
