@@ -82,6 +82,20 @@ test('冷却结束只放行一个半开探测请求，避免并发重试风暴',
   assert.equal(health.snapshot('go', [credentials[0]])[0].state, 'cooldown');
 });
 
+test('客户端取消或本地转换错误会释放半开探测但不惩罚 Key', () => {
+  let now = 1_000;
+  const health = new CredentialHealthTracker({ now: () => now, authCooldownMs: 1_000 });
+  health.recordResponse('go', credentials[0], 401);
+  now += 1_001;
+  assert.equal(health.select('go', [credentials[0]]).credential, credentials[0]);
+  assert.equal(health.snapshot('go', [credentials[0]])[0].state, 'probing');
+  assert.equal(health.releaseProbe('go', credentials[0]), true);
+  assert.equal(health.snapshot('go', [credentials[0]])[0].state, 'degraded');
+  assert.equal(health.select('go', [credentials[0]]).credential, credentials[0]);
+  assert.equal(health.releaseProbe('go', credentials[0]), true);
+  assert.equal(health.snapshot('go', [credentials[0]])[0].consecutiveFailures, 1);
+});
+
 test('Key 展示名称只包含提供方、来源和槽位', () => {
   assert.equal(credentialDisplayName('zen', 'environment:3'), 'ZEN 环境 #3');
   assert.equal(credentialDisplayName('go', 'config:1'), 'GO · 面板 Key');

@@ -12,7 +12,7 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
   const configFile = resolve(import.meta.dirname, `../data/smoke-${randomUUID()}.json`);
   const child = spawn(process.execPath, ['src/server.js'], {
     cwd: resolve(import.meta.dirname, '..'),
-    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile, CONFIG_ENCRYPTION_KEY: 'integration-test-master-key', OPENCODE_BRIDGE_ADMIN_PASSWORD: '' },
+    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile, CONFIG_ENCRYPTION_KEY: 'integration-test-master-key', OPENCODE_BRIDGE_ADMIN_PASSWORD: '', OPENCODE_BRIDGE_TRUST_PROXY: '' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   try {
@@ -176,9 +176,10 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.equal(logout.status, 200);
     const wrongLogin = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrongpassword' }) });
     assert.equal(wrongLogin.status, 401);
-    const correctLogin = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'testpassword123' }) });
+    const correctLogin = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https' }, body: JSON.stringify({ password: 'testpassword123' }) });
     assert.equal(correctLogin.status, 200);
     assert.match(correctLogin.headers.get('set-cookie'), /HttpOnly/);
+    assert.doesNotMatch(correctLogin.headers.get('set-cookie'), /; Secure/);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});
@@ -188,8 +189,18 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
 
 test('流式上游中途断开会向客户端发送协议错误并写入失败日志', { timeout: 10_000 }, async () => {
   let upstreamCalls = 0;
+  let resolveDelayedRequest;
+  const delayedRequest = new Promise((resolveRequest) => { resolveDelayedRequest = resolveRequest; });
   const upstream = createHttpServer((req, res) => {
     upstreamCalls++;
+    if (upstreamCalls === 6) {
+      resolveDelayedRequest();
+      const delayedResponse = setTimeout(() => {
+        if (!res.destroyed) res.end(JSON.stringify({ error: { message: '不应到达客户端' } }));
+      }, 1_000);
+      res.once('close', () => clearTimeout(delayedResponse));
+      return;
+    }
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
     res.write(`data: ${JSON.stringify({
       id: 'chat_broken', model: 'deepseek-v4-flash',
@@ -202,6 +213,7 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
         choices: [{ index: 0, delta: { content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/x.png' } }] }, finish_reason: null }]
       })}\n\n`);
     }
+    else if (upstreamCalls === 5) res.end();
     else {
       res.end(`data: ${JSON.stringify({
         id: 'chat_recovered', model: 'deepseek-v4-flash',
@@ -289,6 +301,38 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     assert.equal(mediaStats.summary.requests, 4);
     assert.equal(mediaStats.summary.errors, 3);
     assert.equal(mediaStats.credentialHealth[0].consecutiveFailures, 0);
+
+    const cleanlyTruncated = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, messages: [{ role: 'user', content: 'truncate cleanly' }] })
+    });
+    const cleanlyTruncatedText = await cleanlyTruncated.text();
+    assert.equal(cleanlyTruncated.status, 200);
+    assert.match(cleanlyTruncatedText, /上游 SSE 在完成事件前结束/);
+    assert.match(cleanlyTruncatedText, /data: \[DONE\]/);
+    const truncatedStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(truncatedStats.summary.requests, 5);
+    assert.equal(truncatedStats.summary.errors, 4);
+    assert.equal(truncatedStats.credentialHealth[0].consecutiveFailures, 1);
+
+    const cancellation = new AbortController();
+    const canceledRequest = fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', signal: cancellation.signal,
+      headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, messages: [{ role: 'user', content: 'cancel before headers' }] })
+    });
+    await delayedRequest;
+    cancellation.abort();
+    await assert.rejects(canceledRequest, (error) => error.name === 'AbortError');
+    let canceledStats;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      canceledStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+      if (canceledStats.summary.requests === 6) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    assert.equal(canceledStats.summary.requests, 6);
+    assert.equal(canceledStats.summary.errors, 5);
+    assert.equal(canceledStats.credentialHealth[0].consecutiveFailures, 1);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});
@@ -400,6 +444,7 @@ test('可从 Render 环境变量引导完整配置且敏感值加密落盘', { t
       OPENCODE_ZEN_KEY: 'render-zen-secret',
       OPENCODE_GO_KEY: '',
       OPENCODE_ZEN_PROXY_URL: '',
+      OPENCODE_BRIDGE_TRUST_PROXY: 'true',
       OPENCODE_BRIDGE_DEFAULT_PROVIDER: 'zen'
     },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -417,9 +462,10 @@ test('可从 Render 环境变量引导完整配置且敏感值加密落盘', { t
     assert.equal(health.ready, true);
     assert.equal(health.configured, true);
     const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: adminPassword })
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https, http' }, body: JSON.stringify({ password: adminPassword })
     });
     assert.equal(login.status, 200);
+    assert.match(login.headers.get('set-cookie'), /; Secure/);
     const cookie = login.headers.get('set-cookie').split(';')[0];
     const runtimeConfig = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } }).then((response) => response.json());
     assert.equal(runtimeConfig.clientToken, '••••');

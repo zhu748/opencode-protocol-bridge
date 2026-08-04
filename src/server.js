@@ -33,7 +33,10 @@ const environmentCredentialPools = {
 const credentialHealth = new CredentialHealthTracker();
 
 function sessionCookie(req, token, maxAge = 86400) {
-  const secure = req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https';
+  const forwardedProto = typeof req.headers['x-forwarded-proto'] === 'string'
+    ? req.headers['x-forwarded-proto'].split(',', 1)[0].trim().toLowerCase()
+    : '';
+  const secure = Boolean(req.socket.encrypted) || (TRUST_PROXY && forwardedProto === 'https');
   return `bridge_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
 
@@ -767,6 +770,11 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
     try {
       upstream = await callUpstream({ provider: route.provider, protocol: route.protocol, ...credential, body: upstreamBody, signal: abort.signal, timeoutMs: config.upstreamTimeoutMs, forwardHeaders: compatibilityHeaders(req, incomingProtocol, route.protocol) });
     } catch (error) {
+      if (abort.signal.aborted) {
+        credentialHealth.releaseProbe(route.provider, credential);
+        await writeLog({ status: 499, error: '客户端在收到上游响应前断开' });
+        return;
+      }
       const status = upstreamFailureStatus(error);
       credentialHealth.recordNetworkFailure(route.provider, credential, status);
       await writeLog({ status, error: error.message });
@@ -817,6 +825,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
     } catch (error) {
       const failure = streamFailure(error, res, abort);
       if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
+      else credentialHealth.releaseProbe(route.provider, credential);
       await writeLog({ status: failure.status, stream: true, error: failure.message });
       if (!res.writableEnded && !res.destroyed) {
         if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message));
@@ -825,8 +834,12 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
       return;
     }
     const observed = await observation;
-    if (isIncompleteSseError(observed.error)) credentialHealth.recordNetworkFailure(route.provider, credential, 502);
-    if (!observed.error) recordCredentialResponse(route.provider, credential, upstream);
+    if (isIncompleteSseError(observed.error)) {
+      credentialHealth.recordNetworkFailure(route.provider, credential, 502);
+      if (!res.writableEnded && !res.destroyed) res.write(streamProtocolError(incomingProtocol, observed.error.message));
+    }
+    else if (observed.error) credentialHealth.releaseProbe(route.provider, credential);
+    else recordCredentialResponse(route.provider, credential, upstream);
     await writeLog({ status: observed.error ? 502 : upstream.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', ...(observed.error ? { error: observed.error.message || String(observed.error) } : {}), ...observed.usage });
     return res.end();
   }
@@ -844,6 +857,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
     } catch (error) {
       const failure = streamFailure(error, res, abort);
       if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
+      else credentialHealth.releaseProbe(route.provider, credential);
       await writeLog({ status: failure.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', error: failure.message, ...streamUsage });
       if (!res.writableEnded && !res.destroyed) {
         if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message));
@@ -852,7 +866,8 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
       return;
     }
     if (isIncompleteSseError(streamError)) credentialHealth.recordNetworkFailure(route.provider, credential, 502);
-    if (!streamError) recordCredentialResponse(route.provider, credential, upstream);
+    else if (streamError) credentialHealth.releaseProbe(route.provider, credential);
+    else recordCredentialResponse(route.provider, credential, upstream);
     await writeLog({ status: streamError ? 502 : upstream.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', ...(streamError ? { error: streamError.message || String(streamError) } : {}), ...streamUsage });
     return res.end();
   }

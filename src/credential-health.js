@@ -113,6 +113,14 @@ export class CredentialHealthTracker {
     return this.states.delete(identity(provider, credential));
   }
 
+  releaseProbe(provider, credential) {
+    const key = identity(provider, credential);
+    const state = this.states.get(key);
+    if (!state?.probeInFlight) return false;
+    this.states.set(key, { ...state, probeInFlight: false, touchedAt: this.now() });
+    return true;
+  }
+
   trim() {
     while (this.states.size > this.options.maxStates) {
       const oldest = [...this.states.entries()].sort((left, right) => left[1].touchedAt - right[1].touchedAt)[0];

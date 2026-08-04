@@ -6,6 +6,7 @@ export class RequestLogStore {
     this.file = file;
     this.items = [];
     this.loaded = false;
+    this.loadPromise = null;
     this.writeQueue = Promise.resolve();
     this.flushTimer = null;
     this.dirty = false;
@@ -13,7 +14,14 @@ export class RequestLogStore {
   }
 
   async ensureLoaded({ persist = false, limit = 100 } = {}) {
-    if (this.loaded || !persist) return;
+    if (this.loaded) return;
+    if (!this.loadPromise && !persist) return;
+    if (!this.loadPromise) this.loadPromise = this.#loadPersistent();
+    await this.loadPromise;
+    this.items.splice(normalizeLimit(limit));
+  }
+
+  async #loadPersistent() {
     try {
       const information = await stat(this.file);
       if (information.size > 10 * 1024 * 1024) throw new Error('日志文件超过 10 MiB 安全上限');
@@ -22,11 +30,13 @@ export class RequestLogStore {
       const merged = [...this.items, ...parsed.map(sanitizeEntry)];
       this.items = [...new Map(merged.map((item) => [item.requestId || `${item.time}:${Math.random()}`, item])).values()]
         .sort((left, right) => String(right.time).localeCompare(String(left.time)))
-        .slice(0, normalizeLimit(limit));
+        .slice(0, 1000);
     } catch (error) {
       if (error.code !== 'ENOENT') this.lastError = `无法读取持久化日志：${error.message}`;
+    } finally {
+      this.loaded = true;
+      this.loadPromise = null;
     }
-    this.loaded = true;
   }
 
   async add(entry, options = {}) {
@@ -75,7 +85,11 @@ export class RequestLogStore {
     this.flushTimer = null;
     if (!this.dirty) return this.writeQueue;
     this.dirty = false;
-    return this.#persist();
+    try { return await this.#persist(); }
+    catch (error) {
+      this.dirty = true;
+      throw error;
+    }
   }
 
   #schedulePersist() {
