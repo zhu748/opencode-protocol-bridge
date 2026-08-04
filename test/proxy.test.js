@@ -39,6 +39,10 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
         output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '无用量字段' }] }]
       }));
     }
+    if (current.body.model === 'stream-json') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ id: 'resp_not_streaming', model: current.body.model, status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 1 } }));
+    }
     if (current.body.model === 'responses-vendor') {
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({
@@ -93,7 +97,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     const cookie = setup.headers.get('set-cookie').split(';')[0];
     const saved = await fetch(`http://127.0.0.1:${bridgePort}/api/config`, {
       method: 'PUT', headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ defaultProvider: 'zen', proxyUrl: '', zenKey: 'upstream-secret', goKey: 'go-secret', clientToken: '', requestLogLimit: 100, persistLogs: true, upstreamTimeoutMs: 1000, maxConcurrentRequests: 10, modelRoutes: { alias: { provider: 'zen', protocol: 'responses', upstreamModel: 'gpt-test' }, 'responses-same': { provider: 'zen', protocol: 'responses', upstreamModel: 'responses-vendor' }, 'missing-usage': { provider: 'zen', protocol: 'responses', upstreamModel: 'no-usage' }, broken: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-json' }, malformed: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-shape' }, slow: { provider: 'zen', protocol: 'responses', upstreamModel: 'slow-response' }, 'claude-alias': { provider: 'zen', protocol: 'claude', upstreamModel: 'claude-upstream' } }, promptRewriteRules: [{ id: 'integration', name: '集成替换', enabled: true, find: '系统提示', replace: '处理后系统提示' }] })
+      body: JSON.stringify({ defaultProvider: 'zen', proxyUrl: '', zenKey: 'upstream-secret', goKey: 'go-secret', clientToken: '', requestLogLimit: 100, persistLogs: true, upstreamTimeoutMs: 1000, maxConcurrentRequests: 10, modelRoutes: { alias: { provider: 'zen', protocol: 'responses', upstreamModel: 'gpt-test' }, 'responses-same': { provider: 'zen', protocol: 'responses', upstreamModel: 'responses-vendor' }, 'missing-usage': { provider: 'zen', protocol: 'responses', upstreamModel: 'no-usage' }, 'stream-json': { provider: 'zen', protocol: 'responses', upstreamModel: 'stream-json' }, broken: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-json' }, malformed: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-shape' }, slow: { provider: 'zen', protocol: 'responses', upstreamModel: 'slow-response' }, 'claude-alias': { provider: 'zen', protocol: 'claude', upstreamModel: 'claude-upstream' } }, promptRewriteRules: [{ id: 'integration', name: '集成替换', enabled: true, find: '系统提示', replace: '处理后系统提示' }] })
     });
     assert.equal(saved.status, 200);
 
@@ -278,6 +282,15 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     const unsupportedBody = await unsupportedCrossProtocol.json();
     assert.match(unsupportedBody.error.message, /web_search/);
     assert.equal(unsupportedBody.error.type, 'invalid_request_error');
+
+    const wrongStreamType = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
+      body: JSON.stringify({ model: 'stream-json', stream: true, max_tokens: 16, messages: [{ role: 'user', content: '不能伪装成 SSE' }] })
+    });
+    assert.equal(wrongStreamType.status, 502);
+    const wrongStreamTypeBody = await wrongStreamType.json();
+    assert.equal(wrongStreamTypeBody.type, 'error');
+    assert.match(wrongStreamTypeBody.error.message, /上游流式响应格式无效.*application\/json/);
 
     const modelList = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/models`, { headers: { authorization: `Bearer ${setupBody.clientToken}` } });
     assert.equal(modelList.status, 200);

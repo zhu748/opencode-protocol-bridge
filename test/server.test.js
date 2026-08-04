@@ -73,6 +73,11 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
 
     const invalidCredential = await fetch(`http://127.0.0.1:${port}/api/provider-credentials`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ provider: 'zen', name: '错误代理', apiKey: 'panel-secret', proxyUrl: 'ftp://bad' }) });
     assert.equal(invalidCredential.status, 400);
+    const invalidConnectionProvider = await fetch(`http://127.0.0.1:${port}/api/models/test`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ provider: 'typo', apiKey: 'secret' }) });
+    assert.equal(invalidConnectionProvider.status, 400);
+    const invalidConnectionKey = await fetch(`http://127.0.0.1:${port}/api/models/test`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ provider: 'zen', apiKey: { secret: true } }) });
+    assert.equal(invalidConnectionKey.status, 400);
+    assert.match((await invalidConnectionKey.json()).error, /API Key 必须是字符串/);
     const createdCredentialResponse = await fetch(`http://127.0.0.1:${port}/api/provider-credentials`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ provider: 'zen', name: '主力套餐', apiKey: 'panel-secret', proxyUrl: 'socks5h://user:pass@127.0.0.1:1080' }) });
     assert.equal(createdCredentialResponse.status, 201);
     const createdCredentialConfig = await createdCredentialResponse.json();
@@ -140,6 +145,14 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
 
     const models = await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { authorization: `Bearer ${setupBody.clientToken}` } });
     assert.equal(models.status, 503);
+    const invalidPublicProvider = await fetch(`http://127.0.0.1:${port}/v1/models?provider=typo`, { headers: { authorization: `Bearer ${setupBody.clientToken}` } });
+    assert.equal(invalidPublicProvider.status, 400);
+    assert.match((await invalidPublicProvider.json()).error.message, /provider 仅支持 zen、go 或 all/);
+    const invalidLookupProvider = await fetch(`http://127.0.0.1:${port}/v1/models/example?provider=typo`, { headers: { authorization: `Bearer ${setupBody.clientToken}` } });
+    assert.equal(invalidLookupProvider.status, 400);
+    assert.match((await invalidLookupProvider.json()).error.message, /provider 仅支持 zen 或 go/);
+    const invalidAdminProvider = await fetch(`http://127.0.0.1:${port}/api/models?provider=typo`, { headers: { cookie } });
+    assert.equal(invalidAdminProvider.status, 400);
 
     const wrongModelsMethod = await fetch(`http://127.0.0.1:${port}/v1/models`, { method: 'POST' });
     assert.equal(wrongModelsMethod.status, 405);

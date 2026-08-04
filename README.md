@@ -236,7 +236,7 @@ OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变�
 ## 流式说明
 
 - 客户端协议与上游协议相同时，正常 SSE 数据实时原样透传；服务通过并行观察流记录 usage。若上游在完成事件前中断，服务会追加目标协议可识别的错误帧，避免客户端把截断内容误判为成功。
-- 跨协议时，服务会维护内容块索引和工具调用状态，将上游事件逐条转换为目标协议事件，不再缓存完整响应；SSE 解析兼容 LF、CRLF 和 CR 换行。客户端断开时，上游请求会被取消。
+- 跨协议时，服务会维护内容块索引和工具调用状态，将上游事件逐条转换为目标协议事件，不再缓存完整响应；SSE 解析兼容 LF、CRLF 和 CR 换行。流式请求要求上游返回标准 `text/event-stream`，避免把 HTTP 200 的普通 JSON 错误误判为空流；客户端断开时，上游请求会被取消。
 - 跨协议流会保留 `completed`/`incomplete`、token 上限停止原因、缓存读取/写入 token 和推理 token；上游错误会使用目标协议可识别的 SSE 帧返回。单个上游 SSE 事件最多缓冲 8 MiB，超限会终止转换，防止异常上游无限占用内存。
 - 流式请求只有在完整结束后才会把对应 Key 记为健康；包括正常关闭连接但缺少完成事件的截断流，都会写入失败日志、返回错误帧并参与连续失败熔断。客户端主动断开记为内部状态 499，但不会惩罚 Key，也不会让冷却后的半开探测槽位永久占用。
 
@@ -250,6 +250,7 @@ OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变�
 - 本项目覆盖 Claude Messages、OpenAI Responses 和 Chat Completions 三个协议族；OpenCode 中使用 Google `generateContent` 原生端点的 Gemini 模型不在当前转换范围内。
 - 单个 JSON 请求体上限为 10 MiB，模型 ID 上限为 256 个字符；更大的 PDF 或其他文件应先使用目标服务的 Files API 上传，再通过 file ID 引用。
 - `/models` 与 `/models/{model}` 仅接受 GET，三个推理端点仅接受 POST；方法错误会返回 HTTP 405、标准 `Allow` 头以及目标协议可识别的错误体。
+- 通用 `/v1/models` 的 `provider` 查询参数仅接受 `zen`、`go` 或列表场景的 `all`，非法值会明确返回 400，不会静默回退到默认套餐；带 `/zen/v1`、`/go/v1` 的路径始终以路径为准。
 - 同协议请求和非流式响应会在最小结构校验后保留厂商扩展字段；同协议流式响应原样透传。跨协议转换覆盖系统提示、文本、拒绝内容、图片及其 `detail`、Claude Documents/Responses 文件块、采样参数、函数工具、工具选择、新旧工具调用、工具结果、推理强度及 usage；Claude 的 `tool_result + 后续用户文本` 转 Chat 时会保持合法的 tool → user 顺序。停止词会在 Claude/Chat 目标间转换；Responses 不支持 stop，收到跨协议停止词时返回明确的 400。Claude 转 Chat 时保留兼容代理使用的 `cache_control`，转 Responses 时会移除该非标准字段；转 Claude 时 metadata 只保留合法的 `user_id`。Responses 内置工具/custom tool、Claude server tool、未知内容块、Chat 文件输入及 Chat 无法表达的图片 `file_id` 在跨协议请求时返回 400；上游响应包含目标协议无法表达的图片、文档或流式媒体块时返回明确的转换错误，避免静默丢失内容。其他非内容类厂商专属字段会被忽略。
 - DeepSeek V4 Flash / V4 Flash Free 的 Chat 工具调用在未显式请求推理时会自动设置 `reasoning_effort: "none"`，避免模型默认 Thinking 模式拒绝工具；客户端显式启用 Claude thinking 时不会静默覆盖其选择。
 - 请求日志默认仅保存在内存中；管理面板可启用有界持久化，文件为 `data/request-logs.json`。日志不包含提示词、响应正文或密钥，启动时的并发请求只共享一次旧日志加载，写盘会在短时间窗口内合并，并在管理读取或服务正常退出时强制刷新；临时写盘失败会保留待写状态供下次刷新重试。关闭持久化会取消尚未执行的延迟写盘，但不会自动删除已有文件；需要删除历史内容时再点击“清空记录”。
@@ -279,4 +280,6 @@ npm test
 npm run check
 ```
 
-测试不调用真实 OpenCode 接口，因此不会产生费用。
+默认测试不调用真实 OpenCode 接口，因此不会产生费用。
+
+如需用临时 Go Key 对官方 `deepseek-v4-flash` 做小额度在线冒烟测试，可在当前 PowerShell 会话设置 `OPENCODE_GO_KEY` 后运行 `npm run test:live:go`。脚本会通过本地 `/go/v1` 验证模型发现、Responses 转换、Claude 工具调用与 Chat SSE，只输出状态和 usage；Key 不写入项目配置或日志，临时加密配置会在结束时删除。测试后可执行 `Remove-Item Env:OPENCODE_GO_KEY` 清除当前会话变量。

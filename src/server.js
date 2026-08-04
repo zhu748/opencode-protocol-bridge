@@ -637,7 +637,9 @@ async function adminApi(req, res, url, config) {
     });
   }
   if (url.pathname === '/api/models' && req.method === 'GET') {
-    const provider = url.searchParams.get('provider') === 'go' ? 'go' : 'zen';
+    const requestedProvider = url.searchParams.get('provider');
+    if (requestedProvider && !['zen', 'go'].includes(requestedProvider)) return json(res, 400, { error: 'provider 仅支持 zen 或 go' });
+    const provider = requestedProvider === 'go' ? 'go' : 'zen';
     try {
       const result = await listModelsWithCredentialFailover(config, provider);
       if (!result.response) {
@@ -657,7 +659,8 @@ async function adminApi(req, res, url, config) {
   }
   if (url.pathname === '/api/models/test' && req.method === 'POST') {
     const body = await bodyJson(req);
-    const provider = body.provider === 'go' ? 'go' : 'zen';
+    const provider = body.provider === 'go' ? 'go' : body.provider === 'zen' ? 'zen' : null;
+    if (!provider) return json(res, 400, { error: 'provider 仅支持 zen 或 go' });
     const requestedCredentialId = typeof body.credentialId === 'string' ? body.credentialId : '';
     let selection = { credential: null, reason: null, retryAfterMs: 0 };
     if (requestedCredentialId) {
@@ -666,7 +669,7 @@ async function adminApi(req, res, url, config) {
       if (!selection.credential) return json(res, 404, { error: '指定的 Key 槽位不存在' });
     } else if (!body.apiKey) selection = selectProviderCredential(config, provider);
     const selected = selection.credential;
-    const apiKey = String(body.apiKey || selected?.apiKey || '').trim();
+    const apiKey = panelCredentialKey(body.apiKey) || selected?.apiKey || '';
     let proxyUrl;
     try { proxyUrl = normalizeProxyUrl(body.proxyUrl ?? selected?.proxyUrl ?? providerProxyUrl(config, provider)); }
     catch (error) { return json(res, 400, { error: `代理地址无效：${error.message}` }); }
@@ -808,6 +811,15 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
       message = parsed.error?.message || parsed.message || message;
     } catch { /* 上游可能返回纯文本 */ }
     return protocolError(res, upstream.status, incomingProtocol, message, 'upstream_error');
+  }
+  const upstreamContentType = upstream.headers.get('content-type') || '';
+  if (body.stream && !/^text\/event-stream(?:\s*;|$)/i.test(upstreamContentType)) {
+    await upstream.body?.cancel().catch(() => {});
+    const received = upstreamContentType ? `收到 ${upstreamContentType.slice(0, 128)}` : '缺少 Content-Type';
+    const message = `上游流式响应格式无效：${received}`;
+    credentialHealth.recordNetworkFailure(route.provider, credential, 502);
+    await writeLog({ status: 502, stream: true, error: message });
+    return protocolError(res, 502, incomingProtocol, message, 'upstream_error');
   }
   if (body.stream && incomingProtocol === route.protocol) {
     let forwardBody = upstream.body;
@@ -988,6 +1000,9 @@ const server = createServer(async (req, res) => {
         if (requestedModel.length > 256) return json(res, 400, { error: { message: '模型 ID 不能超过 256 个字符', type: 'invalid_request_error' } });
         const goModel = requestedModel.startsWith('opencode-go/');
         const requestedProvider = url.searchParams.get('provider');
+        if (!apiScope.provider && requestedProvider && !['zen', 'go'].includes(requestedProvider)) {
+          return protocolError(res, 400, 'chat', 'provider 仅支持 zen 或 go');
+        }
         const provider = apiScope.provider || (goModel ? 'go' : (['zen', 'go'].includes(requestedProvider) ? requestedProvider : config.defaultProvider));
         const upstreamModel = goModel ? requestedModel.slice('opencode-go/'.length) : requestedModel.startsWith('opencode/') ? requestedModel.slice('opencode/'.length) : requestedModel;
         try {
@@ -1012,6 +1027,9 @@ const server = createServer(async (req, res) => {
       if (url.pathname === modelsPath && req.method === 'GET') {
         if (!clientAuthorized(req, config)) return json(res, 401, { error: { type: 'authentication_error', message: '访问令牌无效' } });
         const requestedProvider = url.searchParams.get('provider');
+        if (!apiScope.provider && requestedProvider && !['zen', 'go', 'all'].includes(requestedProvider)) {
+          return protocolError(res, 400, 'chat', 'provider 仅支持 zen、go 或 all');
+        }
         const provider = apiScope.provider || (['zen', 'go', 'all'].includes(requestedProvider) ? requestedProvider : config.defaultProvider);
         if (provider === 'all') {
           const configuredProviders = ['zen', 'go'].filter((item) => providerCredentials(config, item).length);
