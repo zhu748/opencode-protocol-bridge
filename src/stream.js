@@ -1,7 +1,15 @@
 import { randomUUID } from 'node:crypto';
 
+export const MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
+
+function assertSseEventSize(value) {
+  if (Buffer.byteLength(value, 'utf8') > MAX_SSE_EVENT_BYTES) {
+    throw Object.assign(new Error('上游 SSE 单个事件超过 8 MiB 上限'), { code: 'UPSTREAM_SSE_EVENT_TOO_LARGE' });
+  }
+}
+
 function parseSseBlock(block) {
-  const lines = block.split(/\r?\n/);
+  const lines = block.split(/\r\n|\r|\n/);
   const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() || 'message';
   const data = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
   if (!data || data === '[DONE]') return null;
@@ -15,20 +23,23 @@ async function* parseSse(body) {
   for await (const chunk of body) {
     buffer += decoder.decode(chunk, { stream: true });
     let boundary;
-    while ((boundary = buffer.search(/\r?\n\r?\n/)) !== -1) {
+    while ((boundary = buffer.search(/\r\n\r\n|\r\r|\n\n/)) !== -1) {
       const block = buffer.slice(0, boundary);
-      const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)[0];
+      assertSseEventSize(block);
+      const separator = buffer.slice(boundary).match(/^(?:\r\n\r\n|\r\r|\n\n)/)[0];
       buffer = buffer.slice(boundary + separator.length);
       const parsed = parseSseBlock(block);
       if (parsed) yield parsed;
     }
+    assertSseEventSize(buffer);
   }
   buffer += decoder.decode();
+  assertSseEventSize(buffer);
   const parsed = parseSseBlock(buffer.trim());
   if (parsed) yield parsed;
 }
 
-async function* canonicalEvents(response, protocol, fallbackModel) {
+async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsupportedContent = false } = {}) {
   let started = false;
   let id;
   let model = fallbackModel;
@@ -158,7 +169,7 @@ async function* canonicalEvents(response, protocol, fallbackModel) {
       yield { type: 'start', id, model, inputTokens, cachedInputTokens, cacheCreationInputTokens };
     }
     const reasoningDelta = choice?.delta?.reasoning_content || choice?.delta?.reasoning;
-    const contentDelta = chatContentText(choice?.delta?.content) || choice?.delta?.refusal || '';
+    const contentDelta = chatContentText(choice?.delta?.content, rejectUnsupportedContent) || choice?.delta?.refusal || '';
     if (reasoningDelta && !chatReasoningStarted) {
       chatReasoningStarted = true;
       yield { type: 'block_start', sourceIndex: 'reasoning', blockType: 'reasoning' };
@@ -228,8 +239,12 @@ function asText(parts, expectedType) {
   return Array.isArray(parts) ? parts.filter((part) => expected.includes(part?.type)).map((part) => part.text || part.refusal || '').join('') : undefined;
 }
 
-function chatContentText(content) {
+function chatContentText(content, rejectUnsupportedContent = false) {
   if (typeof content === 'string') return content;
+  const unsupported = Array.isArray(content)
+    ? content.filter((part) => part && typeof part === 'object' && !['text', 'output_text', 'refusal'].includes(part.type))
+    : [];
+  if (rejectUnsupportedContent && unsupported.length) throw Object.assign(new Error(`跨协议转换无法表达 Chat 流式内容块：${unsupported.map((part) => part.type || 'unknown').join(', ')}`), { code: 'UPSTREAM_UNSUPPORTED_STREAM_CONTENT' });
   return asText(content, ['text', 'output_text', 'refusal']) || '';
 }
 
@@ -258,7 +273,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
   const blocks = new Map();
   let responseStarted = false;
 
-  for await (const event of canonicalEvents(response, sourceProtocol, fallbackModel)) {
+  for await (const event of canonicalEvents(response, sourceProtocol, fallbackModel, { rejectUnsupportedContent: sourceProtocol !== targetProtocol })) {
     if (event.type === 'error') {
       options.onError?.(event.error);
       if (targetProtocol === 'chat') {
@@ -409,6 +424,7 @@ export async function observeSse(response, protocol, fallbackModel, options = {}
       }
     }
   } catch (caught) {
+    if (caught.code === 'UPSTREAM_SSE_EVENT_TOO_LARGE') return { usage, error: undefined, observationSkipped: caught.message };
     error = { type: 'upstream_error', message: caught.message };
     options.onError?.(error);
   }

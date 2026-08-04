@@ -3,6 +3,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 const PREFIX = 'enc:v1:';
 const PLAIN_PREFIX = 'plain:v1:';
 const SENSITIVE_FIELDS = ['clientToken', 'zenKey', 'goKey', 'sessionSecret', 'proxyUrl', 'zenProxyUrl', 'goProxyUrl'];
+const SENSITIVE_COLLECTIONS = ['zenCredentials', 'goCredentials'];
 
 function keyFromPassphrase(passphrase) {
   if (!passphrase || passphrase.length < 16) throw new Error('CONFIG_ENCRYPTION_KEY 至少需要 16 个字符');
@@ -46,16 +47,38 @@ export function encryptConfig(config, passphrase) {
   const result = { ...config };
   for (const field of SENSITIVE_FIELDS) {
     if (!Object.hasOwn(result, field)) continue;
-    if (passphrase) result[field] = encryptValue(result[field], passphrase, field);
-    else if (typeof result[field] === 'string' && (result[field].startsWith(PREFIX) || result[field].startsWith(PLAIN_PREFIX))) {
-      result[field] = `${PLAIN_PREFIX}${Buffer.from(result[field], 'utf8').toString('base64url')}`;
-    }
+    result[field] = encryptStoredValue(result[field], passphrase, field);
   }
+  transformCredentialCollections(result, (value, field) => encryptStoredValue(value, passphrase, field));
   return result;
 }
 
 export function decryptConfig(config, passphrase) {
   const result = { ...config };
   for (const field of SENSITIVE_FIELDS) if (Object.hasOwn(result, field)) result[field] = decryptValue(result[field], passphrase, field);
+  transformCredentialCollections(result, (value, field) => decryptValue(value, passphrase, field));
   return result;
+}
+
+function transformCredentialCollections(config, transform) {
+  for (const collection of SENSITIVE_COLLECTIONS) {
+    if (!Array.isArray(config[collection])) continue;
+    config[collection] = config[collection].map((entry, index) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+      const identity = typeof entry.id === 'string' && entry.id ? entry.id : String(index + 1);
+      return {
+        ...entry,
+        ...(Object.hasOwn(entry, 'apiKey') ? { apiKey: transform(entry.apiKey, `${collection}.${identity}.apiKey`) } : {}),
+        ...(Object.hasOwn(entry, 'proxyUrl') ? { proxyUrl: transform(entry.proxyUrl, `${collection}.${identity}.proxyUrl`) } : {})
+      };
+    });
+  }
+}
+
+function encryptStoredValue(value, passphrase, field) {
+  if (passphrase) return encryptValue(value, passphrase, field);
+  if (typeof value === 'string' && (value.startsWith(PREFIX) || value.startsWith(PLAIN_PREFIX))) {
+    return `${PLAIN_PREFIX}${Buffer.from(value, 'utf8').toString('base64url')}`;
+  }
+  return value;
 }

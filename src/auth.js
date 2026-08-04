@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 import { promisify } from 'node:util';
 
 const scrypt = promisify(scryptCallback);
@@ -73,4 +74,11 @@ export function cookieValue(header, name) {
 
 export function hashClientToken(token) {
   return createHash('sha256').update(String(token), 'utf8').digest('base64url');
+}
+
+export function clientAddress(req, trustProxy = false) {
+  const socketAddress = req?.socket?.remoteAddress || 'unknown';
+  if (!trustProxy || typeof req?.headers?.['x-forwarded-for'] !== 'string') return socketAddress;
+  const forwarded = req.headers['x-forwarded-for'].split(',', 1)[0].trim();
+  return isIP(forwarded) ? forwarded : socketAddress;
 }

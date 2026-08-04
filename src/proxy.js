@@ -2,6 +2,7 @@ import { ProxyAgent } from 'undici';
 import { socksDispatcher } from 'fetch-socks';
 
 const SUPPORTED_PROTOCOLS = new Set(['http:', 'https:', 'socks:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:']);
+const MAX_PROXY_DISPATCHERS = 64;
 const dispatchers = new Map();
 
 export function normalizeProxyUrl(value) {
@@ -28,7 +29,7 @@ export function proxyDispatcher(proxyUrl) {
   const normalized = normalizeProxyUrl(proxyUrl);
   if (!normalized) return undefined;
   if (!dispatchers.has(normalized)) {
-    if (dispatchers.size >= 16) closeOldestDispatcher();
+    if (dispatchers.size >= MAX_PROXY_DISPATCHERS) closeOldestDispatcher();
     const parsed = new URL(normalized);
     dispatchers.set(normalized, parsed.protocol.startsWith('socks') ? createSocksDispatcher(parsed) : new ProxyAgent(normalized));
   }

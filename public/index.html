@@ -16,7 +16,7 @@
       <h1 id="auth-title">欢迎回来</h1>
       <p id="auth-copy" class="muted">输入管理密码以打开控制台。</p>
       <form id="auth-form">
-        <label>管理密码<input id="password" type="password" minlength="8" required autocomplete="current-password" placeholder="至少 8 个字符"></label>
+        <label>管理密码<input id="password" type="password" minlength="6" maxlength="256" pattern="[A-Za-z0-9]{6,256}" required autocomplete="current-password" placeholder="至少 6 位英文字母或数字"></label>
         <button class="primary" type="submit"><span id="auth-action">登录</span><span>→</span></button>
         <p id="auth-error" class="error"></p>
       </form>
@@ -32,6 +32,7 @@
         <button data-view="routes"><i>↗</i>模型路由</button>
         <button data-view="prompts"><i>✎</i>提示词规则</button>
         <button data-view="clients"><i>⌘</i>访问令牌</button>
+        <button data-view="stats"><i>Σ</i>用量统计</button>
         <button data-view="logs"><i>≡</i>请求记录</button>
         <button data-view="guide"><i>?</i>接入指南</button>
       </nav>
@@ -59,18 +60,27 @@
         <form id="settings-form" class="panel form-grid">
           <label>默认上游<select id="defaultProvider"><option value="zen">OpenCode Zen</option><option value="go">OpenCode Go</option></select></label>
           <label>默认代理（可选回退）<input id="proxyUrl" autocomplete="off" placeholder="http://127.0.0.1:7890"><small>仅在对应 Key 未设置独立代理时使用；留空保持原值</small><span class="field-tools"><button type="button" class="link-btn clear-proxy" data-provider="default">清除默认代理</button></span></label>
-          <label>Zen API Key<input id="zenKey" type="password" autocomplete="off" placeholder="留空则保持原值"><span class="field-tools"><button type="button" class="link-btn test-key" data-provider="zen">测试连接</button><button type="button" class="link-btn clear-key" data-provider="zen">清除密钥</button></span></label>
-          <label>Zen Key 独立代理<input id="zenProxyUrl" autocomplete="off" placeholder="socks5h://user:pass@127.0.0.1:1080"><small>留空保持原值或使用默认代理；支持 HTTP(S)、SOCKS4/4a/5/5h</small><span class="field-tools"><button type="button" class="link-btn clear-proxy" data-provider="zen">清除 Zen 代理</button></span></label>
-          <label>Go API Key<input id="goKey" type="password" autocomplete="off" placeholder="留空则保持原值"><span class="field-tools"><button type="button" class="link-btn test-key" data-provider="go">测试连接</button><button type="button" class="link-btn clear-key" data-provider="go">清除密钥</button></span></label>
-          <label>Go Key 独立代理<input id="goProxyUrl" autocomplete="off" placeholder="http://user:pass@127.0.0.1:7890"><small>留空保持原值或使用默认代理；支持 HTTP(S)、SOCKS4/4a/5/5h</small><span class="field-tools"><button type="button" class="link-btn clear-proxy" data-provider="go">清除 Go 代理</button></span></label>
-          <label>主访问令牌<input id="clientToken" type="password" autocomplete="off" placeholder="留空则保持原值"></label>
+          <label>主访问令牌<input id="clientToken" type="password" minlength="6" maxlength="256" pattern="[A-Za-z0-9]{6,256}" autocomplete="off" placeholder="留空则保持原值"><small>自定义时须为 6–256 位英文字母或数字</small></label>
           <label>日志保留条数<input id="requestLogLimit" type="number" min="10" max="1000"></label>
           <label class="check-field"><input id="persistLogs" type="checkbox"><span>持久化请求日志<small>仅保存请求元数据，不保存提示词和响应正文</small></span></label>
           <label>上游超时（毫秒）<input id="upstreamTimeoutMs" type="number" min="1000" max="600000" step="1000"></label>
           <label>最大并发请求<input id="maxConcurrentRequests" type="number" min="1" max="1000"></label>
           <div class="form-actions"><button type="button" id="regen-token" class="ghost">重新生成访问令牌</button><button type="submit" class="primary compact">保存设置</button></div>
         </form>
-        <form id="password-form" class="panel inline-form"><div><h3>修改管理密码</h3><p>修改后所有现有登录会话都会失效。</p></div><input id="currentPassword" type="password" placeholder="当前密码" required><input id="newPassword" type="password" minlength="8" placeholder="新密码" required><button class="ghost" type="submit">修改</button></form>
+        <section class="panel credential-manager">
+          <div class="panel-head"><div><h3>上游 Key 池</h3><p>每把 Key 可使用独立 HTTP(S) 或 SOCKS 代理；环境变量 Key 优先且只能在部署平台修改。</p></div><button id="add-provider-credential" class="primary compact" type="button">添加 Key</button></div>
+          <div id="provider-credential-list" class="provider-credential-list"></div>
+          <form id="provider-credential-form" class="credential-editor hidden">
+            <input id="providerCredentialId" type="hidden">
+            <label>上游<select id="providerCredentialProvider"><option value="zen">OpenCode Zen</option><option value="go">OpenCode Go</option></select></label>
+            <label>名称<input id="providerCredentialName" maxlength="64" placeholder="例如：Go 编程套餐" required></label>
+            <label>API Key<input id="providerCredentialKey" type="password" maxlength="4096" autocomplete="off" placeholder="编辑时留空保持原值"></label>
+            <label>独立代理<input id="providerCredentialProxy" maxlength="2048" autocomplete="off" placeholder="留空则直连或使用默认代理"><small>支持 HTTP(S)、SOCKS4/4a/5/5h；编辑时留空保持当前</small></label>
+            <label id="providerCredentialClearProxyField" class="check-field credential-clear-proxy hidden"><input id="providerCredentialClearProxy" type="checkbox"><span>清除当前独立代理</span></label>
+            <div class="credential-editor-actions"><button id="test-provider-credential" class="ghost" type="button">测试连接</button><button id="cancel-provider-credential" class="ghost" type="button">取消</button><button class="primary compact" type="submit">保存 Key</button></div>
+          </form>
+        </section>
+        <form id="password-form" class="panel inline-form"><div><h3>修改管理密码</h3><p>修改后所有现有登录会话都会失效。</p></div><input id="currentPassword" type="password" placeholder="当前密码" required><input id="newPassword" type="password" minlength="6" maxlength="256" pattern="[A-Za-z0-9]{6,256}" placeholder="6 位以上英文字母或数字" required><button class="ghost" type="submit">修改</button></form>
       </section>
 
       <section id="routes" class="view">
@@ -122,8 +132,64 @@
         <div class="panel table-wrap"><table><thead><tr><th>名称</th><th>令牌前缀</th><th>状态</th><th>并发上限</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="client-rows"></tbody></table><div id="empty-clients" class="empty">还没有命名客户端，主令牌仍可正常使用</div></div>
       </section>
 
+      <section id="stats" class="view">
+        <div class="section-intro row"><div><h3>请求与 Token 统计</h3><p>基于当前保留的请求元数据汇总，不读取提示词或响应正文。</p></div><div class="stats-toolbar"><select id="stats-window"><option value="all">全部记录</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select><button id="refresh-stats" class="ghost" type="button">刷新统计</button></div></div>
+        <div class="metric-grid">
+          <article class="metric-card"><span>请求总数</span><strong id="stats-requests">0</strong><small id="stats-usage-coverage">0 条含用量</small></article>
+          <article class="metric-card"><span>成功率</span><strong id="stats-success-rate">100%</strong><small id="stats-success-detail">0 成功 · 0 失败</small></article>
+          <article class="metric-card"><span>平均耗时</span><strong id="stats-avg-duration">0 ms</strong><small>全部请求</small></article>
+          <article class="metric-card"><span>P95 耗时</span><strong id="stats-p95-duration">0 ms</strong><small>95% 请求不超过此值</small></article>
+        </div>
+        <div class="metric-grid token-metrics">
+          <article class="metric-card accent"><span>总 Token</span><strong id="stats-total-tokens">0</strong><small>总输入 + 输出</small></article>
+          <article class="metric-card"><span>总输入 Token</span><strong id="stats-input-tokens">0</strong><small>已统一不同协议口径</small></article>
+          <article class="metric-card"><span>输出 Token</span><strong id="stats-output-tokens">0</strong><small>包含其中的推理 Token</small></article>
+          <article class="metric-card"><span>推理 Token</span><strong id="stats-reasoning-tokens">0</strong><small>输出 Token 的明细项</small></article>
+          <article class="metric-card"><span>每次平均 Token</span><strong id="stats-average-tokens">0</strong><small>仅计算含 usage 的请求</small></article>
+        </div>
+        <article class="panel cache-panel">
+          <div class="cache-summary">
+            <span class="cache-kicker">OPENCODE CACHE</span>
+            <h3>缓存效率</h3>
+            <p>缓存覆盖率按缓存读取 Token ÷ 总输入 Token 计算；缓存写入单独展示，不估算因模型价格变化产生的费用。</p>
+            <div class="cache-scores"><div><strong id="stats-cache-rate">0%</strong><span>Token 覆盖率</span></div><div><strong id="stats-cache-hit-rate">0%</strong><span>命中请求率</span></div></div>
+          </div>
+          <div class="cache-detail">
+            <div id="stats-cache-meter" class="cache-meter" role="img" aria-label="尚无缓存用量"><span class="cache-read"></span><span class="cache-write"></span><span class="cache-uncached"></span></div>
+            <div class="cache-legend"><span><i class="read"></i>缓存读取</span><span><i class="write"></i>缓存写入</span><span><i class="uncached"></i>未缓存输入</span></div>
+            <div class="cache-kpis">
+              <div><span>缓存读取</span><strong id="stats-cached-tokens">0</strong></div>
+              <div><span>缓存写入</span><strong id="stats-cache-write-tokens">0</strong></div>
+              <div><span>未缓存输入</span><strong id="stats-uncached-input-tokens">0</strong></div>
+            </div>
+            <p id="stats-cache-hit-detail" class="cache-caption">0 个请求命中缓存</p>
+          </div>
+        </article>
+        <article class="panel trend-panel">
+          <div class="panel-head"><div><h3>近期趋势</h3><p id="stats-trend-range">最近 14 天 · 每日</p></div><div class="trend-legend"><span><i class="requests"></i>请求</span><span><i class="tokens"></i>Token</span><span><i class="errors"></i>失败</span></div></div>
+          <div id="stats-trend" class="trend-chart" role="img" aria-label="尚无请求趋势"></div>
+        </article>
+        <p id="stats-scope" class="stats-note">统计范围：当前内存保留记录</p>
+        <div class="breakdown-grid">
+          <article class="panel table-wrap"><div class="breakdown-title"><h3>按上游</h3></div><table><thead><tr><th>上游</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>平均耗时</th></tr></thead><tbody id="stats-provider-rows"></tbody></table></article>
+          <article class="panel table-wrap"><div class="breakdown-title"><h3>按模型</h3></div><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>平均耗时</th></tr></thead><tbody id="stats-model-rows"></tbody></table></article>
+          <article class="panel table-wrap"><div class="breakdown-title"><h3>按协议转换</h3></div><table><thead><tr><th>协议</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>平均耗时</th></tr></thead><tbody id="stats-protocol-rows"></tbody></table></article>
+          <article class="panel table-wrap"><div class="breakdown-title"><h3>按客户端</h3></div><table><thead><tr><th>客户端</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>平均耗时</th></tr></thead><tbody id="stats-client-rows"></tbody></table></article>
+          <article class="panel table-wrap credential-breakdown"><div class="breakdown-title"><h3>Key 健康与用量</h3><p>失效、限流或连续网络故障的 Key 会临时冷却；确认上游恢复后可手动重置。仅显示来源和编号，不保存或展示密钥内容</p></div><table class="credential-table"><thead><tr><th>Key 槽位</th><th>运行状态</th><th>连续失败</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>平均耗时</th><th>最近事件</th></tr></thead><tbody id="stats-credential-rows"></tbody></table></article>
+        </div>
+      </section>
+
       <section id="logs" class="view">
-        <div class="section-intro row"><div><h3>请求记录</h3><p>仅记录元数据，不记录提示词、响应正文或密钥。</p></div><button id="clear-logs" class="ghost danger">清空记录</button></div>
+        <div class="section-intro"><h3>请求记录</h3><p>仅记录本地/上游请求 ID、状态和用量等元数据，不记录提示词、响应正文或密钥。</p></div>
+        <div class="log-toolbar" role="search" aria-label="筛选请求记录">
+          <input id="log-search" type="search" placeholder="搜索请求 ID、模型、客户端或错误" aria-label="搜索请求记录">
+          <select id="log-provider-filter" aria-label="按上游筛选"><option value="all">全部上游</option><option value="zen">Zen</option><option value="go">Go</option></select>
+          <select id="log-status-filter" aria-label="按状态筛选"><option value="all">全部状态</option><option value="success">成功</option><option value="rate-limit">429 限流</option><option value="client-error">其他 4xx</option><option value="server-error">5xx</option></select>
+          <select id="log-time-filter" aria-label="按时间筛选"><option value="all">全部时间</option><option value="1h">最近 1 小时</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select>
+          <span id="log-filter-count" class="log-filter-count" aria-live="polite">显示 0 / 0</span>
+          <button id="export-logs" class="ghost" type="button" disabled>导出筛选结果</button>
+          <button id="clear-logs" class="ghost danger" type="button">清空记录</button>
+        </div>
         <div class="panel table-wrap"><table><thead><tr><th>时间</th><th>请求 ID</th><th>客户端</th><th>模型</th><th>上游</th><th>协议转换</th><th>状态</th><th>令牌</th><th>耗时</th></tr></thead><tbody id="log-rows"></tbody></table><div id="empty-logs" class="empty">还没有请求记录</div></div>
       </section>
 

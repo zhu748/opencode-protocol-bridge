@@ -214,6 +214,19 @@ test('未知内容块与服务端工具不会静默转换为空消息', () => {
   }, 'chat', 'claude', 'claude-test'), (error) => error.status === 400 && /Chat 工具类型/.test(error.message));
 });
 
+test('Claude 图片与文档响应转 OpenAI 协议时不会静默丢失', () => {
+  const normalized = normalizeResponse({
+    id: 'msg_media', model: 'claude-test', stop_reason: 'end_turn', usage: {},
+    content: [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AA==' } },
+      { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'AA==' } }
+    ]
+  }, 'claude', '', { rejectUnknown: true });
+  assert.throws(() => formatResponse(normalized, 'responses'), /image, file/);
+  assert.throws(() => formatResponse(normalized, 'chat'), /image, file/);
+  assert.deepEqual(formatResponse(normalized, 'claude').content.map((part) => part.type), ['image', 'document']);
+});
+
 test('Responses developer 消息转换为目标系统提示', () => {
   const output = prepareUpstreamRequest({
     model: 'alias', instructions: '基础规则', input: [
@@ -283,6 +296,29 @@ test('DeepSeek 工具历史保留 reasoning_content 并提供兼容兜底', () =
     messages: [{ role: 'assistant', content: [{ type: 'tool_use', id: 'call_2', name: 'get_weather', input: { city: '北京' } }] }]
   }, 'claude', 'chat', 'deepseek-v4-flash-free');
   assert.equal(withoutThinking.messages[0].reasoning_content, 'tool call');
+});
+
+test('DeepSeek V4 Flash 工具请求自动关闭 Thinking 模式', () => {
+  const request = {
+    model: 'alias', max_tokens: 64,
+    messages: [{ role: 'user', content: '查询天气' }],
+    tools: [{ name: 'get_weather', input_schema: { type: 'object', properties: { city: { type: 'string' } } } }],
+    tool_choice: { type: 'tool', name: 'get_weather' }
+  };
+  const free = prepareUpstreamRequest(request, 'claude', 'chat', 'deepseek-v4-flash-free');
+  assert.equal(free.reasoning_effort, 'none');
+  assert.equal(free.tool_choice.function.name, 'get_weather');
+
+  const paid = prepareUpstreamRequest(request, 'claude', 'chat', 'deepseek-v4-flash');
+  assert.equal(paid.reasoning_effort, 'none');
+
+  const unrelated = prepareUpstreamRequest(request, 'claude', 'chat', 'deepseek-v3');
+  assert.equal('reasoning_effort' in unrelated, false);
+
+  const explicitThinking = prepareUpstreamRequest({
+    ...request, thinking: { type: 'enabled', budget_tokens: 2048 }
+  }, 'claude', 'chat', 'deepseek-v4-flash-free');
+  assert.equal('reasoning_effort' in explicitThinking, false);
 });
 
 test('空 tools 会移除工具约束并清理不兼容 URI Schema', () => {
@@ -422,6 +458,20 @@ test('Responses 输入项保持文本、工具调用和工具结果的语义顺�
   };
   const output = prepareUpstreamRequest(source, 'claude', 'responses', 'gpt-test');
   assert.deepEqual(output.input.map((item) => item.type || item.role), ['assistant', 'function_call', 'function_call_output', 'user']);
+});
+
+test('Claude 工具结果转 Chat 时紧跟 assistant tool_calls 并先于后续用户文本', () => {
+  const source = {
+    model: 'alias', messages: [
+      { role: 'assistant', content: [{ type: 'text', text: '先查询' }, { type: 'tool_use', id: 'c1', name: 'query', input: { city: '北京' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: '晴' }, { type: 'text', text: '继续总结' }] }
+    ]
+  };
+  const output = prepareUpstreamRequest(source, 'claude', 'chat', 'deepseek-v4-flash');
+  assert.deepEqual(output.messages.map((message) => message.role), ['assistant', 'tool', 'user']);
+  assert.equal(output.messages[0].tool_calls[0].id, 'c1');
+  assert.equal(output.messages[1].tool_call_id, 'c1');
+  assert.equal(output.messages[2].content, '继续总结');
 });
 
 test('并行工具调用与结果跨协议保留全部 ID 和顺序', () => {

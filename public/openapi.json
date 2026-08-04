@@ -16,39 +16,44 @@
       "get": {
         "summary": "获取默认上游模型列表",
         "parameters": [{ "name": "provider", "in": "query", "schema": { "type": "string", "enum": ["zen", "go", "all"] } }],
-        "responses": { "200": { "description": "模型列表" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
+        "responses": { "200": { "description": "模型列表", "headers": { "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
       }
     },
     "/models/{model}": {
       "get": {
         "summary": "获取单个模型信息",
         "parameters": [{ "name": "model", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/ModelId" } }],
-        "responses": { "200": { "description": "模型信息" }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "description": "模型不存在" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
+        "responses": { "200": { "description": "模型信息", "headers": { "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "description": "模型不存在" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
       }
     },
     "/messages": {
       "post": {
         "summary": "Claude Messages 兼容接口",
         "requestBody": { "required": true, "description": "JSON 请求体最大 10 MiB", "content": { "application/json": { "schema": { "type": "object", "required": ["model", "messages"], "properties": { "model": { "$ref": "#/components/schemas/ModelId" }, "stream": { "type": "boolean" }, "messages": { "type": "array" } } } } } },
-        "responses": { "200": { "description": "Claude Message 或 SSE 流" }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
+        "responses": { "200": { "description": "Claude Message 或 SSE 流", "headers": { "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
       }
     },
     "/responses": {
       "post": {
         "summary": "OpenAI Responses 兼容接口",
         "requestBody": { "required": true, "description": "JSON 请求体最大 10 MiB", "content": { "application/json": { "schema": { "type": "object", "required": ["model", "input"], "properties": { "model": { "$ref": "#/components/schemas/ModelId" }, "stream": { "type": "boolean" }, "input": {} } } } } },
-        "responses": { "200": { "description": "OpenAI Response 或 SSE 流" }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
+        "responses": { "200": { "description": "OpenAI Response 或 SSE 流", "headers": { "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
       }
     },
     "/chat/completions": {
       "post": {
         "summary": "OpenAI Chat Completions 兼容接口",
         "requestBody": { "required": true, "description": "JSON 请求体最大 10 MiB", "content": { "application/json": { "schema": { "type": "object", "required": ["model", "messages"], "properties": { "model": { "$ref": "#/components/schemas/ModelId" }, "stream": { "type": "boolean" }, "messages": { "type": "array" } } } } } },
-        "responses": { "200": { "description": "Chat Completion 或 SSE 流" }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
+        "responses": { "200": { "description": "Chat Completion 或 SSE 流", "headers": { "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
       }
     }
   },
   "components": {
+    "headers": {
+      "KeyAttempts": { "description": "发生自动切换时返回，值为实际尝试的 Key 数量。推理请求仅对 401、403、429 切换；幂等模型发现还可对网络错误和 5xx 切换。", "schema": { "type": "integer", "minimum": 2 } },
+      "RetryAfter": { "description": "建议等待秒数或 HTTP 日期，来自本地冷却策略或最终上游响应。", "schema": { "type": "string" } },
+      "UpstreamRequestId": { "description": "最终上游响应的请求追踪 ID；本项目自己的请求 ID 仍位于 x-request-id。", "schema": { "type": "string", "maxLength": 256 } }
+    },
     "schemas": {
       "ModelId": { "type": "string", "minLength": 1, "maxLength": 256 }
     },
@@ -56,13 +61,13 @@
       "InvalidRequest": { "description": "请求格式或跨协议参数不兼容" },
       "Unauthorized": { "description": "访问令牌无效" },
       "BodyTooLarge": { "description": "请求体超过 10 MiB" },
-      "RateLimited": { "description": "达到全局或客户端并发上限" },
-      "UpstreamError": { "description": "上游连接、响应或协议转换失败" },
-      "NotConfigured": { "description": "对应 OpenCode 上游密钥尚未配置" }
+      "RateLimited": { "description": "达到本地并发上限或最终上游仍然限流", "headers": { "Retry-After": { "$ref": "#/components/headers/RetryAfter" }, "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } },
+      "UpstreamError": { "description": "上游连接、响应或协议转换失败", "headers": { "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } },
+      "NotConfigured": { "description": "对应 OpenCode 上游密钥尚未配置，或全部 Key 正在短时冷却", "headers": { "Retry-After": { "$ref": "#/components/headers/RetryAfter" } } }
     },
     "securitySchemes": {
-      "bearerAuth": { "type": "http", "scheme": "bearer" },
-      "apiKeyAuth": { "type": "apiKey", "in": "header", "name": "x-api-key" }
+      "bearerAuth": { "type": "http", "scheme": "bearer", "description": "管理面板生成或自定义的客户端令牌；自定义值为 6–256 位英文字母或数字。" },
+      "apiKeyAuth": { "type": "apiKey", "in": "header", "name": "x-api-key", "description": "与 Bearer 令牌相同。" }
     }
   }
 }

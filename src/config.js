@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decryptConfig, encryptConfig } from './secrets.js';
 import { DEFAULT_PROMPT_REWRITE_RULES, migratePromptRules } from './prompt-rewrite.js';
+import { storedProviderCredentialEntries } from './provider-credentials.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CONFIG_FILE = process.env.CONFIG_FILE || resolve(ROOT, 'data', 'config.json');
@@ -16,6 +17,8 @@ const defaults = {
   clientToken: '',
   zenKey: '',
   goKey: '',
+  zenCredentials: [],
+  goCredentials: [],
   proxyUrl: '',
   zenProxyUrl: '',
   goProxyUrl: '',
@@ -77,7 +80,12 @@ async function persist(snapshot) {
 }
 
 export function publicConfig(config) {
-  const mask = (value) => value ? `${value.slice(0, 4)}••••${value.slice(-4)}` : '';
+  const mask = (value) => {
+    if (!value) return '';
+    if (value.length <= 8) return '••••';
+    if (value.length <= 12) return `${value.slice(0, 2)}••••${value.slice(-2)}`;
+    return `${value.slice(0, 4)}••••${value.slice(-4)}`;
+  };
   const maskProxy = (value) => {
     if (!value) return '';
     try {
@@ -85,18 +93,22 @@ export function publicConfig(config) {
       return `${url.protocol}//${url.username || url.password ? '••••@' : ''}${url.host}`;
     } catch { return '••••'; }
   };
+  const zenCredentials = storedProviderCredentialEntries(config, 'zen');
+  const goCredentials = storedProviderCredentialEntries(config, 'go');
   return {
     configured: Boolean(config.password),
     encryptionEnabled: Boolean(ENCRYPTION_KEY),
     clientToken: mask(config.clientToken),
-    zenKey: mask(config.zenKey),
-    goKey: mask(config.goKey),
+    zenKey: mask(zenCredentials[0]?.apiKey || ''),
+    goKey: mask(goCredentials[0]?.apiKey || ''),
+    zenCredentials: zenCredentials.map((entry) => ({ id: entry.id, name: entry.name, apiKey: mask(entry.apiKey), proxyUrl: maskProxy(entry.proxyUrl), proxyConfigured: Boolean(entry.proxyUrl) })),
+    goCredentials: goCredentials.map((entry) => ({ id: entry.id, name: entry.name, apiKey: mask(entry.apiKey), proxyUrl: maskProxy(entry.proxyUrl), proxyConfigured: Boolean(entry.proxyUrl) })),
     proxyUrl: maskProxy(config.proxyUrl),
     zenProxyUrl: maskProxy(config.zenProxyUrl),
     goProxyUrl: maskProxy(config.goProxyUrl),
     proxyConfigured: Boolean(config.proxyUrl),
-    zenProxyConfigured: Boolean(config.zenProxyUrl),
-    goProxyConfigured: Boolean(config.goProxyUrl),
+    zenProxyConfigured: Boolean(config.zenProxyUrl) || zenCredentials.some((entry) => entry.proxyUrl),
+    goProxyConfigured: Boolean(config.goProxyUrl) || goCredentials.some((entry) => entry.proxyUrl),
     defaultProvider: config.defaultProvider,
     modelRoutes: config.modelRoutes,
     promptRewriteRules: config.promptRewriteRules,

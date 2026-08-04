@@ -49,10 +49,10 @@ test('损坏的日志文件不会阻止服务启动并会暴露诊断信息', as
 
 test('日志会保留缓存读取、缓存写入和推理 token', async () => {
   const store = new RequestLogStore('unused.json');
-  await store.add({ requestId: 'usage', inputTokens: 10, outputTokens: 4, cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningTokens: 1 });
+  await store.add({ requestId: 'usage', model: 'alias', upstreamModel: 'real-model', credentialId: 'environment:2', upstreamRequestId: 'upstream-trace', retryAfter: '7', inputTokens: 10, outputTokens: 4, inputTokensIncludeCache: true, cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningTokens: 1 });
   assert.deepEqual(store.list()[0], {
-    time: '', requestId: 'usage', clientId: '', clientName: '', model: '', provider: '', protocol: '',
-    status: 0, duration: 0, stream: false, inputTokens: 10, outputTokens: 4,
+    time: '', requestId: 'usage', clientId: '', clientName: '', model: 'alias', upstreamModel: 'real-model', provider: '', credentialId: 'environment:2', credentialLabel: '', credentialAttempts: 1, upstreamRequestId: 'upstream-trace', retryAfter: '7', protocol: '',
+    status: 0, duration: 0, stream: false, inputTokens: 10, outputTokens: 4, inputTokensIncludeCache: true,
     cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningTokens: 1
   });
 });

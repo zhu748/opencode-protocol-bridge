@@ -32,6 +32,13 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end('{}');
     }
+    if (current.body.model === 'no-usage') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        id: 'resp_no_usage', model: current.body.model, status: 'completed',
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '无用量字段' }] }]
+      }));
+    }
     if (current.body.model === 'responses-vendor') {
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({
@@ -81,12 +88,12 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
 
   try {
     await Promise.race([once(child.stdout, 'data'), once(child, 'exit').then(([code]) => { throw new Error(`桥接服务提前退出：${code}`); })]);
-    const setup = await fetch(`http://127.0.0.1:${bridgePort}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'proxy-test-password' }) });
+    const setup = await fetch(`http://127.0.0.1:${bridgePort}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'proxytestpassword' }) });
     const setupBody = await setup.json();
     const cookie = setup.headers.get('set-cookie').split(';')[0];
     const saved = await fetch(`http://127.0.0.1:${bridgePort}/api/config`, {
       method: 'PUT', headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ defaultProvider: 'zen', proxyUrl: '', zenKey: 'upstream-secret', goKey: 'go-secret', clientToken: '', requestLogLimit: 100, persistLogs: true, upstreamTimeoutMs: 1000, maxConcurrentRequests: 10, modelRoutes: { alias: { provider: 'zen', protocol: 'responses', upstreamModel: 'gpt-test' }, 'responses-same': { provider: 'zen', protocol: 'responses', upstreamModel: 'responses-vendor' }, broken: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-json' }, malformed: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-shape' }, slow: { provider: 'zen', protocol: 'responses', upstreamModel: 'slow-response' }, 'claude-alias': { provider: 'zen', protocol: 'claude', upstreamModel: 'claude-upstream' } }, promptRewriteRules: [{ id: 'integration', name: '集成替换', enabled: true, find: '系统提示', replace: '处理后系统提示' }] })
+      body: JSON.stringify({ defaultProvider: 'zen', proxyUrl: '', zenKey: 'upstream-secret', goKey: 'go-secret', clientToken: '', requestLogLimit: 100, persistLogs: true, upstreamTimeoutMs: 1000, maxConcurrentRequests: 10, modelRoutes: { alias: { provider: 'zen', protocol: 'responses', upstreamModel: 'gpt-test' }, 'responses-same': { provider: 'zen', protocol: 'responses', upstreamModel: 'responses-vendor' }, 'missing-usage': { provider: 'zen', protocol: 'responses', upstreamModel: 'no-usage' }, broken: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-json' }, malformed: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-shape' }, slow: { provider: 'zen', protocol: 'responses', upstreamModel: 'slow-response' }, 'claude-alias': { provider: 'zen', protocol: 'claude', upstreamModel: 'claude-upstream' } }, promptRewriteRules: [{ id: 'integration', name: '集成替换', enabled: true, find: '系统提示', replace: '处理后系统提示' }] })
     });
     assert.equal(saved.status, 200);
 
@@ -96,7 +103,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     });
     assert.equal(createdClientResponse.status, 201);
     const createdClient = await createdClientResponse.json();
-    assert.match(createdClient.token, /^ocb_[A-Za-z0-9_-]{43}$/);
+    assert.match(createdClient.token, /^ocb[a-f0-9]{64}$/);
     const clients = await fetch(`http://127.0.0.1:${bridgePort}/api/clients`, { headers: { cookie } }).then((result) => result.json());
     assert.equal(clients.length, 1);
     assert.equal(clients[0].name, '测试客户端');
@@ -141,7 +148,30 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(logs[0].protocol, 'claude → responses');
     assert.equal(logs[0].clientId, createdClient.id);
     assert.equal(logs[0].clientName, '测试客户端');
+    assert.equal(logs[0].model, 'alias');
+    assert.equal(logs[0].upstreamModel, 'gpt-test');
+    assert.equal(logs[0].credentialId, 'config:legacy-zen');
+    assert.equal(logs[0].credentialLabel, '默认 Key');
     assert.equal(logs[0].inputTokens, 7);
+    const stats = await fetch(`http://127.0.0.1:${bridgePort}/api/stats`, { headers: { cookie } }).then((result) => result.json());
+    assert.equal(stats.summary.requests, 1);
+    assert.equal(stats.summary.totalTokens, 10);
+    assert.equal(stats.summary.inputTokens, 7);
+    assert.equal(stats.summary.outputTokens, 3);
+    assert.equal(stats.summary.usageRequests, 1);
+    assert.equal(stats.byProvider[0].name, 'zen');
+    assert.equal(stats.byClient[0].name, '测试客户端');
+    assert.equal(stats.byCredential[0].name, 'ZEN · 默认 Key');
+    const noUsage = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
+      body: JSON.stringify({ model: 'missing-usage', input: '不返回 usage' })
+    });
+    assert.equal(noUsage.status, 200);
+    const statsWithMissingUsage = await fetch(`http://127.0.0.1:${bridgePort}/api/stats`, { headers: { cookie } }).then((result) => result.json());
+    assert.equal(statsWithMissingUsage.summary.requests, 2);
+    assert.equal(statsWithMissingUsage.summary.usageRequests, 1);
+    assert.equal(statsWithMissingUsage.summary.missingUsageRequests, 1);
+    assert.equal(statsWithMissingUsage.summary.usageCoverageRate, 50);
     const persistedLogs = JSON.parse(await readFile(logFile, 'utf8'));
     assert.equal(persistedLogs[0].requestId, logs[0].requestId);
 

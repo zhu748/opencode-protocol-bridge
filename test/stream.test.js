@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { observeSse, translateSse } from '../src/stream.js';
+import { MAX_SSE_EVENT_BYTES, observeSse, translateSse } from '../src/stream.js';
 
 function responseFrom(events) {
   const encoder = new TextEncoder();
@@ -154,6 +154,20 @@ test('可解析末尾没有空行的 SSE 事件', async () => {
   assert.match(output, /message_stop/);
 });
 
+test('SSE 解析兼容仅使用 CR 的合法换行', async () => {
+  const encoder = new TextEncoder();
+  const source = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('event: message\rdata: {"id":"chat_cr","model":"legacy","choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\r\r'));
+      controller.enqueue(encoder.encode('event: message\rdata: {"id":"chat_cr","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\r\r'));
+      controller.close();
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } });
+  const output = await collect(translateSse(source, 'chat', 'claude', 'alias'));
+  assert.match(output, /"text":"ok"/);
+  assert.match(output, /event: message_stop/);
+});
+
 test('损坏的上游 SSE 会转换为错误事件而不是静默丢失', async () => {
   const encoder = new TextEncoder();
   const source = new Response(new ReadableStream({ start(controller) {
@@ -275,6 +289,26 @@ test('Chat 分段 content、refusal 与旧 function_call 流可转换', async ()
   assert.match(functionOutput, /"stop_reason":"tool_use"/);
 });
 
+test('Chat 流中的非文本内容块不会被静默丢弃', async () => {
+  const source = responseFrom([
+    ['message', { id: 'chat_media', model: 'multimodal', choices: [{ delta: { content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/x.png' } }] }, finish_reason: null }] }]
+  ]);
+  await assert.rejects(
+    collect(translateSse(source, 'chat', 'claude', 'alias')),
+    (error) => error.code === 'UPSTREAM_UNSUPPORTED_STREAM_CONTENT' && /image_url/.test(error.message)
+  );
+});
+
+test('同协议观察器允许厂商扩展内容块并继续提取 usage', async () => {
+  const source = responseFrom([
+    ['message', { id: 'chat_media_passthrough', model: 'multimodal', choices: [{ delta: { content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/x.png' } }] }, finish_reason: null }] }],
+    ['message', { id: 'chat_media_passthrough', choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 2, completion_tokens: 1 } }]
+  ]);
+  const observed = await observeSse(source, 'chat', 'alias');
+  assert.equal(observed.error, undefined);
+  assert.deepEqual(observed.usage, { inputTokens: 2, outputTokens: 1, cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0 });
+});
+
 test('Responses refusal 流可转换为普通文本块', async () => {
   const source = responseFrom([
     ['response.created', { type: 'response.created', response: { id: 'resp_refusal', model: 'gpt' } }],
@@ -346,4 +380,32 @@ test('上游 SSE 提前断开会生成明确错误', async () => {
   assert.match(output, /上游 SSE 在完成事件前结束/);
   assert.equal(streamError.type, 'upstream_error');
   assert.doesNotMatch(output, /message_stop/);
+});
+
+test('上游 SSE 单事件超过安全上限时停止缓冲', async () => {
+  const encoder = new TextEncoder();
+  const oversized = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(`data: ${'x'.repeat(MAX_SSE_EVENT_BYTES)}`));
+      controller.close();
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } });
+  await assert.rejects(
+    collect(translateSse(oversized, 'chat', 'claude', 'alias')),
+    (error) => error.code === 'UPSTREAM_SSE_EVENT_TOO_LARGE' && /8 MiB/.test(error.message)
+  );
+});
+
+test('同协议观察器超过事件上限时放弃统计但不破坏透传结果', async () => {
+  const encoder = new TextEncoder();
+  const oversized = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(`data: ${'x'.repeat(MAX_SSE_EVENT_BYTES)}`));
+      controller.close();
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } });
+  const observed = await observeSse(oversized, 'chat', 'alias');
+  assert.equal(observed.error, undefined);
+  assert.match(observed.observationSkipped, /8 MiB/);
+  assert.deepEqual(observed.usage, {});
 });

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createServer as createHttpServer } from 'node:http';
 import { once } from 'node:events';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -40,14 +41,25 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.ok([403, 404].includes(traversal.status));
     assert.doesNotMatch(await traversal.text(), /createServer/);
 
-    const setup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'test-password-123' }) });
+    const invalidSetup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'abc-12' }) });
+    assert.equal(invalidSetup.status, 400);
+    const setup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'testpassword123' }) });
     assert.equal(setup.status, 200);
     const setupBody = await setup.json();
     assert.ok(setupBody.clientToken.length >= 24);
+    assert.match(setupBody.clientToken, /^[A-Za-z0-9]+$/);
     const storedConfig = await readFile(configFile, 'utf8');
     assert.doesNotMatch(storedConfig, new RegExp(setupBody.clientToken));
     assert.match(storedConfig, /enc:v1:/);
     const cookie = setup.headers.get('set-cookie').split(';')[0];
+    const unauthenticatedStats = await fetch(`http://127.0.0.1:${port}/api/stats`);
+    assert.equal(unauthenticatedStats.status, 401);
+    const emptyStats = await fetch(`http://127.0.0.1:${port}/api/stats?window=24h`, { headers: { cookie } }).then((result) => result.json());
+    assert.equal(emptyStats.window, '24h');
+    assert.equal(emptyStats.summary.requests, 0);
+    assert.deepEqual(emptyStats.byProvider, []);
+    const invalidStatsWindow = await fetch(`http://127.0.0.1:${port}/api/stats?window=month`, { headers: { cookie } });
+    assert.equal(invalidStatsWindow.status, 400);
     const redactedConfig = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } }).then((result) => result.json());
     assert.notEqual(redactedConfig.clientToken, setupBody.clientToken);
     assert.doesNotMatch(JSON.stringify(redactedConfig), new RegExp(setupBody.clientToken));
@@ -58,6 +70,27 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.equal(redactedConfig.zenProxyUrl, '');
     assert.equal(redactedConfig.goProxyUrl, '');
     assert.equal(redactedConfig.zenProxyConfigured, false);
+
+    const invalidCredential = await fetch(`http://127.0.0.1:${port}/api/provider-credentials`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ provider: 'zen', name: '错误代理', apiKey: 'panel-secret', proxyUrl: 'ftp://bad' }) });
+    assert.equal(invalidCredential.status, 400);
+    const createdCredentialResponse = await fetch(`http://127.0.0.1:${port}/api/provider-credentials`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ provider: 'zen', name: '主力套餐', apiKey: 'panel-secret', proxyUrl: 'socks5h://user:pass@127.0.0.1:1080' }) });
+    assert.equal(createdCredentialResponse.status, 201);
+    const createdCredentialConfig = await createdCredentialResponse.json();
+    assert.equal(createdCredentialConfig.zenCredentials.length, 1);
+    assert.equal(createdCredentialConfig.zenCredentials[0].name, '主力套餐');
+    assert.equal(createdCredentialConfig.zenCredentials[0].apiKey, 'pa••••et');
+    assert.equal(createdCredentialConfig.zenCredentials[0].proxyUrl, 'socks5h://••••@127.0.0.1:1080');
+    assert.doesNotMatch(JSON.stringify(createdCredentialConfig), /panel-secret|user:pass/);
+    assert.doesNotMatch(await readFile(configFile, 'utf8'), /panel-secret|user:pass/);
+    const credentialId = createdCredentialConfig.zenCredentials[0].id;
+    const updatedCredential = await fetch(`http://127.0.0.1:${port}/api/provider-credentials/zen/${credentialId}`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ name: '主力套餐 2', apiKey: '', proxyUrl: '' }) }).then((response) => response.json());
+    assert.equal(updatedCredential.zenCredentials[0].name, '主力套餐 2');
+    assert.equal(updatedCredential.zenCredentials[0].apiKey, createdCredentialConfig.zenCredentials[0].apiKey);
+    assert.equal(updatedCredential.zenCredentials[0].proxyConfigured, false);
+    const duplicateCredential = await fetch(`http://127.0.0.1:${port}/api/provider-credentials`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ provider: 'zen', name: '主力套餐 2', apiKey: 'another-secret' }) });
+    assert.equal(duplicateCredential.status, 409);
+    const deletedCredential = await fetch(`http://127.0.0.1:${port}/api/provider-credentials/zen/${credentialId}`, { method: 'DELETE', headers: { cookie } }).then((response) => response.json());
+    assert.deepEqual(deletedCredential.zenCredentials, []);
 
     const invalidProxy = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, zenProxyUrl: 'ftp://127.0.0.1:21' }) });
     assert.equal(invalidProxy.status, 400);
@@ -86,6 +119,8 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.equal(invalidBooleanSetting.status, 400);
     const invalidSecretType = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, zenKey: { value: 'secret' } }) });
     assert.equal(invalidSecretType.status, 400);
+    const invalidClientToken = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, clientToken: 'abc-12' }) });
+    assert.equal(invalidClientToken.status, 400);
 
     const invalidClient = await fetch(`http://127.0.0.1:${port}/api/clients`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ name: '错误客户端', maxConcurrentRequests: 1.5 }) });
     assert.equal(invalidClient.status, 400);
@@ -124,9 +159,9 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
 
     const logout = await fetch(`http://127.0.0.1:${port}/api/logout`, { method: 'POST', headers: { cookie } });
     assert.equal(logout.status, 200);
-    const wrongLogin = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrong-password' }) });
+    const wrongLogin = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrongpassword' }) });
     assert.equal(wrongLogin.status, 401);
-    const correctLogin = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'test-password-123' }) });
+    const correctLogin = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'testpassword123' }) });
     assert.equal(correctLogin.status, 200);
     assert.match(correctLogin.headers.get('set-cookie'), /HttpOnly/);
   } finally {
@@ -136,11 +171,209 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
   }
 });
 
+test('流式上游中途断开会向客户端发送协议错误并写入失败日志', { timeout: 10_000 }, async () => {
+  let upstreamCalls = 0;
+  const upstream = createHttpServer((req, res) => {
+    upstreamCalls++;
+    res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+    res.write(`data: ${JSON.stringify({
+      id: 'chat_broken', model: 'deepseek-v4-flash',
+      choices: [{ index: 0, delta: { role: 'assistant', content: 'partial' }, finish_reason: null }]
+    })}\n\n`);
+    if (upstreamCalls <= 2) setImmediate(() => res.destroy());
+    else if (upstreamCalls === 4) {
+      res.end(`data: ${JSON.stringify({
+        id: 'chat_media', model: 'deepseek-v4-flash',
+        choices: [{ index: 0, delta: { content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/x.png' } }] }, finish_reason: null }]
+      })}\n\n`);
+    }
+    else {
+      res.end(`data: ${JSON.stringify({
+        id: 'chat_recovered', model: 'deepseek-v4-flash',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 3, completion_tokens: 1 }
+      })}\n\ndata: [DONE]\n\n`);
+    }
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/stream-failure-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'stream-failure-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_ZEN_KEY_1: 'zen-stream-key',
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+
+    const direct = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, messages: [{ role: 'user', content: 'ping' }] })
+    });
+    assert.equal(direct.status, 200);
+    const directText = await direct.text();
+    assert.match(directText, /"type":"upstream_error"/);
+    assert.match(directText, /data: \[DONE\]/);
+
+    const translated = await fetch(`http://127.0.0.1:${port}/zen/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] })
+    });
+    assert.equal(translated.status, 200);
+    const translatedText = await translated.text();
+    assert.match(translatedText, /event: error/);
+    assert.match(translatedText, /"type":"upstream_error"/);
+
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const logs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(logs.length, 2, JSON.stringify(logs, null, 2));
+    assert.ok(logs.every((item) => item.status === 502 && item.stream && item.error));
+    const stats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(stats.summary.errors, 2);
+    assert.equal(stats.credentialHealth[0].consecutiveFailures, 2);
+
+    const recovered = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, messages: [{ role: 'user', content: 'recover' }] })
+    });
+    const recoveredText = await recovered.text();
+    assert.equal(recovered.status, 200);
+    assert.doesNotMatch(recoveredText, /upstream_error/);
+    assert.match(recoveredText, /data: \[DONE\]/);
+    const recoveredStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(recoveredStats.summary.requests, 3);
+    assert.equal(recoveredStats.summary.errors, 2);
+    assert.equal(recoveredStats.credentialHealth[0].consecutiveFailures, 0);
+
+    const unsupportedMedia = await fetch(`http://127.0.0.1:${port}/zen/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, max_tokens: 16, messages: [{ role: 'user', content: 'media' }] })
+    });
+    const unsupportedMediaText = await unsupportedMedia.text();
+    assert.match(unsupportedMediaText, /event: error/);
+    assert.match(unsupportedMediaText, /image_url/);
+    const mediaStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(mediaStats.summary.requests, 4);
+    assert.equal(mediaStats.summary.errors, 3);
+    assert.equal(mediaStats.credentialHealth[0].consecutiveFailures, 0);
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('SIGTERM 会等待活动请求完成并最终刷新持久化日志', {
+  timeout: 10_000,
+  skip: process.platform === 'win32' ? 'Windows 不会向子进程传递 POSIX SIGTERM' : false
+}, async () => {
+  let markUpstreamReceived;
+  const upstreamReceived = new Promise((resolveReceived) => { markUpstreamReceived = resolveReceived; });
+  const upstream = createHttpServer((req, res) => {
+    markUpstreamReceived();
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'chat_shutdown', model: 'deepseek-v4-flash',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'done' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 2, completion_tokens: 1 }
+      }));
+    }, 150);
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const suffix = randomUUID();
+  const configFile = resolve(import.meta.dirname, `../data/shutdown-${suffix}.json`);
+  const logFile = resolve(import.meta.dirname, `../data/shutdown-logs-${suffix}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile, LOG_FILE: logFile,
+    CONFIG_ENCRYPTION_KEY: 'shutdown-integration-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_ZEN_KEY_1: 'zen-shutdown-key',
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let childOutput = '';
+  child.stdout.on('data', (chunk) => { childOutput += chunk.toString('utf8'); });
+  child.stderr.on('data', (chunk) => { childOutput += chunk.toString('utf8'); });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const configured = await fetch(`http://127.0.0.1:${port}/api/config`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, persistLogs: true })
+    });
+    assert.equal(configured.status, 200);
+
+    const pendingResponse = fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'finish before shutdown' }] })
+    });
+    await upstreamReceived;
+    child.kill('SIGTERM');
+    const response = await pendingResponse.catch((error) => {
+      throw new Error(`活动请求在退出时失败：${error.message}\n${childOutput}`);
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    const [exitCode] = await once(child, 'exit');
+    assert.equal(exitCode, 0);
+    const logs = JSON.parse(await readFile(logFile, 'utf8'));
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].status, 200);
+    assert.equal(logs[0].model, 'deepseek-v4-flash');
+  } finally {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    await unlink(logFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
 test('可从 Render 环境变量引导完整配置且敏感值加密落盘', { timeout: 10_000 }, async () => {
   const port = 20_000 + Math.floor(Math.random() * 10_000);
   const configFile = resolve(import.meta.dirname, `../data/render-${randomUUID()}.json`);
-  const adminPassword = 'render-admin-password';
-  const clientToken = 'render-client-token-1234567890';
+  const adminPassword = 'Admin123';
+  const clientToken = 'Api123';
   const child = spawn(process.execPath, ['src/server.js'], {
     cwd: resolve(import.meta.dirname, '..'),
     env: {
@@ -172,16 +405,392 @@ test('可从 Render 环境变量引导完整配置且敏感值加密落盘', { t
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: adminPassword })
     });
     assert.equal(login.status, 200);
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const runtimeConfig = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(runtimeConfig.clientToken, '••••');
     const authenticated = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
       method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${clientToken}` }, body: '{}'
     });
     assert.equal(authenticated.status, 400);
     const stored = await readFile(configFile, 'utf8');
     assert.match(stored, /enc:v1:/);
-    assert.doesNotMatch(stored, /render-admin-password|render-client-token|render-zen-secret/);
+    assert.doesNotMatch(stored, new RegExp(`${adminPassword}|${clientToken}|render-zen-secret`));
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('编号环境变量 Key 会按提供方轮询并在面板显示数量', { timeout: 10_000 }, async () => {
+  const authorizations = [];
+  const upstream = createHttpServer((req, res) => {
+    authorizations.push(req.headers.authorization);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ id: 'resp_env', object: 'response', status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 1 } }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/environment-pool-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'environment-pool-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_ZEN_KEY_1: 'zen-key-one',
+    OPENCODE_ZEN_KEY_2: 'zen-key-two',
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    for (let index = 0; index < 2; index++) {
+      const response = await fetch(`http://127.0.0.1:${port}/zen/v1/responses`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+        body: JSON.stringify({ model: 'gpt-test', input: 'hello' })
+      });
+      assert.equal(response.status, 200);
+    }
+    assert.deepEqual(authorizations, ['Bearer zen-key-one', 'Bearer zen-key-two']);
+
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const config = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(config.zenEnvironmentKeyCount, 2);
+    assert.equal(config.goEnvironmentKeyCount, 0);
+    const logs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+    assert.deepEqual(logs.map((item) => item.credentialId), ['environment:2', 'environment:1']);
+    const stats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.deepEqual(stats.byCredential.map((item) => item.name).sort(), ['ZEN 环境 #1', 'ZEN 环境 #2']);
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('面板多 Key 会安全加密、轮询并按名称统计', { timeout: 10_000 }, async () => {
+  const authorizations = [];
+  const upstream = createHttpServer((req, res) => {
+    authorizations.push(req.headers.authorization);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ id: 'resp_panel', object: 'response', status: 'completed', output: [], usage: { input_tokens: 2, output_tokens: 1 } }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/panel-pool-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'panel-pool-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    for (const [name, apiKey] of [['主力', 'panel-key-one'], ['备用', 'panel-key-two']]) {
+      const created = await fetch(`http://127.0.0.1:${port}/api/provider-credentials`, {
+        method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ provider: 'zen', name, apiKey })
+      });
+      assert.equal(created.status, 201);
+    }
+    for (let index = 0; index < 3; index++) {
+      const response = await fetch(`http://127.0.0.1:${port}/zen/v1/responses`, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+        body: JSON.stringify({ model: 'gpt-test', input: 'hello' })
+      });
+      assert.equal(response.status, 200);
+    }
+    assert.deepEqual(authorizations, ['Bearer panel-key-one', 'Bearer panel-key-two', 'Bearer panel-key-one']);
+    const stats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.deepEqual(stats.byCredential.map((item) => item.name).sort(), ['ZEN · 主力', 'ZEN · 备用'].sort());
+    assert.deepEqual(stats.credentialHealth.map((item) => item.state), ['healthy', 'healthy']);
+    const stored = await readFile(configFile, 'utf8');
+    assert.doesNotMatch(stored, /panel-key-one|panel-key-two/);
+    assert.equal((stored.match(/enc:v1:/g) || []).length >= 4, true);
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('鉴权失败的环境 Key 会在当前请求内切换并进入冷却', { timeout: 10_000 }, async () => {
+  const authorizations = [];
+  const upstream = createHttpServer((req, res) => {
+    const authorization = req.headers.authorization;
+    authorizations.push(authorization);
+    if (authorization === 'Bearer rejected-key') {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ error: { message: 'invalid key' } }));
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ id: 'resp_ok', object: 'response', status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 1 } }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/key-health-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'key-health-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_GO_KEY_1: 'rejected-key',
+    OPENCODE_GO_KEY_2: 'healthy-key',
+    OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const request = () => fetch(`http://127.0.0.1:${port}/go/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'gpt-test', input: 'ping' })
+    });
+    const recovered = await request();
+    assert.equal(recovered.status, 200);
+    assert.equal(recovered.headers.get('x-opencode-key-attempts'), '2');
+    const healthyResponse = await request();
+    assert.equal(healthyResponse.status, 200);
+    assert.equal(healthyResponse.headers.get('x-opencode-key-attempts'), null);
+    assert.deepEqual(authorizations, ['Bearer rejected-key', 'Bearer healthy-key', 'Bearer healthy-key']);
+
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const stats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    const rejected = stats.credentialHealth.find((item) => item.credentialId === 'environment:1');
+    const healthy = stats.credentialHealth.find((item) => item.credentialId === 'environment:2');
+    assert.equal(rejected.state, 'cooldown');
+    assert.equal(rejected.lastFailureKind, 'auth');
+    assert.equal(healthy.state, 'healthy');
+    assert.equal(stats.summary.requests, 2);
+    assert.equal(stats.summary.failoverRequests, 1);
+    assert.equal(stats.summary.failoverAttempts, 1);
+    const logs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+    assert.deepEqual(logs.map((item) => item.credentialAttempts), [1, 2]);
+    assert.doesNotMatch(JSON.stringify(stats.credentialHealth), /rejected-key|healthy-key/);
+
+    const missingReset = await fetch(`http://127.0.0.1:${port}/api/credential-health/reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'go', credentialId: 'environment:99' })
+    });
+    assert.equal(missingReset.status, 404);
+    const reset = await fetch(`http://127.0.0.1:${port}/api/credential-health/reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'go', credentialId: 'environment:1' })
+    });
+    assert.equal(reset.status, 200);
+    assert.equal((await reset.json()).credential.state, 'unknown');
+    const resetStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(resetStats.credentialHealth.find((item) => item.credentialId === 'environment:1').state, 'unknown');
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('推理 5xx 不会重放，但模型发现会安全切换 Key', { timeout: 10_000 }, async () => {
+  const authorizations = [];
+  const upstream = createHttpServer((req, res) => {
+    authorizations.push(req.headers.authorization);
+    if (req.method === 'GET' && req.headers.authorization === 'Bearer first-key') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ object: 'list', data: [{ id: 'gpt-test', object: 'model' }] }));
+    }
+    res.writeHead(500, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ error: { message: 'temporary upstream failure' } }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/key-no-replay-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'key-no-replay-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_GO_KEY_1: 'first-key',
+    OPENCODE_GO_KEY_2: 'second-key',
+    OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const response = await fetch(`http://127.0.0.1:${port}/go/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'gpt-test', input: 'ping' })
+    });
+    assert.equal(response.status, 500);
+    assert.equal(response.headers.get('x-opencode-key-attempts'), null);
+    assert.deepEqual(authorizations, ['Bearer first-key']);
+
+    const models = await fetch(`http://127.0.0.1:${port}/go/v1/models`, {
+      headers: { authorization: 'Bearer Api123' }
+    });
+    assert.equal(models.status, 200);
+    assert.equal(models.headers.get('x-opencode-key-attempts'), '2');
+    assert.deepEqual((await models.json()).data.map((item) => item.id), ['gpt-test']);
+    assert.deepEqual(authorizations, ['Bearer first-key', 'Bearer second-key', 'Bearer first-key']);
+
+    const combined = await fetch(`http://127.0.0.1:${port}/v1/models?provider=all`, {
+      headers: { authorization: 'Bearer Api123' }
+    });
+    assert.equal(combined.status, 200);
+    assert.equal(combined.headers.get('x-opencode-key-attempts'), '2');
+    assert.deepEqual((await combined.json()).data.map((item) => item.id), ['opencode-go/gpt-test']);
+    assert.deepEqual(authorizations, ['Bearer first-key', 'Bearer second-key', 'Bearer first-key', 'Bearer second-key', 'Bearer first-key']);
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('上游限流与追踪响应头会安全透传到同协议、跨协议和模型发现', { timeout: 10_000 }, async () => {
+  const upstream = createHttpServer((req, res) => {
+    res.writeHead(429, {
+      'content-type': 'application/json',
+      'retry-after': '7',
+      'x-request-id': `upstream-${req.headers.authorization === 'Bearer go-rate-key' ? 'go' : 'zen'}`,
+      'x-ratelimit-remaining-requests': '0',
+      'set-cookie': 'upstream-cookie=must-not-forward'
+    });
+    res.end(JSON.stringify({ error: { message: 'rate limited' } }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/upstream-headers-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'upstream-headers-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_GO_KEY: 'go-rate-key',
+    OPENCODE_ZEN_KEY: 'zen-rate-key',
+    OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`,
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+
+    const models = await fetch(`http://127.0.0.1:${port}/api/models?provider=go`, { headers: { cookie } });
+    assert.equal(models.status, 429);
+    assert.equal(models.headers.get('retry-after'), '7');
+    assert.equal(models.headers.get('x-opencode-upstream-request-id'), 'upstream-go');
+    assert.equal(models.headers.get('x-ratelimit-remaining-requests'), '0');
+    assert.equal(models.headers.get('set-cookie'), null);
+
+    const reset = await fetch(`http://127.0.0.1:${port}/api/credential-health/reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'go', credentialId: 'environment:1' })
+    });
+    assert.equal(reset.status, 200);
+
+    const sameProtocol = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'ping' }] })
+    });
+    assert.equal(sameProtocol.status, 429);
+    assert.equal(sameProtocol.headers.get('retry-after'), '7');
+    assert.equal(sameProtocol.headers.get('x-opencode-upstream-request-id'), 'upstream-zen');
+    assert.equal((await sameProtocol.json()).error.message, 'rate limited');
+
+    const crossProtocol = await fetch(`http://127.0.0.1:${port}/go/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] })
+    });
+    assert.equal(crossProtocol.status, 429);
+    assert.equal(crossProtocol.headers.get('retry-after'), '7');
+    assert.equal(crossProtocol.headers.get('x-opencode-upstream-request-id'), 'upstream-go');
+    assert.equal((await crossProtocol.json()).type, 'error');
+    const logs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+    assert.deepEqual(logs.map((item) => item.upstreamRequestId), ['upstream-go', 'upstream-zen']);
+    assert.deepEqual(logs.map((item) => item.retryAfter), ['7', '7']);
+    assert.doesNotMatch(JSON.stringify(logs), /upstream-cookie/);
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
     await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
   }
 });

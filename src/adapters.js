@@ -33,6 +33,10 @@ function supportsReasoningEffort(model) {
   return isOpenAiOSeries(model) || /^gpt-[5-9]/i.test(model || '');
 }
 
+function needsNonThinkingToolMode(model) {
+  return /^deepseek-v4-flash(?:-free)?$/i.test(model || '');
+}
+
 function resolveReasoningEffort(body, protocol) {
   if (protocol === 'responses') return body.reasoning?.effort;
   if (protocol === 'chat') return body.reasoning_effort;
@@ -396,19 +400,22 @@ export function formatRequest(request, protocol) {
     const calls = message.parts.filter((x) => x.type === 'tool_call');
     const results = message.parts.filter((x) => x.type === 'tool_result');
     const reasoning = message.parts.filter((x) => x.type === 'reasoning').map((x) => x.text).filter(Boolean).join('\n');
+    for (const result of results) messages.push({ role: 'tool', tool_call_id: result.id, content: typeof result.content === 'string' ? result.content : canonicalJsonString(result.content) });
     if (text || images.length || calls.length) appendChatAssistantMessage(messages, {
       role: message.role,
       content: images.length || hasCacheControl ? [...textParts.map((x) => ({ type: 'text', text: x.text, ...(x.cacheControl ? { cache_control: x.cacheControl } : {}) })), ...images.map(chatImagePart)] : (text || null),
       ...(message.role === 'assistant' && usesReasoningContent(request.model) && (reasoning || calls.length) ? { reasoning_content: reasoning || 'tool call' } : {}),
       ...(calls.length ? { tool_calls: calls.map((x) => ({ id: x.id, type: 'function', function: { name: x.name, arguments: canonicalJsonString(x.arguments) } })) } : {})
     });
-    for (const result of results) messages.push({ role: 'tool', tool_call_id: result.id, content: typeof result.content === 'string' ? result.content : canonicalJsonString(result.content) });
   }
+  const reasoningEffort = request.reasoningEffort && supportsReasoningEffort(request.model)
+    ? request.reasoningEffort
+    : !request.reasoningEffort && request.tools.length && needsNonThinkingToolMode(request.model) ? 'none' : undefined;
   return {
     ...common,
     ...(request.metadata && typeof request.metadata === 'object' && !Array.isArray(request.metadata) ? { metadata: request.metadata } : {}),
     ...(request.maxTokens ? { [isOpenAiOSeries(request.model) ? 'max_completion_tokens' : 'max_tokens']: request.maxTokens } : {}),
-    ...(request.reasoningEffort && supportsReasoningEffort(request.model) ? { reasoning_effort: request.reasoningEffort } : {}),
+    ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     ...(request.stop ? { stop: request.stop } : {}),
     ...(request.tools.length && request.toolChoice ? { tool_choice: formatToolChoice(request.toolChoice, 'chat') } : {}),
     ...(request.tools.length && request.parallelToolCalls !== undefined ? { parallel_tool_calls: request.parallelToolCalls } : {}),
@@ -507,6 +514,7 @@ export function formatResponse(response, protocol) {
     }
   };
   if (protocol === 'responses') {
+    assertOutputPartsSupported(response.parts, protocol, new Set(['text', 'reasoning', 'tool_call']));
     const incomplete = ['length', 'max_tokens', 'max_output_tokens'].includes(response.stopReason);
     return {
     id: response.id || `resp_${randomUUID().replaceAll('-', '')}`, object: 'response', created_at: Math.floor(Date.now() / 1000), status: 'completed', model: response.model,
@@ -527,6 +535,7 @@ export function formatResponse(response, protocol) {
     }
     };
   }
+  assertOutputPartsSupported(response.parts, protocol, new Set(['text', 'reasoning', 'tool_call']));
   return {
     id: response.id || `chatcmpl-${randomUUID()}`, object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: response.model,
     choices: [{ index: 0, message: { role: 'assistant', content: response.parts.filter((x) => x.type === 'text').map((x) => x.text).join('') || null,
@@ -541,6 +550,11 @@ export function formatResponse(response, protocol) {
       ...(response.reasoningTokens ? { completion_tokens_details: { reasoning_tokens: response.reasoningTokens } } : {})
     }
   };
+}
+
+function assertOutputPartsSupported(parts, protocol, supported) {
+  const unsupported = [...new Set(parts.filter((part) => !supported.has(part.type)).map((part) => part.type || 'unknown'))];
+  if (unsupported.length) throw unsupportedFeature(`跨协议转换到 ${protocol} 时无法表达上游响应内容块：${unsupported.join(', ')}`);
 }
 
 function responsesStopReason(body) {

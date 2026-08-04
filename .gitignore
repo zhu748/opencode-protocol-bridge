@@ -2,5 +2,6 @@ node_modules/
 data/config.json
 data/request-logs.json
 data/*.tmp
+data/ui-*.png
 .env
 npm-debug.log*

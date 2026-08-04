@@ -41,7 +41,7 @@ npm install
 npm start
 ```
 
-浏览器打开 `http://127.0.0.1:8787`，首次访问会要求设置管理密码。初始化成功后，请立即保存自动生成的客户端访问令牌，再到“连接设置”填写 Zen 或 Go 密钥。
+浏览器打开 `http://127.0.0.1:8787`，首次访问会要求设置管理密码。初始化成功后，请立即保存自动生成的客户端访问令牌，再到“连接设置”的 Key 池添加一把或多把 Zen / Go 密钥；每把 Key 可以命名并设置独立代理。
 
 可用环境变量：
 
@@ -54,11 +54,16 @@ npm start
 | `OPENCODE_ZEN_BASE_URL` | 官方 Zen 地址 | 仅用于开发、测试或私有镜像上游 |
 | `OPENCODE_GO_BASE_URL` | 官方 Go 地址 | 仅用于开发、测试或私有镜像上游 |
 | `CONFIG_ENCRYPTION_KEY` | 空 | 可选配置加密主密钥，至少 16 个字符 |
-| `OPENCODE_BRIDGE_ADMIN_PASSWORD` | 空 | 配置文件不存在时用于首次引导，长度 8–256；适合 Render 等临时文件系统 |
-| `OPENCODE_BRIDGE_CLIENT_TOKEN` | 随机生成 | 环境变量引导时设置主访问令牌，至少 24 个字符 |
-| `OPENCODE_ZEN_KEY` / `OPENCODE_GO_KEY` | 空 | 环境变量引导时写入对应上游 Key |
+| `OPENCODE_BRIDGE_ADMIN_PASSWORD` | 空 | 配置文件不存在时用于首次引导；6–256 位英文字母或数字 |
+| `OPENCODE_BRIDGE_CLIENT_TOKEN` | 随机生成 | 环境变量引导时设置主访问令牌；6–256 位英文字母或数字 |
+| `OPENCODE_BRIDGE_TRUST_PROXY` | `false` | 设为 `true` 后，登录限速使用 `X-Forwarded-For` 的首个有效 IP；仅应在可信反向代理后启用 |
+| `OPENCODE_ZEN_KEY` / `OPENCODE_GO_KEY` | 空 | 单 Key 兼容变量 |
+| `OPENCODE_ZEN_KEY_1...32` / `OPENCODE_GO_KEY_1...32` | 空 | 多 Key 编号变量；按编号轮询使用 |
+| `OPENCODE_ZEN_KEYS` / `OPENCODE_GO_KEYS` | 空 | 多 Key 合并变量，支持 JSON 数组、逗号或换行分隔；优先于编号变量 |
 | `OPENCODE_PROXY_URL` | 空 | 环境变量引导时写入默认代理 |
 | `OPENCODE_ZEN_PROXY_URL` / `OPENCODE_GO_PROXY_URL` | 空 | 环境变量引导时写入每个 Key 的独立代理 |
+| `OPENCODE_ZEN_PROXY_URL_1...32` / `OPENCODE_GO_PROXY_URL_1...32` | 空 | 与编号 Key 一一对应的代理；缺省时回退到提供方代理和默认代理 |
+| `OPENCODE_ZEN_PROXY_URLS` / `OPENCODE_GO_PROXY_URLS` | 空 | 与 `*_KEYS` 对应的代理列表；需要跳过某项时使用含空字符串的 JSON 数组 |
 | `OPENCODE_BRIDGE_DEFAULT_PROVIDER` | `zen` | 环境变量引导时的默认提供方：`zen` 或 `go` |
 
 也可以使用 Docker Compose：
@@ -78,12 +83,12 @@ Compose 默认只映射到本机 `127.0.0.1:8787`，配置保存在命名卷 `br
 
 仓库根目录的 `render.yaml` 会创建一个新加坡区域的免费 Node Web Service，自动执行 `npm ci --omit=dev`、`npm start`，并使用 `/health` 进行健康检查。在 Render 创建 Blueprint 时填写：
 
-- `OPENCODE_BRIDGE_ADMIN_PASSWORD`：管理面板密码，至少 8 个字符。
-- `OPENCODE_BRIDGE_CLIENT_TOKEN`：客户端调用本项目使用的令牌，至少 24 个字符。
-- `OPENCODE_ZEN_KEY` / `OPENCODE_GO_KEY`：至少填写一个；不使用的可留空。
-- 三个代理变量均可留空，需要时填写 HTTP(S) 或 SOCKS 地址。
+- `OPENCODE_BRIDGE_ADMIN_PASSWORD`：管理面板密码，至少 6 位，仅使用英文字母或数字。
+- `OPENCODE_BRIDGE_CLIENT_TOKEN`：客户端调用令牌，至少 6 位，仅使用英文字母或数字。
+- `OPENCODE_ZEN_KEY_1...4` / `OPENCODE_GO_KEY_1...4`：按需要填写多把 Key，至少配置一把。
+- 每把 Key 的同编号 `*_PROXY_URL_1...4` 可独立填写 HTTP(S) 或 SOCKS 地址，不需要代理时留空。
 
-`CONFIG_ENCRYPTION_KEY` 由 Render 自动生成，`HOST=0.0.0.0` 已在 Blueprint 中设置，`PORT` 由 Render 自动注入。环境变量引导仅在配置文件中还没有管理密码时执行，不会覆盖已存在的持久化配置。
+`CONFIG_ENCRYPTION_KEY` 由 Render 自动生成，`HOST=0.0.0.0` 和 `OPENCODE_BRIDGE_TRUST_PROXY=true` 已在 Blueprint 中设置，`PORT` 由 Render 自动注入。可信代理开关使登录限速按 Render 提供的真实客户端地址隔离，普通自托管部署默认不信任转发头。编号环境 Key 在运行时优先于管理面板保存的 Key 池，并按请求轮询；每把 Key 使用同编号代理。面板 Key 池同样最多支持 32 把，每项可单独命名、测试和设置代理；旧版保存的单 Key 会在首次编辑时自动迁移。401/403 会让对应 Key 立即冷却，429 会优先采用上游 `Retry-After`，并在同一请求内安全切换到下一把健康 Key；响应头 `x-opencode-key-attempts` 会在发生切换时给出尝试次数。网络错误或 5xx 不会自动重放推理请求，以避免重复计费或重复工具调用；幂等的模型发现请求则会安全尝试下一把 Key。连续三次网络错误或 5xx 后对应 Key 会进入指数冷却。冷却结束后 Key 自动重新参与轮询，也可在管理面板的 Key 健康表中手动重置。健康状态只保存在当前进程内，替换同一槽位的 Key 或代理不会继承旧状态。环境变量引导仅在配置文件中还没有管理密码时执行，不会覆盖已存在的持久化配置。
 
 Render 免费 Web Service 的文件系统是临时的，闲置 15 分钟后会休眠，休眠、重启或重新部署会丢失管理面板写入的本地配置。因此免费部署应把长期使用的密码、令牌、Key 和代理保存为 Render Secret；实例恢复时项目会从这些变量重新生成加密配置。面板中临时修改的模型路由、替换规则和客户端列表也会在实例文件系统重置后恢复默认。需要永久保留面板修改时，应升级到支持 Persistent Disk 的付费实例并将磁盘挂载到 `/opt/render/project/src/data`。详见 [Render 免费实例限制](https://render.com/docs/free) 与 [Persistent Disks](https://render.com/docs/disks)。
 
@@ -125,7 +130,7 @@ socks5://127.0.0.1:1080
 socks5h://user:password@proxy.example:1080
 ```
 
-省略协议的 `host:port` 会按 HTTP 代理处理。代理用户名或密码包含特殊字符时应使用 URL 百分号编码。管理面板的 Zen / Go“测试连接”会优先使用新填写的独立代理，否则使用服务端已保存的对应代理和默认代理回退。
+省略协议的 `host:port` 会按 HTTP 代理处理。代理用户名或密码包含特殊字符时应使用 URL 百分号编码。管理面板可以逐项测试 Key；编辑时填写的新代理优先，否则使用该 Key 已保存的代理并回退到默认代理。
 
 ### 在 OpenCode 中使用
 
@@ -230,25 +235,30 @@ OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变�
 
 ## 流式说明
 
-- 客户端协议与上游协议相同时，SSE 数据实时原样透传；服务通过并行观察流记录 usage 和流内错误，不改写客户端收到的字节。
-- 跨协议时，服务会维护内容块索引和工具调用状态，将上游事件逐条转换为目标协议事件，不再缓存完整响应。客户端断开时，上游请求会被取消。
-- 跨协议流会保留 `completed`/`incomplete`、token 上限停止原因、缓存读取/写入 token 和推理 token；上游错误会使用目标协议可识别的 SSE 帧返回。
+- 客户端协议与上游协议相同时，正常 SSE 数据实时原样透传；服务通过并行观察流记录 usage。若上游在完成事件前中断，服务会追加目标协议可识别的错误帧，避免客户端把截断内容误判为成功。
+- 跨协议时，服务会维护内容块索引和工具调用状态，将上游事件逐条转换为目标协议事件，不再缓存完整响应；SSE 解析兼容 LF、CRLF 和 CR 换行。客户端断开时，上游请求会被取消。
+- 跨协议流会保留 `completed`/`incomplete`、token 上限停止原因、缓存读取/写入 token 和推理 token；上游错误会使用目标协议可识别的 SSE 帧返回。单个上游 SSE 事件最多缓冲 8 MiB，超限会终止转换，防止异常上游无限占用内存。
+- 流式请求只有在完整结束后才会把对应 Key 记为健康；中途断流会写入失败日志并参与连续失败熔断。客户端主动断开记为内部状态 499，但不会惩罚 Key。
 
 管理面板可以设置 1 秒至 10 分钟的上游超时，默认 120 秒。
 还可以设置 1–1000 的并发请求上限，默认 20；达到上限时返回目标协议兼容的 HTTP 429 错误与 `Retry-After` 响应头。
+
+最终上游返回的 `Retry-After` 和标准 `RateLimit-*` / `X-RateLimit-*` 配额头会按安全白名单透传；上游的 `x-request-id`、`request-id` 或 `x-trace-id` 会改名为 `x-opencode-upstream-request-id`，与本项目生成的 `x-request-id` 区分。Cookie、认证信息和其它未列入白名单的响应头不会转发。
 
 ## 当前边界
 
 - 本项目覆盖 Claude Messages、OpenAI Responses 和 Chat Completions 三个协议族；OpenCode 中使用 Google `generateContent` 原生端点的 Gemini 模型不在当前转换范围内。
 - 单个 JSON 请求体上限为 10 MiB，模型 ID 上限为 256 个字符；更大的 PDF 或其他文件应先使用目标服务的 Files API 上传，再通过 file ID 引用。
-- 同协议请求和非流式响应会在最小结构校验后保留厂商扩展字段；同协议流式响应原样透传。跨协议转换覆盖系统提示、文本、拒绝内容、图片及其 `detail`、Claude Documents/Responses 文件块、采样参数、函数工具、工具选择、新旧工具调用、工具结果、推理强度及 usage。停止词会在 Claude/Chat 目标间转换；Responses 不支持 stop，收到跨协议停止词时返回明确的 400。Claude 转 Chat 时保留兼容代理使用的 `cache_control`，转 Responses 时会移除该非标准字段；转 Claude 时 metadata 只保留合法的 `user_id`。Responses 内置工具/custom tool、Claude server tool、未知内容块、Chat 文件输入及 Chat 无法表达的图片 `file_id` 在跨协议时同样返回 400，避免静默丢失内容；其他非内容类厂商专属字段会被忽略。
+- 同协议请求和非流式响应会在最小结构校验后保留厂商扩展字段；同协议流式响应原样透传。跨协议转换覆盖系统提示、文本、拒绝内容、图片及其 `detail`、Claude Documents/Responses 文件块、采样参数、函数工具、工具选择、新旧工具调用、工具结果、推理强度及 usage；Claude 的 `tool_result + 后续用户文本` 转 Chat 时会保持合法的 tool → user 顺序。停止词会在 Claude/Chat 目标间转换；Responses 不支持 stop，收到跨协议停止词时返回明确的 400。Claude 转 Chat 时保留兼容代理使用的 `cache_control`，转 Responses 时会移除该非标准字段；转 Claude 时 metadata 只保留合法的 `user_id`。Responses 内置工具/custom tool、Claude server tool、未知内容块、Chat 文件输入及 Chat 无法表达的图片 `file_id` 在跨协议请求时返回 400；上游响应包含目标协议无法表达的图片、文档或流式媒体块时返回明确的转换错误，避免静默丢失内容。其他非内容类厂商专属字段会被忽略。
+- DeepSeek V4 Flash / V4 Flash Free 的 Chat 工具调用在未显式请求推理时会自动设置 `reasoning_effort: "none"`，避免模型默认 Thinking 模式拒绝工具；客户端显式启用 Claude thinking 时不会静默覆盖其选择。
 - 请求日志默认仅保存在内存中；管理面板可启用有界持久化，文件为 `data/request-logs.json`。日志不包含提示词、响应正文或密钥，写盘会在短时间窗口内合并，并在管理读取或服务正常退出时强制刷新。关闭持久化会取消尚未执行的延迟写盘，但不会自动删除已有文件；需要删除历史内容时再点击“清空记录”。
+- 管理面板“用量统计”按全部记录、最近 24 小时或最近 7 天汇总请求数、成功率、自动 Key 切换次数、平均/P95 耗时以及输入、输出、缓存读取、缓存写入和推理 token，并可按上游、实际模型、协议转换、客户端和 Key 槽位拆分；Key 表还展示当前健康状态、连续失败、冷却截止时间、实时剩余时间与最近事件。Key 统计只保存“环境变量编号/面板 Key”等安全标识，不保存密钥内容。请求记录会同时显示本地请求 ID、最终上游请求 ID 和限流等待时间，支持按关键词、时间、上游、成功/4xx/429/5xx 组合筛选，可复制两类请求 ID，并能将当前筛选结果导出为防公式注入的 UTF-8 CSV，便于关联排障。页面提供最近 24 小时、7 天或 14 天的请求/Token 趋势。统计会统一 OpenAI“缓存是输入子集”和 Claude“缓存字段独立于普通输入”的两种 usage 口径，提供缓存 Token 覆盖率和命中请求率。统计只基于当前最多 1000 条保留日志；推理 token 是输出 token 的明细项，不会重复加总。上游没有返回 usage 时会计入“缺失用量”的请求数。由于 OpenCode 各模型的缓存价格会变化，面板不估算账单金额，应以 OpenCode 官方账单为准。
 
 ## 安全建议
 
 - 默认只监听 `127.0.0.1`。公网部署应放在带 TLS 的反向代理后面。
 - `data/config.json` 包含上游密钥，已被 `.gitignore` 排除；请限制该文件的系统权限并做好安全备份。
-- 生产环境建议设置 `CONFIG_ENCRYPTION_KEY`。启用后，Zen/Go 密钥、客户端令牌、会话密钥和含凭据的代理 URL 会使用 AES-256-GCM 保存；主密钥丢失后无法恢复这些字段。
+- 生产环境建议设置 `CONFIG_ENCRYPTION_KEY`。启用后，Zen/Go Key 池中的每把密钥及其独立代理、客户端令牌、会话密钥和默认代理 URL 都会分别使用 AES-256-GCM 保存；主密钥丢失后无法恢复这些字段。
 - 轮换配置主密钥前先停止服务，然后执行以下命令。操作前应备份 `data/config.json`：
 
 ```powershell

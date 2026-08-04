@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken } from '../src/auth.js';
+import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from '../src/auth.js';
 
 test('密码使用随机盐 scrypt 哈希并可安全验证', async () => {
   const first = await hashPassword('correct horse battery staple');
@@ -44,4 +44,14 @@ test('客户端令牌使用稳定的单向摘要', () => {
   assert.equal(hashClientToken('ocb_test-token'), hashClientToken('ocb_test-token'));
   assert.notEqual(hashClientToken('ocb_test-token'), hashClientToken('ocb_other-token'));
   assert.match(hashClientToken('ocb_test-token'), /^[A-Za-z0-9_-]{43}$/);
+});
+
+test('仅在显式信任反向代理时使用有效的首个转发地址', () => {
+  const request = {
+    socket: { remoteAddress: '10.0.0.8' },
+    headers: { 'x-forwarded-for': '203.0.113.9, 10.0.0.7' }
+  };
+  assert.equal(clientAddress(request, false), '10.0.0.8');
+  assert.equal(clientAddress(request, true), '203.0.113.9');
+  assert.equal(clientAddress({ ...request, headers: { 'x-forwarded-for': 'not-an-ip' } }, true), '10.0.0.8');
 });

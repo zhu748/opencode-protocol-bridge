@@ -14,19 +14,51 @@ services:
         value: production
       - key: HOST
         value: 0.0.0.0
+      - key: OPENCODE_BRIDGE_TRUST_PROXY
+        value: true
       - key: CONFIG_ENCRYPTION_KEY
         generateValue: true
       - key: OPENCODE_BRIDGE_ADMIN_PASSWORD
         sync: false
       - key: OPENCODE_BRIDGE_CLIENT_TOKEN
         sync: false
-      - key: OPENCODE_ZEN_KEY
-        sync: false
-      - key: OPENCODE_GO_KEY
-        sync: false
+      - key: OPENCODE_BRIDGE_DEFAULT_PROVIDER
+        value: zen
       - key: OPENCODE_PROXY_URL
         sync: false
       - key: OPENCODE_ZEN_PROXY_URL
         sync: false
       - key: OPENCODE_GO_PROXY_URL
+        sync: false
+      - key: OPENCODE_ZEN_KEY_1
+        sync: false
+      - key: OPENCODE_ZEN_KEY_2
+        sync: false
+      - key: OPENCODE_ZEN_KEY_3
+        sync: false
+      - key: OPENCODE_ZEN_KEY_4
+        sync: false
+      - key: OPENCODE_GO_KEY_1
+        sync: false
+      - key: OPENCODE_GO_KEY_2
+        sync: false
+      - key: OPENCODE_GO_KEY_3
+        sync: false
+      - key: OPENCODE_GO_KEY_4
+        sync: false
+      - key: OPENCODE_ZEN_PROXY_URL_1
+        sync: false
+      - key: OPENCODE_ZEN_PROXY_URL_2
+        sync: false
+      - key: OPENCODE_ZEN_PROXY_URL_3
+        sync: false
+      - key: OPENCODE_ZEN_PROXY_URL_4
+        sync: false
+      - key: OPENCODE_GO_PROXY_URL_1
+        sync: false
+      - key: OPENCODE_GO_PROXY_URL_2
+        sync: false
+      - key: OPENCODE_GO_PROXY_URL_3
+        sync: false
+      - key: OPENCODE_GO_PROXY_URL_4
         sync: false

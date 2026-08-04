@@ -18,10 +18,17 @@ test('敏感配置使用带随机 IV 和认证标签的 AES-256-GCM 加密', () 
 });
 
 test('配置加密只处理敏感字段并可完整还原', () => {
-  const source = { zenKey: 'zen-secret', goKey: 'go-secret', clientToken: 'client-secret', sessionSecret: 'session-secret', proxyUrl: 'http://user:pass@proxy', zenProxyUrl: 'socks5://zen-user:pass@proxy:1080', goProxyUrl: 'https://go-user:pass@proxy:443', defaultProvider: 'zen' };
+  const source = {
+    zenKey: 'zen-secret', goKey: 'go-secret', clientToken: 'client-secret', sessionSecret: 'session-secret',
+    proxyUrl: 'http://user:pass@proxy', zenProxyUrl: 'socks5://zen-user:pass@proxy:1080', goProxyUrl: 'https://go-user:pass@proxy:443',
+    zenCredentials: [{ id: 'zen-1', name: '主力', apiKey: 'zen-pool-secret', proxyUrl: 'socks5://pool-user:pass@proxy:1080' }],
+    goCredentials: [{ id: 'go-1', name: '备用', apiKey: 'go-pool-secret', proxyUrl: '' }], defaultProvider: 'zen'
+  };
   const encrypted = encryptConfig(source, 'another-strong-master-key');
   assert.equal(encrypted.defaultProvider, 'zen');
-  assert.doesNotMatch(JSON.stringify(encrypted), /zen-secret|go-secret|zen-user|go-user|user:pass/);
+  assert.doesNotMatch(JSON.stringify(encrypted), /zen-secret|go-secret|pool-secret|zen-user|go-user|pool-user|user:pass/);
+  assert.match(encrypted.zenCredentials[0].apiKey, /^enc:v1:/);
+  assert.match(encrypted.zenCredentials[0].proxyUrl, /^enc:v1:/);
   assert.deepEqual(decryptConfig(encrypted, 'another-strong-master-key'), source);
 });
 
@@ -34,4 +41,11 @@ test('未配置主密钥时保持向后兼容的明文配置', () => {
   assert.notDeepEqual(escaped, prefixLikeSource);
   assert.deepEqual(decryptConfig(escaped, ''), prefixLikeSource);
   assert.throws(() => encryptValue('x', 'short', 'zenKey'), /至少需要 16/);
+});
+
+test('多 Key 中看似密文前缀的真实值在明文模式下可逆转义', () => {
+  const source = { zenCredentials: [{ id: 'prefix', name: '前缀测试', apiKey: 'enc:v1:user-key', proxyUrl: 'plain:v1:user-proxy' }] };
+  const stored = encryptConfig(source, '');
+  assert.notDeepEqual(stored, source);
+  assert.deepEqual(decryptConfig(stored, ''), source);
 });
