@@ -210,7 +210,8 @@ function renderLogs() {
     const tokens = item.inputTokens === undefined ? '—' : `${item.inputTokens} / ${item.outputTokens}${item.cachedInputTokens ? ` · 缓存读取 ${item.cachedInputTokens}` : ''}${item.cacheCreationInputTokens ? ` · 缓存写入 ${item.cacheCreationInputTokens}` : ''}${item.reasoningTokens ? ` · 推理 ${item.reasoningTokens}` : ''}`;
     const model = item.upstreamModel && item.upstreamModel !== item.model ? `${item.model} → ${item.upstreamModel}` : item.model;
     const statusClass = item.status >= 200 && item.status < 400 ? 'status-ok' : 'status-bad';
-    const error = item.error ? `<small class="log-error" title="${escapeHtml(item.error)}">${escapeHtml(item.error)}</small>` : '';
+    const errorText = [item.errorCode, item.error].filter(Boolean).join(' · ');
+    const error = errorText ? `<small class="log-error" title="${escapeHtml(errorText)}">${escapeHtml(errorText)}</small>` : '';
     const upstreamRequestId = item.upstreamRequestId
       ? `<small class="log-upstream-id">上游 ${requestIdButton(item.upstreamRequestId, '上游请求 ID')}</small>`
       : '';

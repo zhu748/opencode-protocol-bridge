@@ -46,6 +46,8 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.deepEqual(Object.keys(spec.paths).sort(), ['/chat/completions', '/messages', '/models', '/models/{model}', '/responses']);
   assert.equal(spec.components.schemas.ModelId.maxLength, 256);
   assert.ok(spec.paths['/responses'].post.responses['413']);
+  assert.equal(spec.paths['/responses'].post.responses['504'].$ref, '#/components/responses/UpstreamTimeout');
+  assert.equal(spec.paths['/models'].get.responses['504'].$ref, '#/components/responses/UpstreamTimeout');
   assert.ok(spec.paths['/messages'].post.responses['429']);
   assert.equal(spec.paths['/messages'].post.responses['200'].headers['x-opencode-key-attempts'].$ref, '#/components/headers/KeyAttempts');
   assert.equal(spec.paths['/models'].get.responses['200'].headers['x-opencode-key-attempts'].$ref, '#/components/headers/KeyAttempts');

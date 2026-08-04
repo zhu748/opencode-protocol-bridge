@@ -5,7 +5,7 @@ import { extname, join, relative, resolve } from 'node:path';
 import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from './auth.js';
 import { loadConfig, saveConfig, updateConfig, publicConfig, ROOT } from './config.js';
 import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, hasUsageData } from './adapters.js';
-import { callUpstream, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJson, readResponseText } from './upstream.js';
+import { callUpstream, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJson, readResponseText, upstreamConnectionFailure } from './upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl } from './proxy.js';
 import { configuredProviderCredentials, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
 import { CredentialHealthTracker } from './credential-health.js';
@@ -47,33 +47,47 @@ const json = (res, status, data, headers = {}) => {
   res.end(payload);
 };
 
-function protocolError(res, status, protocol, message, type = 'invalid_request_error', headers = {}) {
+function protocolError(res, status, protocol, message, type = 'invalid_request_error', headers = {}, code = null) {
   if (protocol === 'claude') return json(res, status, { type: 'error', error: { type, message } }, headers);
-  return json(res, status, { error: { message, type, code: null } }, headers);
+  return json(res, status, { error: { message, type, code } }, headers);
 }
 
-function streamProtocolError(protocol, message, responseSequenceNumber = 0) {
-  const error = { message, type: 'upstream_error', code: null };
+function streamProtocolError(protocol, message, responseSequenceNumber = 0, code = 'upstream_error') {
+  const error = { message, type: 'upstream_error', code };
   if (protocol === 'chat') return `data: ${JSON.stringify({ error })}\n\ndata: [DONE]\n\n`;
-  if (protocol === 'responses') return `event: error\ndata: ${JSON.stringify({ type: 'error', code: 'upstream_error', message, param: null, sequence_number: Number.isSafeInteger(responseSequenceNumber) && responseSequenceNumber >= 0 ? responseSequenceNumber : 0 })}\n\n`;
+  if (protocol === 'responses') return `event: error\ndata: ${JSON.stringify({ type: 'error', code, message, param: null, sequence_number: Number.isSafeInteger(responseSequenceNumber) && responseSequenceNumber >= 0 ? responseSequenceNumber : 0 })}\n\n`;
   return `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: error.type, message } })}\n\n`;
 }
 
 function upstreamFailureStatus(error) {
-  let current = error;
-  for (let depth = 0; current && depth < 4; depth++, current = current.cause) {
-    if (current.name === 'TimeoutError' || ['UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].includes(current.code)) return 504;
-  }
-  return 502;
+  return upstreamConnectionFailure(error).status;
+}
+
+function upstreamOperationFailure(error) {
+  const responseCodes = {
+    UPSTREAM_BODY_TOO_LARGE: 'upstream_response_too_large',
+    UPSTREAM_INVALID_JSON: 'upstream_invalid_json'
+  };
+  return {
+    status: error?.upstreamCode ? upstreamFailureStatus(error) : 502,
+    code: error?.upstreamCode || responseCodes[error?.code] || 'upstream_response_error',
+    message: error?.message || '处理上游响应失败'
+  };
 }
 
 function streamFailure(error, res, abort) {
   const clientClosed = error?.code === 'CLIENT_CLOSED'
     || (abort.signal.aborted && !res.writableEnded);
   const credentialNeutral = ['UPSTREAM_SSE_EVENT_TOO_LARGE', 'UPSTREAM_UNSUPPORTED_STREAM_CONTENT'].includes(error?.code);
+  const networkFailure = isUpstreamConnectionError(error) ? upstreamConnectionFailure(error) : null;
   return clientClosed
     ? { status: 499, message: '客户端在流式响应完成前断开', penalizeCredential: false }
-    : { status: upstreamFailureStatus(error), message: error?.message || String(error), penalizeCredential: !credentialNeutral };
+    : {
+        status: networkFailure?.status || upstreamFailureStatus(error),
+        message: networkFailure?.message || error?.message || String(error),
+        code: networkFailure?.code || 'upstream_error',
+        penalizeCredential: !credentialNeutral
+      };
 }
 
 function isIncompleteSseError(error) {
@@ -224,14 +238,15 @@ async function listModelsWithCredentialFailover(config, provider) {
     try {
       response = await listModels({ provider, ...credential, timeoutMs: config.upstreamTimeoutMs });
     } catch (error) {
-      credentialHealth.recordNetworkFailure(provider, credential, upstreamFailureStatus(error));
+      const failure = upstreamConnectionFailure(error);
+      credentialHealth.recordNetworkFailure(provider, credential, failure.status);
       const remaining = credentials.filter((item) => !attemptedIds.has(item.credentialId));
       const replacement = remaining.length ? credentialHealth.select(provider, remaining).credential : null;
       if (replacement) {
         credential = replacement;
         continue;
       }
-      throw Object.assign(new Error(error.message, { cause: error }), { credentialAttempts: attempts });
+      throw Object.assign(new Error(failure.message, { cause: error }), { credentialAttempts: attempts, upstreamCode: failure.code });
     }
     recordCredentialResponse(provider, credential, response);
     const retryable = [401, 403, 429].includes(response.status) || response.status >= 500;
@@ -661,7 +676,8 @@ async function adminApi(req, res, url, config) {
       return res.end(text);
     } catch (error) {
       if (error.credentialAttempts > 1) res.setHeader('x-opencode-key-attempts', String(error.credentialAttempts));
-      return json(res, upstreamFailureStatus(error), { error: `连接上游失败：${error.message}` });
+      const failure = upstreamOperationFailure(error);
+      return json(res, failure.status, { error: failure.message, code: failure.code });
     }
   }
   if (url.pathname === '/api/models/test' && req.method === 'POST') {
@@ -694,8 +710,13 @@ async function adminApi(req, res, url, config) {
       res.writeHead(response.status, { 'content-type': response.headers.get('content-type') || 'application/json; charset=utf-8' });
       return res.end(text);
     } catch (error) {
-      if (selected && !body.apiKey && !responseReceived) credentialHealth.recordNetworkFailure(provider, selected, upstreamFailureStatus(error));
-      return json(res, upstreamFailureStatus(error), { error: `连接上游失败：${error.message}` });
+      if (responseReceived) {
+        const failure = upstreamOperationFailure(error);
+        return json(res, failure.status, { error: failure.message, code: failure.code });
+      }
+      const failure = upstreamConnectionFailure(error);
+      if (selected && !body.apiKey) credentialHealth.recordNetworkFailure(provider, selected, failure.status);
+      return json(res, failure.status, { error: failure.message, code: failure.code });
     }
   }
   return json(res, 404, { error: '接口不存在' });
@@ -795,11 +816,11 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
         await writeLog({ status: 499, error: '客户端在收到上游响应前断开' });
         return;
       }
-      const status = upstreamFailureStatus(error);
-      credentialHealth.recordNetworkFailure(route.provider, credential, status);
-      await writeLog({ status, error: error.message });
+      const failure = upstreamConnectionFailure(error);
+      credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
+      await writeLog({ status: failure.status, error: failure.message, errorCode: failure.code });
       if (credentialAttempts > 1) res.setHeader('x-opencode-key-attempts', String(credentialAttempts));
-      return protocolError(res, status, incomingProtocol, `连接上游失败：${error.message}`, 'upstream_error');
+      return protocolError(res, failure.status, incomingProtocol, failure.message, 'upstream_error', {}, failure.code);
     }
     if (!body.stream || !upstream.ok) recordCredentialResponse(route.provider, credential, upstream);
     if (![401, 403, 429].includes(upstream.status) || credentialAttempts >= maximumCredentialAttempts) break;
@@ -856,9 +877,9 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
       const observed = failure.status === 499 ? undefined : await observation;
       if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
       else credentialHealth.releaseProbe(route.provider, credential);
-      await writeLog({ status: failure.status, stream: true, error: failure.message });
+      await writeLog({ status: failure.status, stream: true, error: failure.message, errorCode: failure.code });
       if (!res.writableEnded && !res.destroyed) {
-        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message, observed?.nextSequenceNumber));
+        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message, observed?.nextSequenceNumber, failure.code));
         res.end();
       }
       return;
@@ -891,9 +912,9 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
       const failure = streamFailure(error, res, abort);
       if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
       else credentialHealth.releaseProbe(route.provider, credential);
-      await writeLog({ status: failure.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', error: failure.message, ...streamUsage });
+      await writeLog({ status: failure.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', error: failure.message, errorCode: failure.code, ...streamUsage });
       if (!res.writableEnded && !res.destroyed) {
-        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message, responseSequenceNumber));
+        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message, responseSequenceNumber, failure.code));
         res.end();
       }
       return;
@@ -907,9 +928,11 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
   let upstreamJson;
   try { upstreamJson = await readResponseJson(upstream); }
   catch (error) {
-    const status = upstreamFailureStatus(error);
-    await writeLog({ status, stream: false, error: error.message });
-    return protocolError(res, status, incomingProtocol, error.message, 'upstream_error');
+    const failure = isUpstreamConnectionError(error)
+      ? upstreamConnectionFailure(error)
+      : { status: upstreamFailureStatus(error), code: 'upstream_response_error', message: error.message };
+    await writeLog({ status: failure.status, stream: false, error: failure.message, errorCode: failure.code });
+    return protocolError(res, failure.status, incomingProtocol, failure.message, 'upstream_error', {}, failure.code);
   }
   let normalizedResponse;
   let clientResponse;
@@ -1042,7 +1065,8 @@ const server = createServer(async (req, res) => {
           return json(res, 200, { ...model, id: requestedModel, provider });
         } catch (error) {
           if (error.credentialAttempts > 1) res.setHeader('x-opencode-key-attempts', String(error.credentialAttempts));
-          return json(res, upstreamFailureStatus(error), { error: { message: `连接上游失败：${error.message}`, type: 'upstream_error' } });
+          const failure = upstreamOperationFailure(error);
+          return json(res, failure.status, { error: { message: failure.message, type: 'upstream_error', code: failure.code } });
         }
       }
       if (url.pathname === modelsPath && req.method === 'GET') {
@@ -1101,7 +1125,8 @@ const server = createServer(async (req, res) => {
           return res.end(content);
         } catch (error) {
           if (error.credentialAttempts > 1) res.setHeader('x-opencode-key-attempts', String(error.credentialAttempts));
-          return json(res, upstreamFailureStatus(error), { error: { message: `连接上游失败：${error.message}`, type: 'upstream_error' } });
+          const failure = upstreamOperationFailure(error);
+          return json(res, failure.status, { error: { message: failure.message, type: 'upstream_error', code: failure.code } });
         }
       }
       if (![`${apiScope.base}/messages`, `${apiScope.base}/responses`, `${apiScope.base}/chat/completions`].includes(url.pathname)) {

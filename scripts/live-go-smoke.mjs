@@ -36,17 +36,19 @@ const child = spawn(process.execPath, ['src/server.js'], { cwd: root, env, stdio
 let stderr = '';
 child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk.toString('utf8')}`.slice(-4000); });
 let failure;
+const completedChecks = [];
 
 try {
   await waitForStart(child);
   const base = `http://127.0.0.1:${port}/go/v1`;
   const headers = { 'content-type': 'application/json', authorization: `Bearer ${clientToken}` };
 
-  const discoverModels = profile === 'full' && !skipModelDiscovery;
+  const discoverModels = !skipModelDiscovery;
   if (discoverModels) {
     const models = await jsonRequest(`${base}/models`, { headers }, '模型发现');
     const available = Array.isArray(models.data) && models.data.some((item) => item?.id === model);
     if (!available) throw new Error(`Go 模型列表中不存在 ${model}`);
+    completedChecks.push('models');
   }
 
   const responses = await jsonRequest(`${base}/responses`, {
@@ -55,6 +57,7 @@ try {
   }, 'Responses 非流式');
   if (responses.object !== 'response' || !Array.isArray(responses.output)) throw new Error('Responses 转换结果结构无效');
   if (!responseOutputText(responses).includes('BRIDGE_RESPONSES_OK_7429')) throw new Error('Responses 转换结果缺少预期语义标记');
+  completedChecks.push('responses');
 
   let responsesStreamResponse;
   let parsedResponsesStream;
@@ -75,6 +78,7 @@ try {
     parsedResponsesStream = parseResponsesStream(responsesStreamText);
     if (!parsedResponsesStream.text.includes('BRIDGE_RESPONSES_STREAM_OK_7429')) throw new Error('Responses 流式响应缺少预期语义标记');
     if (!parsedResponsesStream.completed?.response?.usage) throw new Error('Responses 流式终态缺少 usage');
+    completedChecks.push('responsesStream');
 
     claude = await jsonRequest(`${base}/messages`, {
       method: 'POST', headers: { ...headers, 'anthropic-version': '2023-06-01' },
@@ -88,6 +92,7 @@ try {
     toolBlock = Array.isArray(claude.content) && claude.content.find((item) => item?.type === 'tool_use');
     if (!toolBlock || toolBlock.name !== 'add') throw new Error('Claude 工具调用未转换为 tool_use');
     if (Number(toolBlock.input?.a) !== 19 || Number(toolBlock.input?.b) !== 23) throw new Error('Claude 工具调用参数未完整保留');
+    completedChecks.push('claudeTool');
 
     claudeToolResult = await jsonRequest(`${base}/messages`, {
       method: 'POST', headers: { ...headers, 'anthropic-version': '2023-06-01' },
@@ -108,6 +113,7 @@ try {
     const toolResultText = claudeText(claudeToolResult);
     if (!toolResultText.includes('BRIDGE_TOOL_RESULT_OK_7429')) throw new Error('Claude 工具结果回送后缺少预期语义标记');
     if (claudeToolResult.stop_reason === 'tool_use') throw new Error('Claude 工具结果回送后意外再次调用工具');
+    completedChecks.push('claudeToolResult');
 
     streamResponse = await fetch(`${base}/chat/completions`, {
       method: 'POST', headers,
@@ -120,6 +126,7 @@ try {
     parsedStream = parseChatStream(streamText);
     if (!parsedStream.done || !parsedStream.text.includes('BRIDGE_STREAM_OK_7429')) throw new Error('Chat 流式响应缺少正文语义标记或标准结束事件');
     if (!parsedStream.usage) throw new Error('Chat 流式响应缺少 usage，无法验证统计口径');
+    completedChecks.push('chatStream');
   }
 
   const loginResponse = await fetch(`http://127.0.0.1:${port}/api/login`, {
@@ -137,6 +144,7 @@ try {
     throw new Error(`管理面板统计未覆盖 ${expectedRequests} 次在线协议请求`);
   }
   if (stats.summary.inputTokens !== stats.summary.uncachedInputTokens + stats.summary.cachedInputTokens) throw new Error('缓存统计的输入 Token 口径不守恒');
+  completedChecks.push('stats');
 
   console.log(JSON.stringify({
     ok: true,
@@ -144,7 +152,7 @@ try {
     model,
     profile,
     checks: {
-      models: discoverModels ? true : profile === 'quick' ? 'skipped (quick)' : 'skipped',
+      models: discoverModels ? true : 'skipped',
       responses: { status: responses.status, semanticMarker: true, inputTokens: responses.usage?.input_tokens ?? null, outputTokens: responses.usage?.output_tokens ?? null },
       ...(profile === 'full' ? {
         responsesStream: { semanticMarker: true, events: parsedResponsesStream.events.length, sequenceNumbers: true, usage: parsedResponsesStream.completed.response.usage },
@@ -173,7 +181,11 @@ try {
 }
 
 if (failure) {
-  console.error(failure.stack || failure.message);
+  console.error(JSON.stringify({
+    ok: false, provider: 'go', model, profile,
+    completedChecks,
+    error: { message: failure.message, code: failure.code || null }
+  }, null, 2));
   process.exitCode = 1;
 }
 
@@ -238,7 +250,11 @@ async function jsonRequest(url, options, label = 'JSON 请求') {
   let body;
   try { body = JSON.parse(text); }
   catch { throw new Error(`${label} 返回 HTTP ${response.status} 的无效 JSON: ${text.slice(0, 500)}`); }
-  if (!response.ok) throw new Error(`${label} 返回 HTTP ${response.status}: ${JSON.stringify(body).slice(0, 500)}`);
+  if (!response.ok) {
+    const error = new Error(`${label} 返回 HTTP ${response.status}: ${JSON.stringify(body).slice(0, 500)}`);
+    error.code = body?.error?.code || body?.code || null;
+    throw error;
+  }
   return body;
 }
 

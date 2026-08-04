@@ -6,7 +6,7 @@ const logs = [
   { time: '2026-08-04T11:30:00Z', requestId: 'local-success', upstreamRequestId: 'trace-a', provider: 'zen', status: 200, model: 'model-a', clientName: '工作机' },
   { time: '2026-08-04T10:30:00Z', requestId: 'local-rate', upstreamRequestId: 'trace-b', provider: 'go', status: 429, model: 'model-b', error: 'rate limited' },
   { time: '2026-08-03T11:30:00Z', requestId: 'local-bad', provider: 'go', status: 401, upstreamModel: 'real-model', credentialLabel: '备用' },
-  { time: 'invalid', requestId: 'local-upstream', provider: 'zen', status: 502, protocol: 'claude → chat', error: '连接失败' }
+  { time: 'invalid', requestId: 'local-upstream', provider: 'zen', status: 502, protocol: 'claude → chat', errorCode: 'upstream_dns_error', error: '连接失败' }
 ];
 
 test('日志筛选可组合关键词、上游与互斥状态', () => {
@@ -16,6 +16,7 @@ test('日志筛选可组合关键词、上游与互斥状态', () => {
   assert.deepEqual(filterRequestLogs(logs, { status: 'server-error' }).map((item) => item.requestId), ['local-upstream']);
   assert.deepEqual(filterRequestLogs(logs, { query: 'TRACE-B', provider: 'go', status: 'rate-limit' }).map((item) => item.requestId), ['local-rate']);
   assert.deepEqual(filterRequestLogs(logs, { query: '备用' }).map((item) => item.requestId), ['local-bad']);
+  assert.deepEqual(filterRequestLogs(logs, { query: 'upstream_dns_error' }).map((item) => item.requestId), ['local-upstream']);
   const now = Date.parse('2026-08-04T12:00:00Z');
   assert.deepEqual(filterRequestLogs(logs, { timeRange: '1h', now }).map((item) => item.requestId), ['local-success']);
   assert.deepEqual(filterRequestLogs(logs, { timeRange: '24h', now }).map((item) => item.requestId), ['local-success', 'local-rate']);
@@ -33,13 +34,14 @@ test('日志时间筛选不会把未来时间记录混入当前窗口', () => {
 test('CSV 导出限定元数据字段并防止公式注入', () => {
   const csv = requestLogsToCsv([{
     time: '2026-08-04T12:00:00Z', requestId: '=HYPERLINK("bad")', upstreamRequestId: '+cmd',
-    clientName: '@evil', model: '-1+1', provider: 'go', status: 429, error: '含有,逗号和"引号"',
+    clientName: '@evil', model: '-1+1', provider: 'go', status: 429, errorCode: 'upstream_connect_timeout', error: '含有,逗号和"引号"',
     apiKey: 'must-not-export', prompt: 'must-not-export-either'
   }]);
   assert.match(csv, /"'=HYPERLINK\(""bad""\)"/);
   assert.match(csv, /"'\+cmd"/);
   assert.match(csv, /"'@evil"/);
   assert.match(csv, /"'-1\+1"/);
+  assert.match(csv, /upstream_connect_timeout/);
   assert.match(csv, /"含有,逗号和""引号"""/);
   assert.doesNotMatch(csv, /must-not-export/);
   assert.equal(csv.split('\r\n').length, 2);

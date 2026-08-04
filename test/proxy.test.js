@@ -199,12 +199,16 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(malformedLog.status, 502);
     assert.match(malformedLog.error, /缺少 output 数组/);
 
-    const timedOut = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
+    const timedOut = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
       body: JSON.stringify({ model: 'slow', max_tokens: 32, messages: [{ role: 'user', content: '超时测试' }] })
     });
     assert.equal(timedOut.status, 504);
-    assert.match((await timedOut.json()).error.message, /连接上游失败/);
+    const timeoutBody = await timedOut.json();
+    assert.match(timeoutBody.error.message, /等待上游响应超时/);
+    assert.equal(timeoutBody.error.code, 'upstream_response_timeout');
+    const timeoutLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
+    assert.equal(timeoutLog.errorCode, 'upstream_response_timeout');
 
     const sameClaude = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
       method: 'POST',

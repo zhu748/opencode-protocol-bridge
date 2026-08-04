@@ -148,6 +148,7 @@ function sanitizeEntry(entry) {
     ...(entry.cachedInputTokens ? { cachedInputTokens: number(entry.cachedInputTokens) } : {}),
     ...(entry.cacheCreationInputTokens ? { cacheCreationInputTokens: number(entry.cacheCreationInputTokens) } : {}),
     ...(entry.reasoningTokens ? { reasoningTokens: number(entry.reasoningTokens) } : {}),
+    ...(entry.errorCode ? { errorCode: text(entry.errorCode, 64) } : {}),
     ...(entry.error ? { error: text(entry.error, 500) } : {})
   };
 }
