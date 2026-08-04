@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse } from '../src/adapters.js';
+import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, hasUsageData } from '../src/adapters.js';
 
 test('识别三种兼容端点', () => {
   assert.equal(detectProtocol('/v1/messages'), 'claude');
@@ -247,6 +247,17 @@ test('跨协议流式 Chat 请求主动请求 usage 事件', () => {
   assert.deepEqual(result.stream_options, { include_usage: true });
 });
 
+test('同协议流式 Chat 也会请求 usage 且只把真实 token 字段算作用量', () => {
+  const result = prepareUpstreamRequest({
+    model: 'alias', stream: true, stream_options: { vendor: true }, messages: []
+  }, 'chat', 'chat', 'deepseek-v4-flash');
+  assert.deepEqual(result.stream_options, { vendor: true, include_usage: true });
+  assert.equal(hasUsageData({ usage: {} }), false);
+  assert.equal(hasUsageData({ usage: { prompt_tokens: 0, completion_tokens: 0 } }), true);
+  assert.equal(hasUsageData({ usage: { prompt_tokens_details: { cached_tokens: 0 } } }), true);
+  assert.equal(hasUsageData({ usage: { prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0 } }), true);
+});
+
 test('o 系列 Chat 请求使用 max_completion_tokens', () => {
   const reasoning = prepareUpstreamRequest({
     model: 'alias', max_tokens: 4096, messages: [{ role: 'user', content: '分析' }]
@@ -319,6 +330,11 @@ test('DeepSeek V4 Flash 工具请求自动关闭 Thinking 模式', () => {
     ...request, thinking: { type: 'enabled', budget_tokens: 2048 }
   }, 'claude', 'chat', 'deepseek-v4-flash-free');
   assert.equal('reasoning_effort' in explicitThinking, false);
+
+  const explicitNone = prepareUpstreamRequest({
+    model: 'alias', input: '直接回答', reasoning: { effort: 'none' }
+  }, 'responses', 'chat', 'deepseek-v4-flash');
+  assert.equal(explicitNone.reasoning_effort, 'none');
 });
 
 test('空 tools 会移除工具约束并清理不兼容 URI Schema', () => {
@@ -404,7 +420,7 @@ test('Chat 旧 function_call、refusal 与 usage 别名可转换', () => {
   const result = formatResponse(normalizeResponse({
     id: 'legacy', model: 'legacy-chat',
     choices: [{ finish_reason: 'function_call', message: { content: null, refusal: '受限说明', function_call: { name: 'lookup', arguments: '{"q":"test"}' } } }],
-    usage: { input_tokens: 7, output_tokens: 3 }
+    usage: { input_tokens: 7, output_tokens: 3, prompt_cache_hit_tokens: 5, prompt_cache_miss_tokens: 2 }
   }, 'chat'), 'claude');
   assert.equal(result.content[0].text, '受限说明');
   assert.equal(result.content[1].type, 'tool_use');
@@ -412,17 +428,22 @@ test('Chat 旧 function_call、refusal 与 usage 别名可转换', () => {
   assert.deepEqual(result.content[1].input, { q: 'test' });
   assert.equal(result.usage.input_tokens, 7);
   assert.equal(result.usage.output_tokens, 3);
+  assert.equal(result.usage.cache_read_input_tokens, 5);
 });
 
 test('Responses refusal 与 OpenAI usage 字段别名可转换', () => {
-  const result = formatResponse(normalizeResponse({
+  const normalized = normalizeResponse({
     id: 'resp_refusal', model: 'gpt', status: 'completed',
     output: [{ type: 'message', content: [{ type: 'refusal', refusal: '无法协助' }] }],
-    usage: { prompt_tokens: 9, completion_tokens: 2 }
-  }, 'responses'), 'claude');
+    usage: { prompt_tokens: 9, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 4, cache_creation_tokens: 3 }, completion_tokens_details: { reasoning_tokens: 1 } }
+  }, 'responses');
+  const result = formatResponse(normalized, 'claude');
   assert.equal(result.content[0].text, '无法协助');
   assert.equal(result.usage.input_tokens, 9);
   assert.equal(result.usage.output_tokens, 2);
+  assert.equal(result.usage.cache_read_input_tokens, 4);
+  assert.equal(result.usage.cache_creation_input_tokens, 3);
+  assert.equal(normalized.reasoningTokens, 1);
 });
 
 test('停止原因转换为目标协议的合法枚举', () => {

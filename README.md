@@ -236,7 +236,7 @@ OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变�
 ## 流式说明
 
 - 客户端协议与上游协议相同时，正常 SSE 数据实时原样透传；服务通过并行观察流记录 usage。若上游在完成事件前中断，服务会追加目标协议可识别的错误帧，避免客户端把截断内容误判为成功。
-- 跨协议时，服务会维护内容块索引和工具调用状态，将上游事件逐条转换为目标协议事件，不再缓存完整响应；SSE 解析兼容 LF、CRLF 和 CR 换行。流式请求要求上游返回标准 `text/event-stream`，避免把 HTTP 200 的普通 JSON 错误误判为空流；客户端断开时，上游请求会被取消。
+- 跨协议时，服务会维护内容块索引和工具调用状态，将上游事件逐条转换为目标协议事件，不再缓存完整响应；SSE 解析兼容 LF、CRLF 和 CR 换行。流式请求要求上游返回标准 `text/event-stream`，避免把 HTTP 200 的普通 JSON 错误误判为空流；同协议 Chat 流也会主动请求 usage，只有上游确实返回 token 字段时才计入面板用量覆盖率，缺失 usage 不会伪记为零 token；客户端断开时，上游请求会被取消。
 - 跨协议流会保留 `completed`/`incomplete`、token 上限停止原因、缓存读取/写入 token 和推理 token；上游错误会使用目标协议可识别的 SSE 帧返回。单个上游 SSE 事件最多缓冲 8 MiB，超限会终止转换，防止异常上游无限占用内存。
 - 流式请求只有在完整结束后才会把对应 Key 记为健康；包括正常关闭连接但缺少完成事件的截断流，都会写入失败日志、返回错误帧并参与连续失败熔断。客户端主动断开记为内部状态 499，但不会惩罚 Key，也不会让冷却后的半开探测槽位永久占用。
 
@@ -282,4 +282,4 @@ npm run check
 
 默认测试不调用真实 OpenCode 接口，因此不会产生费用。
 
-如需用临时 Go Key 对官方 `deepseek-v4-flash` 做小额度在线冒烟测试，可在当前 PowerShell 会话设置 `OPENCODE_GO_KEY` 后运行 `npm run test:live:go`。脚本会通过本地 `/go/v1` 验证模型发现、Responses 转换、Claude 工具调用与 Chat SSE，只输出状态和 usage；Key 不写入项目配置或日志，临时加密配置会在结束时删除。测试后可执行 `Remove-Item Env:OPENCODE_GO_KEY` 清除当前会话变量。
+如需用临时 Go Key 对官方 `deepseek-v4-flash` 做小额度在线冒烟测试，可在当前 PowerShell 会话设置 `OPENCODE_GO_KEY` 后运行 `npm run test:live:go`。脚本会通过本地 `/go/v1` 验证模型发现、Responses 正文、Claude 工具名与参数、Chat SSE 正文与 usage，并登录临时管理会话核对三种请求的统计守恒；只输出状态和 usage，Key 不写入项目配置或日志，临时加密配置会在结束时删除。测试后可执行 `Remove-Item Env:OPENCODE_GO_KEY` 清除当前会话变量。

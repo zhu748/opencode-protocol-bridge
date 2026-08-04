@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, relative, resolve } from 'node:path';
 import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from './auth.js';
 import { loadConfig, saveConfig, updateConfig, publicConfig, ROOT } from './config.js';
-import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse } from './adapters.js';
+import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, hasUsageData } from './adapters.js';
 import { callUpstream, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJson, readResponseText } from './upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl } from './proxy.js';
 import { configuredProviderCredentials, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
@@ -899,7 +899,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
     await writeLog({ status: 502, stream: false, error: error.message });
     return protocolError(res, 502, incomingProtocol, `上游响应结构无效：${error.message}`, 'upstream_error');
   }
-  const hasUsage = upstreamJson.usage && typeof upstreamJson.usage === 'object' && !Array.isArray(upstreamJson.usage);
+  const hasUsage = hasUsageData(upstreamJson);
   await writeLog({
     status: upstream.status, stream: false,
     ...(hasUsage ? {

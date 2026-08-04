@@ -36,7 +36,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({
         id: 'resp_no_usage', model: current.body.model, status: 'completed',
-        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '无用量字段' }] }]
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '无用量字段' }] }], usage: {}
       }));
     }
     if (current.body.model === 'stream-json') {

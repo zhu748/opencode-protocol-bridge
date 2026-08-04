@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { hasUsageData } from './adapters.js';
 
 export const MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 
@@ -47,6 +48,8 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
   let cachedInputTokens = 0;
   let cacheCreationInputTokens = 0;
   let reasoningTokens = 0;
+  let usageObserved = false;
+  let chatOutputTokens = 0;
   const chatTools = new Map();
   const responseBlocks = new Map();
   let chatTextStarted = false;
@@ -64,6 +67,7 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
     if (protocol === 'claude') {
       if (data.type === 'message_start') {
         started = true; id = data.message?.id; model = data.message?.model || model;
+        usageObserved ||= hasUsageData(data.message);
         inputTokens = data.message?.usage?.input_tokens || 0;
         cachedInputTokens = data.message?.usage?.cache_read_input_tokens || 0;
         cacheCreationInputTokens = data.message?.usage?.cache_creation_input_tokens || 0;
@@ -79,8 +83,9 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
         if (data.delta?.type === 'thinking_delta') yield { type: 'reasoning_delta', sourceIndex: data.index, delta: data.delta.thinking || '' };
       } else if (data.type === 'content_block_stop') yield { type: 'block_stop', sourceIndex: data.index };
       else if (data.type === 'message_delta') {
+        usageObserved ||= hasUsageData(data);
         terminal = true;
-        yield { type: 'done', stopReason: data.delta?.stop_reason, outputTokens: data.usage?.output_tokens || 0, inputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens };
+        yield { type: 'done', stopReason: data.delta?.stop_reason, outputTokens: data.usage?.output_tokens || 0, inputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens, hasUsage: usageObserved };
       }
       continue;
     }
@@ -88,9 +93,10 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
     if (protocol === 'responses') {
       if (data.type === 'response.created') {
         started = true; id = data.response?.id; model = data.response?.model || model;
+        usageObserved ||= hasUsageData(data.response);
         inputTokens = data.response?.usage?.input_tokens ?? data.response?.usage?.prompt_tokens ?? 0;
-        cachedInputTokens = data.response?.usage?.input_tokens_details?.cached_tokens || 0;
-        cacheCreationInputTokens = data.response?.usage?.cache_creation_input_tokens || data.response?.usage?.input_tokens_details?.cache_creation_tokens || 0;
+        cachedInputTokens = data.response?.usage?.cache_read_input_tokens || data.response?.usage?.prompt_cache_hit_tokens || data.response?.usage?.input_tokens_details?.cached_tokens || data.response?.usage?.prompt_tokens_details?.cached_tokens || 0;
+        cacheCreationInputTokens = data.response?.usage?.cache_creation_input_tokens || data.response?.usage?.input_tokens_details?.cache_creation_tokens || data.response?.usage?.prompt_tokens_details?.cache_creation_tokens || 0;
         yield { type: 'start', id, model, inputTokens, cachedInputTokens, cacheCreationInputTokens };
       } else if (data.type === 'response.output_item.added') {
         const item = data.item || {};
@@ -137,13 +143,19 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
         if (state?.started) yield { type: 'block_stop', sourceIndex: data.output_index };
       }
       else if (data.type === 'response.completed' || data.type === 'response.incomplete') {
+        usageObserved ||= hasUsageData(data.response);
+        const usage = data.response?.usage;
+        if (usage) {
+          inputTokens = usage.input_tokens ?? usage.prompt_tokens ?? inputTokens;
+          cachedInputTokens = usage.cache_read_input_tokens ?? usage.prompt_cache_hit_tokens ?? usage.input_tokens_details?.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? cachedInputTokens;
+          cacheCreationInputTokens = usage.cache_creation_input_tokens ?? usage.input_tokens_details?.cache_creation_tokens ?? usage.prompt_tokens_details?.cache_creation_tokens ?? cacheCreationInputTokens;
+          reasoningTokens = usage.output_tokens_details?.reasoning_tokens ?? usage.completion_tokens_details?.reasoning_tokens ?? reasoningTokens;
+        }
         terminal = true;
         yield {
-          type: 'done', stopReason: data.type === 'response.completed' ? 'end_turn' : (data.response?.incomplete_details?.reason || 'incomplete'), inputTokens: data.response?.usage?.input_tokens ?? data.response?.usage?.prompt_tokens ?? 0,
-          outputTokens: data.response?.usage?.output_tokens ?? data.response?.usage?.completion_tokens ?? 0,
-          cachedInputTokens: data.response?.usage?.input_tokens_details?.cached_tokens || 0,
-          cacheCreationInputTokens: data.response?.usage?.cache_creation_input_tokens || data.response?.usage?.input_tokens_details?.cache_creation_tokens || 0,
-          reasoningTokens: data.response?.usage?.output_tokens_details?.reasoning_tokens || 0
+          type: 'done', stopReason: data.type === 'response.completed' ? 'end_turn' : (data.response?.incomplete_details?.reason || 'incomplete'), inputTokens,
+          outputTokens: usage?.output_tokens ?? usage?.completion_tokens ?? 0,
+          cachedInputTokens, cacheCreationInputTokens, reasoningTokens, hasUsage: usageObserved
         };
       }
       else if (data.type === 'response.failed') {
@@ -156,16 +168,18 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
 
     const choice = data.choices?.[0];
     if (data.usage) {
+      usageObserved ||= hasUsageData(data);
       inputTokens = data.usage.prompt_tokens ?? data.usage.input_tokens ?? inputTokens;
-      cachedInputTokens = data.usage.prompt_tokens_details?.cached_tokens || cachedInputTokens;
+      chatOutputTokens = data.usage.completion_tokens ?? data.usage.output_tokens ?? chatOutputTokens;
+      cachedInputTokens = data.usage.cache_read_input_tokens || data.usage.prompt_cache_hit_tokens || data.usage.prompt_tokens_details?.cached_tokens || cachedInputTokens;
       cacheCreationInputTokens = data.usage.cache_creation_input_tokens || data.usage.prompt_tokens_details?.cache_creation_tokens || cacheCreationInputTokens;
       reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens || reasoningTokens;
     }
     if (!started) {
       started = true; id = data.id; model = data.model || model;
-      inputTokens = data.usage?.prompt_tokens ?? data.usage?.input_tokens ?? 0;
-      cachedInputTokens = data.usage?.prompt_tokens_details?.cached_tokens || 0;
-      cacheCreationInputTokens = data.usage?.cache_creation_input_tokens || data.usage?.prompt_tokens_details?.cache_creation_tokens || 0;
+      inputTokens = data.usage?.prompt_tokens ?? data.usage?.input_tokens ?? inputTokens;
+      cachedInputTokens = data.usage?.cache_read_input_tokens || data.usage?.prompt_cache_hit_tokens || data.usage?.prompt_tokens_details?.cached_tokens || cachedInputTokens;
+      cacheCreationInputTokens = data.usage?.cache_creation_input_tokens || data.usage?.prompt_tokens_details?.cache_creation_tokens || cacheCreationInputTokens;
       yield { type: 'start', id, model, inputTokens, cachedInputTokens, cacheCreationInputTokens };
     }
     const reasoningDelta = choice?.delta?.reasoning_content || choice?.delta?.reasoning;
@@ -221,15 +235,15 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
     if (chatFinishReason && data.usage) {
       terminal = true;
       yield {
-        type: 'done', stopReason: chatFinishReason, inputTokens, outputTokens: data.usage.completion_tokens ?? data.usage.output_tokens ?? 0,
-        cachedInputTokens, cacheCreationInputTokens, reasoningTokens
+        type: 'done', stopReason: chatFinishReason, inputTokens, outputTokens: chatOutputTokens,
+        cachedInputTokens, cacheCreationInputTokens, reasoningTokens, hasUsage: usageObserved
       };
       chatFinishReason = undefined;
     }
   }
   if (protocol === 'chat' && chatFinishReason) {
     terminal = true;
-    yield { type: 'done', stopReason: chatFinishReason, inputTokens, outputTokens: 0, cachedInputTokens, cacheCreationInputTokens, reasoningTokens };
+    yield { type: 'done', stopReason: chatFinishReason, inputTokens, outputTokens: chatOutputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens, hasUsage: usageObserved };
   }
   if (started && !terminal) yield { type: 'error', error: { type: 'upstream_error', message: '上游 SSE 在完成事件前结束' } };
 }
@@ -383,7 +397,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
     }
     if (event.type === 'done') {
       inputTokens = event.inputTokens || inputTokens; outputTokens = event.outputTokens || 0; cachedInputTokens = event.cachedInputTokens || cachedInputTokens; cacheCreationInputTokens = event.cacheCreationInputTokens || cacheCreationInputTokens; reasoningTokens = event.reasoningTokens || 0;
-      options.onUsage?.({ inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens });
+      if (event.hasUsage) options.onUsage?.({ inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens });
       const hasTools = [...blocks.values()].some((block) => block.type === 'tool');
       if (targetProtocol === 'claude') {
         const stopReason = hasTools ? 'tool_use' : (['length', 'max_tokens', 'max_output_tokens'].includes(event.stopReason) ? 'max_tokens' : 'end_turn');
@@ -410,14 +424,16 @@ export async function observeSse(response, protocol, fallbackModel, options = {}
   try {
     for await (const event of canonicalEvents(response, protocol, fallbackModel)) {
       if (event.type === 'done') {
-        usage = {
-          inputTokens: event.inputTokens || 0,
-          outputTokens: event.outputTokens || 0,
-          cachedInputTokens: event.cachedInputTokens || 0,
-          cacheCreationInputTokens: event.cacheCreationInputTokens || 0,
-          reasoningTokens: event.reasoningTokens || 0
-        };
-        options.onUsage?.(usage);
+        if (event.hasUsage) {
+          usage = {
+            inputTokens: event.inputTokens || 0,
+            outputTokens: event.outputTokens || 0,
+            cachedInputTokens: event.cachedInputTokens || 0,
+            cacheCreationInputTokens: event.cacheCreationInputTokens || 0,
+            reasoningTokens: event.reasoningTokens || 0
+          };
+          options.onUsage?.(usage);
+        }
       } else if (event.type === 'error') {
         error = event.error;
         options.onError?.(error);

@@ -408,7 +408,7 @@ export function formatRequest(request, protocol) {
       ...(calls.length ? { tool_calls: calls.map((x) => ({ id: x.id, type: 'function', function: { name: x.name, arguments: canonicalJsonString(x.arguments) } })) } : {})
     });
   }
-  const reasoningEffort = request.reasoningEffort && supportsReasoningEffort(request.model)
+  const reasoningEffort = request.reasoningEffort && (supportsReasoningEffort(request.model) || (request.reasoningEffort === 'none' && needsNonThinkingToolMode(request.model)))
     ? request.reasoningEffort
     : !request.reasoningEffort && request.tools.length && needsNonThinkingToolMode(request.model) ? 'none' : undefined;
   return {
@@ -438,10 +438,27 @@ function mergeClaudeMessages(messages) {
 }
 
 export function prepareUpstreamRequest(body, incomingProtocol, targetProtocol, upstreamModel, options = {}) {
-  if (incomingProtocol === targetProtocol) return applyCompatibilityOptions({ ...body, model: upstreamModel }, targetProtocol, options);
+  if (incomingProtocol === targetProtocol) return applyCompatibilityOptions(withStreamUsage({ ...body, model: upstreamModel }, targetProtocol), targetProtocol, options);
   const normalized = normalizeRequest(body, incomingProtocol);
   normalized.model = upstreamModel;
   return applyCompatibilityOptions(formatRequest(normalized, targetProtocol), targetProtocol, options);
+}
+
+function withStreamUsage(body, protocol) {
+  if (protocol !== 'chat' || body.stream !== true) return body;
+  const streamOptions = body.stream_options;
+  if (streamOptions !== undefined && streamOptions !== null && (typeof streamOptions !== 'object' || Array.isArray(streamOptions))) return body;
+  return { ...body, stream_options: { ...(streamOptions || {}), include_usage: true } };
+}
+
+export function hasUsageData(body) {
+  const usage = body?.usage;
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return false;
+  if (['input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'prompt_cache_hit_tokens', 'prompt_cache_miss_tokens']
+    .some((field) => Object.hasOwn(usage, field))) return true;
+  return [usage.input_tokens_details, usage.prompt_tokens_details, usage.output_tokens_details, usage.completion_tokens_details]
+    .some((details) => details && typeof details === 'object' && !Array.isArray(details)
+      && ['cached_tokens', 'cache_creation_tokens', 'reasoning_tokens'].some((field) => Object.hasOwn(details, field)));
 }
 
 function applyCompatibilityOptions(body, protocol, options) {
@@ -479,9 +496,9 @@ export function normalizeResponse(body, protocol, fallbackModel = '', { rejectUn
     return {
       id: body.id, model: body.model || fallbackModel, parts,
       inputTokens: body.usage?.input_tokens ?? body.usage?.prompt_tokens ?? 0, outputTokens: body.usage?.output_tokens ?? body.usage?.completion_tokens ?? 0,
-      cachedInputTokens: body.usage?.cache_read_input_tokens || body.usage?.input_tokens_details?.cached_tokens || body.usage?.prompt_tokens_details?.cached_tokens || 0,
-      cacheCreationInputTokens: body.usage?.cache_creation_input_tokens || body.usage?.input_tokens_details?.cache_creation_tokens || 0,
-      reasoningTokens: body.usage?.output_tokens_details?.reasoning_tokens || 0,
+      cachedInputTokens: body.usage?.cache_read_input_tokens || body.usage?.prompt_cache_hit_tokens || body.usage?.input_tokens_details?.cached_tokens || body.usage?.prompt_tokens_details?.cached_tokens || 0,
+      cacheCreationInputTokens: body.usage?.cache_creation_input_tokens || body.usage?.input_tokens_details?.cache_creation_tokens || body.usage?.prompt_tokens_details?.cache_creation_tokens || 0,
+      reasoningTokens: body.usage?.output_tokens_details?.reasoning_tokens || body.usage?.completion_tokens_details?.reasoning_tokens || 0,
       stopReason: responsesStopReason(body)
     };
   }
@@ -496,7 +513,7 @@ export function normalizeResponse(body, protocol, fallbackModel = '', { rejectUn
   return {
     id: body.id, model: body.model || fallbackModel, parts,
     inputTokens: body.usage?.prompt_tokens ?? body.usage?.input_tokens ?? 0, outputTokens: body.usage?.completion_tokens ?? body.usage?.output_tokens ?? 0,
-    cachedInputTokens: body.usage?.cache_read_input_tokens || body.usage?.prompt_tokens_details?.cached_tokens || 0,
+    cachedInputTokens: body.usage?.cache_read_input_tokens || body.usage?.prompt_cache_hit_tokens || body.usage?.prompt_tokens_details?.cached_tokens || 0,
     cacheCreationInputTokens: body.usage?.cache_creation_input_tokens || body.usage?.prompt_tokens_details?.cache_creation_tokens || 0,
     reasoningTokens: body.usage?.completion_tokens_details?.reasoning_tokens || 0,
     stopReason: choice.finish_reason

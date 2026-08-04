@@ -16,13 +16,13 @@
       "get": {
         "summary": "获取默认上游模型列表",
         "parameters": [{ "name": "provider", "in": "query", "schema": { "type": "string", "enum": ["zen", "go", "all"] } }],
-        "responses": { "200": { "description": "模型列表", "headers": { "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "401": { "$ref": "#/components/responses/Unauthorized" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
+        "responses": { "200": { "description": "模型列表", "headers": { "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
       }
     },
     "/models/{model}": {
       "get": {
         "summary": "获取单个模型信息",
-        "parameters": [{ "name": "model", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/ModelId" } }],
+        "parameters": [{ "name": "model", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/ModelId" } }, { "name": "provider", "in": "query", "description": "仅通用 /v1 入口使用；/zen/v1 与 /go/v1 始终由路径决定上游。", "schema": { "type": "string", "enum": ["zen", "go"] } }],
         "responses": { "200": { "description": "模型信息", "headers": { "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "404": { "description": "模型不存在" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" } }
       }
     },

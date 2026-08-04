@@ -143,6 +143,18 @@ test('同协议观察器提取 usage 但不参与流转换', async () => {
   assert.deepEqual(observed.usage, { inputTokens: 6, outputTokens: 2, cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0 });
 });
 
+test('同协议观察器不会把缺失 usage 的正常流伪记为零 token', async () => {
+  const source = responseFrom([
+    ['message', { id: 'chat_no_usage', model: 'kimi', choices: [{ delta: { content: '正常内容' }, finish_reason: null }] }],
+    ['message', { id: 'chat_no_usage', model: 'kimi', choices: [{ delta: {}, finish_reason: 'stop' }] }]
+  ]);
+  let callbackCalled = false;
+  const observed = await observeSse(source, 'chat', 'alias', { onUsage: () => { callbackCalled = true; } });
+  assert.equal(observed.error, undefined);
+  assert.deepEqual(observed.usage, {});
+  assert.equal(callbackCalled, false);
+});
+
 test('可解析末尾没有空行的 SSE 事件', async () => {
   const encoder = new TextEncoder();
   const source = new Response(new ReadableStream({ start(controller) {
@@ -357,6 +369,21 @@ test('流式缓存创建 token 与 incomplete 状态会保留到目标协议', a
   assert.match(output, /"status":"incomplete"/);
   assert.match(output, /"cache_creation_tokens":3/);
   assert.deepEqual(usage, { inputTokens: 8, outputTokens: 4, cachedInputTokens: 2, cacheCreationInputTokens: 3, reasoningTokens: 0 });
+});
+
+test('流式 Responses 与 Chat 兼容缓存和推理 usage 别名', async () => {
+  const responses = responseFrom([
+    ['response.created', { type: 'response.created', response: { id: 'resp_alias', model: 'gpt', usage: { prompt_tokens: 9, prompt_tokens_details: { cached_tokens: 4, cache_creation_tokens: 2 } } } }],
+    ['response.completed', { type: 'response.completed', response: { usage: { prompt_tokens: 9, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 4, cache_creation_tokens: 2 }, completion_tokens_details: { reasoning_tokens: 3 } } } }]
+  ]);
+  const responseUsage = (await observeSse(responses, 'responses', 'alias')).usage;
+  assert.deepEqual(responseUsage, { inputTokens: 9, outputTokens: 5, cachedInputTokens: 4, cacheCreationInputTokens: 2, reasoningTokens: 3 });
+
+  const chat = responseFrom([
+    ['message', { id: 'chat_alias_usage', model: 'deepseek', choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 7, completion_tokens: 2, prompt_cache_hit_tokens: 5, prompt_cache_miss_tokens: 2 } }]
+  ]);
+  const chatUsage = (await observeSse(chat, 'chat', 'alias')).usage;
+  assert.equal(chatUsage.cachedInputTokens, 5);
 });
 
 test('转换到 Chat 的流式错误使用 data 帧并正常结束', async () => {
