@@ -127,6 +127,22 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     const oversizedSetup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ padding: 'x'.repeat(64 * 1024) }) });
     assert.equal(oversizedSetup.status, 413);
     assert.match((await oversizedSetup.json()).error, /64 KiB/);
+    const oversizedChunk = JSON.stringify({ padding: 'x'.repeat(64 * 1024) });
+    const chunkedOversizedSetup = await rawHttpRequest(port, [
+      'POST /api/setup HTTP/1.1',
+      'Host: localhost',
+      'Content-Type: application/json',
+      'Transfer-Encoding: chunked',
+      'Connection: close',
+      '',
+      oversizedChunk.length.toString(16),
+      oversizedChunk,
+      '0',
+      '',
+      ''
+    ].join('\r\n'));
+    assert.match(chunkedOversizedSetup, /^HTTP\/1\.1 413 Payload Too Large\r\n/);
+    assert.match(chunkedOversizedSetup, /请求体超过 64 KiB 上限/);
     const invalidUtf8Setup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: Buffer.concat([Buffer.from('{"password":"'), Buffer.from([0xff]), Buffer.from('"}')]) });
     assert.equal(invalidUtf8Setup.status, 400);
     assert.deepEqual(await invalidUtf8Setup.json(), { error: 'JSON 格式无效' });

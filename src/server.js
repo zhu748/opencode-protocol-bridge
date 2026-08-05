@@ -89,6 +89,10 @@ function sessionCookie(req, token, maxAge = 86400) {
 
 const json = (res, status, data, headers = {}) => {
   const payload = Buffer.from(JSON.stringify(data));
+  if (res.req && !res.req.complete && !['GET', 'HEAD'].includes(res.req.method)) {
+    res.req.resume();
+    res.setHeader('connection', 'close');
+  }
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': payload.length, ...headers });
   if (res.req?.method === 'HEAD') return res.end();
   if (payload.length <= JSON_BACKPRESSURE_THRESHOLD_BYTES) return res.end(payload);
@@ -172,6 +176,11 @@ function compatibilityHeaders(req, incomingProtocol, targetProtocol) {
   return typeof req.headers['openai-beta'] === 'string' ? { 'openai-beta': req.headers['openai-beta'] } : {};
 }
 
+function requestBodyTooLarge(req, limit) {
+  req.resume();
+  return Object.assign(new Error(`请求体超过 ${formatSizeLimit(limit)} 上限`), { status: 413, closeConnection: true });
+}
+
 async function bodyJson(req, limit = MAX_ADMIN_REQUEST_BYTES) {
   const contentType = typeof req.headers['content-type'] === 'string'
     ? req.headers['content-type'].split(';', 1)[0].trim().toLowerCase()
@@ -184,13 +193,23 @@ async function bodyJson(req, limit = MAX_ADMIN_REQUEST_BYTES) {
     throw Object.assign(new Error('JSON 请求不支持压缩 Content-Encoding'), { status: 415 });
   }
   const declared = Number(req.headers['content-length']);
-  if (Number.isFinite(declared) && declared > limit) throw Object.assign(new Error(`请求体超过 ${formatSizeLimit(limit)} 上限`), { status: 413 });
+  if (Number.isFinite(declared) && declared > limit) throw requestBodyTooLarge(req, limit);
   let size = 0;
   const chunks = [];
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > limit) throw Object.assign(new Error(`请求体超过 ${formatSizeLimit(limit)} 上限`), { status: 413 });
-    chunks.push(chunk);
+  try {
+    for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+      size += chunk.length;
+      if (size > limit) throw requestBodyTooLarge(req, limit);
+      chunks.push(chunk);
+    }
+  } catch (error) {
+    if (error?.status) throw error;
+    const interrupted = req.aborted || error?.code === 'ECONNRESET'
+      || error?.code === 'ERR_STREAM_PREMATURE_CLOSE' || error?.message === 'aborted';
+    if (interrupted) {
+      throw Object.assign(new Error('客户端在请求体上传完成前断开', { cause: error }), { code: 'CLIENT_CLOSED' });
+    }
+    throw error;
   }
   try {
     const body = JSON.parse(JSON_DECODER.decode(Buffer.concat(chunks, size)) || '{}');
@@ -1511,7 +1530,9 @@ const server = createServer({
     if (['GET', 'HEAD'].includes(req.method)) return await staticFile(req, res, url);
     return json(res, 405, { error: '方法不允许' }, { allow: 'GET, HEAD' });
   } catch (error) {
-    if (!error.status && !['CLIENT_CLOSED', 'CLIENT_WRITE_TIMEOUT'].includes(error.code) && error.name !== 'AbortError') console.error(error);
+    if (['CLIENT_CLOSED', 'CLIENT_WRITE_TIMEOUT'].includes(error.code)) return;
+    if (!error.status && error.name !== 'AbortError') console.error(error);
+    if (error.closeConnection && !res.headersSent) res.setHeader('connection', 'close');
     if (!res.headersSent && url && publicApiScope(url.pathname)) {
       const status = error.status || 500;
       protocolError(res, status, detectProtocol(url.pathname) || 'chat', error.status ? error.message : '服务器内部错误', error.status ? 'invalid_request_error' : 'internal_error');
