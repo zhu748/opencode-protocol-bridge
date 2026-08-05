@@ -7,6 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { readFile, unlink } from 'node:fs/promises';
 
+const SLOW_RESPONSE_DELAY_MS = 5_000;
+
 async function requestBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -51,7 +53,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
         usage: { input_tokens: 3, output_tokens: 1 }, vendor_extension: { preserved: true }
       }));
     }
-    if (current.body.model === 'slow-response') await new Promise((resolveWait) => setTimeout(resolveWait, 1500));
+    if (current.body.model === 'slow-response') await new Promise((resolveWait) => setTimeout(resolveWait, SLOW_RESPONSE_DELAY_MS));
     if (req.url === '/messages') {
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ id: 'msg_upstream', type: 'message', role: 'assistant', model: current.body.model, content: [{ type: 'text', text: 'Claude 透传成功' }], stop_reason: 'end_turn', usage: { input_tokens: 2, output_tokens: 3 }, vendor_extension: { preserved: true } }));
