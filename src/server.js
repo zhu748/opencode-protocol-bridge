@@ -5,7 +5,7 @@ import { extname, join, relative, resolve } from 'node:path';
 import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from './auth.js';
 import { loadConfig, saveConfig, updateConfig, publicConfig, ROOT } from './config.js';
 import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, hasUsageData } from './adapters.js';
-import { callUpstream, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJson, readResponseText, upstreamConnectionFailure } from './upstream.js';
+import { callUpstream, closeDirectUpstreamDispatcher, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJson, readResponseText, upstreamConnectionFailure } from './upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl } from './proxy.js';
 import { configuredProviderCredentials, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
 import { CredentialHealthTracker } from './credential-health.js';
@@ -1166,7 +1166,8 @@ async function finalizeShutdown(exitCode, forceExit) {
   shutdownFinalized = true;
   clearTimeout(forceExit);
   await requestLogs.flush().catch((error) => console.error(`退出前刷新请求日志失败：${error.message}`));
-  await closeProxyDispatchers();
+  const force = exitCode !== 0;
+  await Promise.all([closeProxyDispatchers({ force }), closeDirectUpstreamDispatcher({ force })]);
   process.exit(exitCode);
 }
 

@@ -1,9 +1,12 @@
-import { fetch } from 'undici';
+import { Agent, fetch } from 'undici';
 import { proxyDispatcher } from './proxy.js';
 
 export const MAX_UPSTREAM_JSON_BYTES = 20 * 1024 * 1024;
 export const MAX_UPSTREAM_ERROR_BYTES = 1024 * 1024;
 export const MAX_MODEL_LIST_BYTES = 10 * 1024 * 1024;
+export const DIRECT_CONNECT_TIMEOUT_MS = 60_000;
+
+let directAgent = null;
 
 function upstreamErrorChain(error) {
   const chain = [];
@@ -62,6 +65,29 @@ function combinedSignal(signal, timeoutMs) {
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
+export function directUpstreamDispatcher() {
+  if (!directAgent || directAgent.closed || directAgent.destroyed) {
+    directAgent = new Agent({
+      connectTimeout: DIRECT_CONNECT_TIMEOUT_MS,
+      autoSelectFamily: true,
+      autoSelectFamilyAttemptTimeout: 250
+    });
+  }
+  return directAgent;
+}
+
+export async function closeDirectUpstreamDispatcher({ force = false } = {}) {
+  const active = directAgent;
+  directAgent = null;
+  if (!active || active.destroyed) return;
+  if (force) await active.destroy();
+  else if (!active.closed) await active.close();
+}
+
+function requestDispatcher(proxyUrl) {
+  return proxyUrl ? proxyDispatcher(proxyUrl) : directUpstreamDispatcher();
+}
+
 export async function callUpstream({ provider, protocol, apiKey, proxyUrl, body, signal, timeoutMs = 120000, forwardHeaders = {} }) {
   const endpoint = protocol === 'claude' ? 'messages' : protocol === 'responses' ? 'responses' : 'chat/completions';
   return fetch(`${upstreamBase(provider)}/${endpoint}`, {
@@ -77,7 +103,7 @@ export async function callUpstream({ provider, protocol, apiKey, proxyUrl, body,
     },
     body: JSON.stringify(body),
     signal: combinedSignal(signal, timeoutMs),
-    ...(proxyUrl ? { dispatcher: proxyDispatcher(proxyUrl) } : {})
+    dispatcher: requestDispatcher(proxyUrl)
   });
 }
 
@@ -85,7 +111,7 @@ export async function listModels({ provider, apiKey, proxyUrl, timeoutMs = 12000
   const response = await fetch(`${upstreamBase(provider)}/models`, {
     headers: { authorization: `Bearer ${apiKey}` },
     signal: combinedSignal(undefined, timeoutMs),
-    ...(proxyUrl ? { dispatcher: proxyDispatcher(proxyUrl) } : {})
+    dispatcher: requestDispatcher(proxyUrl)
   });
   return response;
 }

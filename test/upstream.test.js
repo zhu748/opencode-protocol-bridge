@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isUpstreamConnectionError, MAX_UPSTREAM_JSON_BYTES, readResponseJson, readResponseText, upstreamBase, upstreamConnectionFailure } from '../src/upstream.js';
+import { closeDirectUpstreamDispatcher, DIRECT_CONNECT_TIMEOUT_MS, directUpstreamDispatcher, isUpstreamConnectionError, MAX_UPSTREAM_JSON_BYTES, readResponseJson, readResponseText, upstreamBase, upstreamConnectionFailure } from '../src/upstream.js';
 
 test('自定义上游地址会清理空白和末尾斜杠', () => {
   const previous = process.env.OPENCODE_ZEN_BASE_URL;
@@ -13,6 +13,21 @@ test('自定义上游地址会清理空白和末尾斜杠', () => {
     if (previous === undefined) delete process.env.OPENCODE_ZEN_BASE_URL;
     else process.env.OPENCODE_ZEN_BASE_URL = previous;
   }
+});
+
+test('直连上游复用连接池并可在退出时安全重建', async () => {
+  assert.equal(DIRECT_CONNECT_TIMEOUT_MS, 60_000);
+  const first = directUpstreamDispatcher();
+  assert.equal(directUpstreamDispatcher(), first);
+  assert.equal(first.closed, false);
+  await closeDirectUpstreamDispatcher();
+  assert.equal(first.closed, true);
+  const second = directUpstreamDispatcher();
+  assert.notEqual(second, first);
+  await closeDirectUpstreamDispatcher();
+  const third = directUpstreamDispatcher();
+  await closeDirectUpstreamDispatcher({ force: true });
+  assert.equal(third.destroyed, true);
 });
 
 test('上游响应读取器限制声明长度和实际流大小', async () => {

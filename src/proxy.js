@@ -41,10 +41,10 @@ export function providerProxyUrl(config, provider) {
   return own || config.proxyUrl || '';
 }
 
-export async function closeProxyDispatchers() {
+export async function closeProxyDispatchers({ force = false } = {}) {
   const active = [...dispatchers.values()];
   dispatchers.clear();
-  await Promise.allSettled(active.map((dispatcher) => dispatcher.close()));
+  await Promise.allSettled(active.map((dispatcher) => force && typeof dispatcher.destroy === 'function' ? dispatcher.destroy() : dispatcher.close()));
 }
 
 function createSocksDispatcher(url) {
