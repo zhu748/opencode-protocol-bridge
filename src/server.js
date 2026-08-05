@@ -16,7 +16,7 @@ import { aggregateRequestStats } from './stats.js';
 import { applyPromptRules, MAX_PROMPT_BYTES, normalizePromptRules, promptSnapshotText, rewriteClaudeSystem } from './prompt-rewrite.js';
 import { ImageHandoffStore, imageHandoffStorageOptions, localImageHandoffEnabled } from './image-handoff.js';
 import { canonicalStaticRoot, ifNoneMatchMatches, resolveStaticFile } from './static-files.js';
-import { writeResponseChunk, writeResponseStream } from './response-write.js';
+import { writeResponseBuffer, writeResponseChunk, writeResponseStream } from './response-write.js';
 import { parseRequestTarget } from './request-target.js';
 import { normalizeUpstreamHttpError } from './upstream-error.js';
 
@@ -37,6 +37,7 @@ const MAX_HTTP_HEADER_BYTES = 16 * 1024;
 const MAX_HTTP_HEADERS = 128;
 const MAX_REQUESTS_PER_SOCKET = 1000;
 const MAX_MODEL_COUNT = 5000;
+const JSON_BACKPRESSURE_THRESHOLD_BYTES = 64 * 1024;
 const CONNECTIONS_CHECKING_INTERVAL_MS = 1000;
 const SINGLETON_REQUEST_HEADERS = new Set([
   'authorization', 'x-api-key', 'cookie', 'host', 'origin', 'sec-fetch-site',
@@ -87,9 +88,11 @@ function sessionCookie(req, token, maxAge = 86400) {
 }
 
 const json = (res, status, data, headers = {}) => {
-  const payload = JSON.stringify(data);
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(payload), ...headers });
-  res.end(res.req?.method === 'HEAD' ? undefined : payload);
+  const payload = Buffer.from(JSON.stringify(data));
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': payload.length, ...headers });
+  if (res.req?.method === 'HEAD') return res.end();
+  if (payload.length <= JSON_BACKPRESSURE_THRESHOLD_BYTES) return res.end(payload);
+  return writeResponseBuffer(res, payload, STREAM_WRITE_TIMEOUT_MS);
 };
 
 function protocolError(res, status, protocol, message, type = 'invalid_request_error', headers = {}, code = null) {
@@ -913,24 +916,24 @@ async function adminApiOperation(req, res, url, config) {
     activeAdminModelDiscoveries++;
     try {
       const requestedProvider = url.searchParams.get('provider');
-      if (requestedProvider && !['zen', 'go'].includes(requestedProvider)) return json(res, 400, { error: 'provider 仅支持 zen 或 go' });
+      if (requestedProvider && !['zen', 'go'].includes(requestedProvider)) return await json(res, 400, { error: 'provider 仅支持 zen 或 go' });
       const provider = requestedProvider === 'go' ? 'go' : 'zen';
       const signal = clientAbortSignal(req, res);
       try {
         const result = await listModelsWithCredentialFailover(config, provider, signal);
         if (!result.response) {
           applyCredentialRetryHeader(res, result.selection);
-          return json(res, result.selection.reason === 'cooldown' ? 503 : 400, { error: credentialUnavailableMessage(provider, result.selection) });
+          return await json(res, result.selection.reason === 'cooldown' ? 503 : 400, { error: credentialUnavailableMessage(provider, result.selection) });
         }
         if (result.attempts > 1) res.setHeader('x-opencode-key-attempts', String(result.attempts));
         const response = result.response;
         applyUpstreamResponseHeaders(res, response);
-        return json(res, modelResponseStatus(response), result.body);
+        return await json(res, modelResponseStatus(response), result.body);
       } catch (error) {
         if (signal.aborted) return;
         if (error.credentialAttempts > 1) res.setHeader('x-opencode-key-attempts', String(error.credentialAttempts));
         const failure = upstreamOperationFailure(error);
-        return json(res, failure.status, { error: failure.message, code: failure.code });
+        return await json(res, failure.status, { error: failure.message, code: failure.code });
       }
     } finally { activeAdminModelDiscoveries--; }
   }
@@ -1224,18 +1227,27 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     await writeLog({ status: 502, stream: false, error: error.message });
     return protocolError(res, 502, incomingProtocol, `上游响应结构无效：${error.message}`, 'upstream_error');
   }
-  recordCredentialResponse(route.provider, credential, upstream);
   const hasUsage = hasUsageData(upstreamJson);
-  await writeLog({
-    status: upstream.status, stream: false,
-    ...(hasUsage ? {
+  const usageLog = hasUsage ? {
       inputTokens: normalizedResponse.inputTokens, outputTokens: normalizedResponse.outputTokens,
       inputTokensIncludeCache: route.protocol !== 'claude',
       cachedInputTokens: normalizedResponse.cachedInputTokens, cacheCreationInputTokens: normalizedResponse.cacheCreationInputTokens,
       reasoningTokens: normalizedResponse.reasoningTokens
-    } : {})
-  });
-  return json(res, upstream.status, clientResponse);
+    } : {};
+  recordCredentialResponse(route.provider, credential, upstream);
+  try {
+    await json(res, upstream.status, clientResponse);
+  } catch (error) {
+    if (!['CLIENT_CLOSED', 'CLIENT_WRITE_TIMEOUT'].includes(error?.code)) throw error;
+    await writeLog({
+      status: 499, stream: false, ...usageLog,
+      error: error.code === 'CLIENT_WRITE_TIMEOUT' ? error.message : '客户端在非流式响应完成前断开',
+      errorCode: error.code === 'CLIENT_WRITE_TIMEOUT' ? 'client_write_timeout' : 'client_closed'
+    });
+    return;
+  }
+  await writeLog({ status: upstream.status, stream: false, ...usageLog });
+  return;
 }
 
 function acquirePublicRequest(client, config) {

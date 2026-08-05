@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
-import { writeResponseChunk, writeResponseStream } from '../src/response-write.js';
+import { writeResponseBuffer, writeResponseChunk, writeResponseStream } from '../src/response-write.js';
 
 class FakeResponse extends EventEmitter {
   constructor(writeResult = false) {
@@ -79,6 +79,20 @@ test('文件式响应超时会同时销毁响应和来源流', async () => {
 test('文件式响应拒绝不可迭代来源', async () => {
   const response = new FakeResponse(true);
   await assert.rejects(writeResponseStream(response, {}, 20), /可异步迭代/);
+});
+
+test('缓冲响应按固定上限分块并在写完后结束', async () => {
+  const response = new FakeResponse(true);
+  await writeResponseBuffer(response, Buffer.from('abcdefghij'), 20, 4);
+  assert.deepEqual(response.chunks.map((chunk) => chunk.length), [4, 4, 2]);
+  assert.equal(Buffer.concat(response.chunks).toString('utf8'), 'abcdefghij');
+  assert.equal(response.writableEnded, true);
+});
+
+test('缓冲响应校验正文类型与分块大小', async () => {
+  const response = new FakeResponse(true);
+  await assert.rejects(writeResponseBuffer(response, 'invalid', 20), /Buffer 或 Uint8Array/);
+  await assert.rejects(writeResponseBuffer(response, Buffer.alloc(1), 20, 0), /正整数/);
 });
 
 test('客户端在等待 drain 时关闭会返回中性关闭错误', async () => {

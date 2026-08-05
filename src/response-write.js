@@ -42,6 +42,16 @@ export async function writeResponseStream(res, readable, timeoutMs = 30_000) {
   }
 }
 
+export async function writeResponseBuffer(res, body, timeoutMs = 30_000, chunkBytes = 64 * 1024) {
+  if (!Buffer.isBuffer(body) && !(body instanceof Uint8Array)) throw new TypeError('响应正文必须是 Buffer 或 Uint8Array');
+  if (!Number.isInteger(chunkBytes) || chunkBytes < 1) throw new TypeError('响应分块大小必须是正整数');
+  const buffer = Buffer.isBuffer(body) ? body : Buffer.from(body);
+  for (let offset = 0; offset < buffer.length; offset += chunkBytes) {
+    await writeResponseChunk(res, buffer.subarray(offset, Math.min(buffer.length, offset + chunkBytes)), timeoutMs);
+  }
+  if (!res.destroyed && !res.writableEnded) res.end();
+}
+
 function clientWriteError(message, code, cause) {
   return Object.assign(new Error(message, cause ? { cause } : undefined), { code });
 }
