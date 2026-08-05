@@ -11,6 +11,8 @@ let editingProviderCredential = null;
 let requestLogItems = [];
 let clientItems = [];
 let serviceStatus = null;
+let imageHandoffModels = [];
+const discoveredImageModels = new Map();
 const dataSourceFailures = new Map();
 let toastTimer;
 
@@ -28,6 +30,15 @@ function toast(message) {
   const node = $('#toast'); node.textContent = message; node.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => node.classList.remove('show'), 2200);
+}
+
+function fillProxyPreset(button) {
+  const field = $(button.dataset.proxyTarget);
+  if (!field) return;
+  field.value = button.dataset.proxyValue;
+  if (field.id === 'providerCredentialProxy') $('#providerCredentialClearProxy').checked = false;
+  field.focus();
+  toast(`已填入代理：${button.dataset.proxyValue}`);
 }
 
 function renderDataSourceFailures() {
@@ -131,11 +142,13 @@ async function refresh() {
   $('#encryption-state').textContent = config.encryptionEnabled ? '配置已加密' : '配置未加密';
   $('#encryption-state').classList.toggle('enabled', config.encryptionEnabled);
   $('#modelRoutes').value = JSON.stringify(config.modelRoutes || {}, null, 2);
+  imageHandoffModels = Array.isArray(config.imageHandoffModels) ? config.imageHandoffModels.map((entry) => ({ ...entry })) : [];
   $('#promptRules').value = JSON.stringify(config.promptRewriteRules || [], null, 2);
   renderPromptRuleList();
   renderRouteList(config.modelRoutes || {});
   renderClients(clientItems);
   renderProviderCredentials();
+  renderImageHandoffSettings();
   renderLogs();
   renderExamples();
   const secondaryLoads = [loadDataSource('Claude 提示词快照', refreshPrompt, undefined)];
@@ -445,6 +458,72 @@ function renderProviderCredentials() {
   $('#provider-credential-list').innerHTML = groups.join('');
 }
 
+function imageHandoffKey(provider, model) {
+  return `${provider}\n${String(model).toLowerCase()}`;
+}
+
+function imageHandoffCredentials(provider) {
+  return [
+    ...(config[`${provider}EnvironmentCredentials`] || []).map((entry) => ({ value: `environment:${entry.id}`, label: `${entry.name}（环境）` })),
+    ...(config[`${provider}Credentials`] || []).map((entry) => ({ value: `config:${entry.id}`, label: `${entry.name}（面板）` }))
+  ];
+}
+
+function renderImageHandoffCredentialOptions() {
+  const provider = $('#imageHandoffProvider').value;
+  const previous = $('#imageHandoffCredential').value;
+  const credentials = imageHandoffCredentials(provider);
+  $('#imageHandoffCredential').innerHTML = `<option value="">Key 池自动选择</option>${credentials.map((entry) => `<option value="${escapeHtml(entry.value)}">${escapeHtml(entry.label)}</option>`).join('')}`;
+  if (credentials.some((entry) => entry.value === previous)) $('#imageHandoffCredential').value = previous;
+}
+
+function visibleImageHandoffModels() {
+  const provider = $('#imageHandoffProvider').value;
+  const query = $('#imageHandoffSearch').value.trim().toLowerCase();
+  return (discoveredImageModels.get(provider) || []).filter((model) => !query || model.toLowerCase().includes(query));
+}
+
+function renderSelectedImageHandoffModels() {
+  $('#image-handoff-selected').innerHTML = imageHandoffModels.length
+    ? imageHandoffModels.map((entry) => `<span class="image-handoff-chip"><b>${escapeHtml(entry.provider.toUpperCase())}</b>${escapeHtml(entry.model)}<button class="remove-image-handoff-model" data-provider="${escapeHtml(entry.provider)}" data-model="${escapeHtml(entry.model)}" type="button" aria-label="移除 ${escapeHtml(entry.model)}">×</button></span>`).join('')
+    : '<p class="empty-inline">尚未选择任何模型</p>';
+}
+
+function renderImageHandoffModelList() {
+  const provider = $('#imageHandoffProvider').value;
+  const discovered = discoveredImageModels.has(provider);
+  const models = visibleImageHandoffModels();
+  const selected = new Set(imageHandoffModels.map((entry) => imageHandoffKey(entry.provider, entry.model)));
+  $('#image-handoff-model-list').innerHTML = !discovered
+    ? '<p class="empty-inline">请选择项目 Key 并拉取模型列表</p>'
+    : models.length
+      ? models.map((model) => `<label class="image-model-option"><input type="checkbox" data-provider="${escapeHtml(provider)}" data-model="${escapeHtml(model)}" ${selected.has(imageHandoffKey(provider, model)) ? 'checked' : ''}><span>${escapeHtml(model)}</span></label>`).join('')
+      : '<p class="empty-inline">没有符合筛选条件的模型</p>';
+}
+
+function renderImageHandoffSettings() {
+  const labels = { local: '本地路径交接', remote: '远程短时 URL', disabled: '交接传输已关闭' };
+  const mode = config.imageHandoffTransport || 'disabled';
+  $('#image-handoff-mode').textContent = labels[mode] || labels.disabled;
+  $('#image-handoff-mode').classList.toggle('warning', mode === 'disabled');
+  const provider = $('#imageHandoffProvider').value;
+  const discovered = discoveredImageModels.get(provider);
+  $('#image-handoff-status').textContent = discovered
+    ? `已缓存 ${provider.toUpperCase()} 的 ${discovered.length} 个模型 · 已选择 ${imageHandoffModels.length} 个`
+    : `已配置 ${imageHandoffModels.length} 个模型 · 尚未拉取 ${provider.toUpperCase()} 模型`;
+  renderImageHandoffCredentialOptions();
+  renderSelectedImageHandoffModels();
+  renderImageHandoffModelList();
+}
+
+function setImageHandoffModel(provider, model, enabled) {
+  const key = imageHandoffKey(provider, model);
+  imageHandoffModels = imageHandoffModels.filter((entry) => imageHandoffKey(entry.provider, entry.model) !== key);
+  if (enabled) imageHandoffModels.push({ provider, model });
+  imageHandoffModels.sort((left, right) => left.provider.localeCompare(right.provider) || left.model.localeCompare(right.model));
+  renderSelectedImageHandoffModels();
+}
+
 function resetProviderCredentialForm() {
   editingProviderCredential = null;
   $('#providerCredentialId').value = '';
@@ -586,6 +665,7 @@ function configPayload(overrides = {}) {
   return {
     defaultProvider: config.defaultProvider,
     modelRoutes: config.modelRoutes || {},
+    imageHandoffModels: config.imageHandoffModels || [],
     promptRewriteRules: config.promptRewriteRules || [],
     requestLogLimit: config.requestLogLimit,
     persistLogs: Boolean(config.persistLogs),
@@ -606,6 +686,88 @@ $('#save-routes').addEventListener('click', async () => {
     const routes = JSON.parse($('#modelRoutes').value);
     await saveConfig(configPayload({ modelRoutes: routes }));
   } catch (error) { toast(`路由 JSON 无效：${error.message}`); }
+});
+
+$('#imageHandoffProvider').addEventListener('change', () => {
+  $('#imageHandoffSearch').value = '';
+  renderImageHandoffSettings();
+});
+
+$('#imageHandoffSearch').addEventListener('input', renderImageHandoffModelList);
+
+$('#load-image-handoff-models').addEventListener('click', async (event) => {
+  const provider = $('#imageHandoffProvider').value;
+  const credentialId = $('#imageHandoffCredential').value;
+  const button = event.currentTarget;
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '拉取中…';
+  $('#image-handoff-status').textContent = '正在使用项目 Key 拉取模型…';
+  try {
+    const result = credentialId
+      ? await api('/api/models/test', { method: 'POST', body: JSON.stringify({ provider, credentialId }) })
+      : await api(`/api/models?provider=${encodeURIComponent(provider)}`);
+    const models = [...new Set((Array.isArray(result.data) ? result.data : []).map((item) => typeof item?.id === 'string' ? item.id.trim() : '').filter((model) => model && model.length <= 256 && !/[\u0000-\u001f\u007f]/.test(model)))]
+      .sort((left, right) => left.localeCompare(right));
+    discoveredImageModels.set(provider, models);
+    $('#image-handoff-status').textContent = `已从 ${provider.toUpperCase()} 获取 ${models.length} 个模型 · 已选择 ${imageHandoffModels.length} 个`;
+    renderImageHandoffModelList();
+  } catch (error) {
+    $('#image-handoff-status').textContent = `拉取失败：${error.message}`;
+    toast(`模型拉取失败：${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+});
+
+$('#image-handoff-model-list').addEventListener('change', (event) => {
+  const checkbox = event.target.closest('input[type="checkbox"]');
+  if (!checkbox) return;
+  if (checkbox.checked && imageHandoffModels.length >= 500) {
+    checkbox.checked = false;
+    return toast('图片交接模型最多选择 500 个');
+  }
+  setImageHandoffModel(checkbox.dataset.provider, checkbox.dataset.model, checkbox.checked);
+  $('#image-handoff-status').textContent = `已选择 ${imageHandoffModels.length} 个模型，尚未保存`;
+});
+
+$('#image-handoff-selected').addEventListener('click', (event) => {
+  const button = event.target.closest('.remove-image-handoff-model');
+  if (!button) return;
+  setImageHandoffModel(button.dataset.provider, button.dataset.model, false);
+  renderImageHandoffModelList();
+  $('#image-handoff-status').textContent = `已选择 ${imageHandoffModels.length} 个模型，尚未保存`;
+});
+
+$('#select-visible-image-models').addEventListener('click', () => {
+  const provider = $('#imageHandoffProvider').value;
+  const byKey = new Map(imageHandoffModels.map((entry) => [imageHandoffKey(entry.provider, entry.model), entry]));
+  for (const model of visibleImageHandoffModels()) {
+    if (byKey.size >= 500) break;
+    byKey.set(imageHandoffKey(provider, model), { provider, model });
+  }
+  imageHandoffModels = [...byKey.values()].sort((left, right) => left.provider.localeCompare(right.provider) || left.model.localeCompare(right.model));
+  renderSelectedImageHandoffModels();
+  renderImageHandoffModelList();
+  $('#image-handoff-status').textContent = `已选择 ${imageHandoffModels.length} 个模型，尚未保存`;
+  if (byKey.size >= 500 && visibleImageHandoffModels().length > 500) toast('已达到 500 个模型上限');
+});
+
+$('#clear-provider-image-models').addEventListener('click', () => {
+  const provider = $('#imageHandoffProvider').value;
+  imageHandoffModels = imageHandoffModels.filter((entry) => entry.provider !== provider);
+  renderSelectedImageHandoffModels();
+  renderImageHandoffModelList();
+  $('#image-handoff-status').textContent = `已清除 ${provider.toUpperCase()} 的选择，尚未保存`;
+});
+
+$('#save-image-handoff').addEventListener('click', async () => {
+  try {
+    await saveConfig(configPayload({ imageHandoffModels }));
+    $('#image-handoff-status').textContent = `已保存 ${imageHandoffModels.length} 个模型`;
+  }
+  catch (error) { toast(`图片交接设置无效：${error.message}`); }
 });
 
 $('#add-route').addEventListener('click', () => {
@@ -794,6 +956,8 @@ $$('.clear-proxy').forEach((button) => button.addEventListener('click', async ()
   try { await saveConfig(configPayload({ clearProxy: true })); }
   catch (error) { toast(error.message); }
 }));
+
+$$('.proxy-preset').forEach((button) => button.addEventListener('click', () => fillProxyPreset(button)));
 
 $('#password-form').addEventListener('submit', async (event) => {
   event.preventDefault();

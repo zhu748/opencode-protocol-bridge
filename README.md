@@ -8,7 +8,7 @@
 - `POST /go/v1/messages|responses|chat/completions`：强制转发到 OpenCode Go
 - `POST /v1/messages|responses|chat/completions`：兼容入口，按模型路由选择上游
 - OpenCode Zen / Go 密钥和模型路由
-- 每个 Zen / Go Key 可独立配置 HTTP、HTTPS、SOCKS4、SOCKS4a、SOCKS5 或 SOCKS5h 上游代理
+- 每个 Zen / Go Key 可独立配置 HTTP、HTTPS、SOCKS4、SOCKS4a、SOCKS5、SOCKS5h 或 Clash/mihomo mixed-port 上游代理；TUIC / VLESS / VMess 等分享链接会提示先用本地客户端转换为 HTTP/SOCKS 端口
 - 工具调用、工具结果、并行工具开关、文本消息、图片精度字段，以及 Claude Documents 与 Responses 文件块转换
 - Claude thinking、Responses reasoning 摘要与 Chat reasoning_content 转换
 - Claude thinking/output effort 到 OpenAI reasoning effort 的模型感知映射
@@ -92,6 +92,9 @@ npm start
 | `OPENCODE_ZEN_PROXY_URL_1...32` / `OPENCODE_GO_PROXY_URL_1...32` | 空 | 与编号 Key 一一对应的代理；缺省时回退到提供方代理和默认代理 |
 | `OPENCODE_ZEN_PROXY_URLS` / `OPENCODE_GO_PROXY_URLS` | 空 | 与 `*_KEYS` 对应的代理列表；需要跳过某项时使用含空字符串的 JSON 数组 |
 | `OPENCODE_BRIDGE_DEFAULT_PROVIDER` | `zen` | 环境变量引导时的默认提供方：`zen` 或 `go` |
+| `OPENCODE_BRIDGE_IMAGE_HANDOFF` | 本机回环监听时开启 | 将设置页所选 Chat 模型的 Claude base64 图片暂存为本地文件，并把路径交给 Claude Code 的 vision 技能；远程部署默认关闭 |
+| `OPENCODE_BRIDGE_IMAGE_HANDOFF_DIR` | 系统临时目录 | 图片交接文件的父目录；每个进程使用独占子目录并在正常退出时清理 |
+| `OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL` | 空 | 远程图片交接使用的 HTTPS 公网基址，例如 `https://bridge.example.com`；配置后生成默认 15 分钟有效的随机下载 URL |
 
 也可以使用 Docker Compose：
 
@@ -112,6 +115,7 @@ Compose 默认只映射到本机 `127.0.0.1:8787`，配置保存在命名卷 `br
 
 - `OPENCODE_BRIDGE_ADMIN_PASSWORD`：**必填，不可留空**的管理面板密码，至少 6 位，仅使用英文字母或数字。
 - `OPENCODE_BRIDGE_CLIENT_TOKEN`：**必填，不可留空**的客户端调用令牌，至少 6 位，仅使用英文字母或数字。
+- `OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL`：使用 Claude Code vision 技能处理 DeepSeek 图片附件时填写 Render 服务的完整 HTTPS 地址，例如 `https://opencode-protocol-bridge.onrender.com`；不需要远程图片交接时可留空。
 - `OPENCODE_ZEN_KEYS` / `OPENCODE_GO_KEYS`：推荐的批量配置，支持 JSON 数组、逗号或换行分隔，最多 32 把；至少配置一个上游的一把 Key。
 - `OPENCODE_ZEN_PROXY_URLS` / `OPENCODE_GO_PROXY_URLS`：与批量 Key 逐项对应的 HTTP(S) 或 SOCKS 代理列表；需要保留空代理槽位时使用 JSON 数组中的空字符串。
 - `OPENCODE_ZEN_KEY_1...4` / `OPENCODE_GO_KEY_1...4` 及同编号 `*_PROXY_URL_1...4`：少量 Key 的独立输入方式；未使用的槽位留空。
@@ -147,7 +151,7 @@ x-api-key: YOUR_BRIDGE_TOKEN
 
 ### Key 独立代理
 
-“连接设置”可以分别为 Zen Key 和 Go Key 指定代理。独立代理优先于默认代理；未配置独立代理时回退到默认代理，默认代理也未配置则直连。代理保存后只向页面返回脱敏地址，输入框留空表示保持原值；需要取消代理时使用对应的“清除代理”按钮。支持以下写法：
+“连接设置”可以分别为 Zen Key 和 Go Key 指定代理。独立代理优先于默认代理；未配置独立代理时回退到默认代理，默认代理也未配置则直连。代理保存后只向页面返回脱敏地址，输入框留空表示保持原值；需要取消代理时使用对应的“清除代理”按钮。支持以下可被 Node.js 直接使用的 HTTP/SOCKS 写法：
 
 ```text
 http://127.0.0.1:7890
@@ -158,7 +162,16 @@ socks5://127.0.0.1:1080
 socks5h://user:password@proxy.example:1080
 ```
 
-省略协议的 `host:port` 会按 HTTP 代理处理。代理用户名或密码包含特殊字符时应使用 URL 百分号编码。管理面板可以逐项测试 Key；编辑时填写的新代理优先，否则使用该 Key 已保存的代理并回退到默认代理。
+省略协议的 `host:port` 会按 HTTP 代理处理。Clash / mihomo 的 mixed-port 可填写 `mixed://127.0.0.1:7890`，保存时会按 HTTP 代理规范化为 `http://127.0.0.1:7890/`；因为 mixed-port 同时接受 HTTP CONNECT 和 SOCKS，所以本项目会选择 HTTP CONNECT 路径。代理用户名或密码包含特殊字符时应使用 URL 百分号编码。管理面板可以逐项测试 Key；编辑时填写的新代理优先，否则使用该 Key 已保存的代理并回退到默认代理。
+
+TUIC / VLESS / VMess / Trojan / Shadowsocks / Hysteria 是出站隧道协议，不是 Node.js HTTP 客户端能直接使用的代理 URL。请先在 sing-box、Xray、Clash 等客户端中导入这些分享链接，并开启本地 HTTP / SOCKS / mixed 监听端口，然后在本项目里填写转换后的本地端口，例如：
+
+```text
+http://127.0.0.1:7890
+socks5h://127.0.0.1:1080
+```
+
+如果误填 `tuic://...`、`vless://...`、`vmess://...`、`trojan://...`、`ss://...` 或 `hysteria2://...`，管理面板和环境变量校验会返回明确提示，避免保存一个运行时不可用的代理配置。
 
 ### 在 OpenCode 中使用
 
@@ -244,6 +257,14 @@ Go 模型可直接使用 `opencode-go/<model-id>`，Zen 模型可使用 `opencod
 
 OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变更时，应在管理面板添加精确路由，而不是依赖名称推断。
 
+### 图片附件交接模型
+
+管理面板“连接设置”中的“图片附件交接”用于选择哪些 Chat 上游不能直接接收图片块。选择 Zen 或 Go 后，可以使用项目已经配置的 Key 池自动拉取模型，也可以指定某一把环境 Key 或面板 Key；浏览器只提交安全的 Key 槽位 ID，真实 Key 不会返回页面。勾选结果按 `{ provider, model }` 精确保存，同名模型在另一个上游不会被连带启用。
+
+新配置默认选中 Zen/Go 的 `deepseek-v4-flash` 与 `deepseek-v4-flash-free`，以兼容 Console Go/Zen 当前只接受文本内容块的行为。可以在拉取模型后取消默认项或选择其他已确认存在相同限制的 Chat 模型。选中模型收到 Claude 图片时，本地部署会提供临时绝对路径，配置了 `OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL` 的远程部署会提供短时 HTTPS URL；如果交接传输关闭，则使用明确的“图片未发送”文本。未选中的模型继续按标准 `image_url` 透传，因此不应为原生支持视觉的模型开启此选项。
+
+模型路由使用别名时，匹配的是最终 `upstreamModel` 和实际 provider，而不是客户端传入的别名。图片交接只在目标协议为 Chat 时生效；Claude 或 Responses 上游继续使用各自原生图片格式。
+
 ## Claude system 提示词规则
 
 管理面板的“提示词规则”可以在 Claude Messages 请求发送上游前，按顺序执行精确字面量替换。每条规则包含：
@@ -281,7 +302,7 @@ OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变�
 - `/models` 与 `/models/{model}` 仅接受 GET，三个推理端点仅接受 POST；方法错误会返回 HTTP 405、标准 `Allow` 头以及目标协议可识别的错误体。
 - 通用 `/v1/models` 的 `provider` 查询参数仅接受 `zen`、`go` 或列表场景的 `all`，非法值会明确返回 400，不会静默回退到默认套餐；带 `/zen/v1`、`/go/v1` 的路径始终以路径为准。
 - 同协议请求和非流式响应会在最小结构校验后保留厂商扩展字段；同协议流式响应原样透传。跨协议转换覆盖系统提示、文本、拒绝内容、图片及其 `detail`、Claude Documents/Responses 文件块、采样参数、函数工具、工具选择、新旧工具调用、工具结果、推理强度及 usage；Claude 的 `tool_result + 后续用户文本` 转 Chat 时会保持合法的 tool → user 顺序。停止词会在 Claude/Chat 目标间转换；Responses 不支持 stop，收到跨协议停止词时返回明确的 400。Claude 转 Chat 时保留兼容代理使用的 `cache_control`，转 Responses 时会移除该非标准字段；转 Claude 时 metadata 只保留合法的 `user_id`。Responses 内置工具/custom tool、Claude server tool、未知内容块、Chat 文件输入及 Chat 无法表达的图片 `file_id` 在跨协议请求时返回 400；上游响应包含目标协议无法表达的图片、文档或流式媒体块时返回明确的转换错误，避免静默丢失内容。其他非内容类厂商专属字段会被忽略。
-- DeepSeek V4 Flash / V4 Flash Free 的 Chat 工具调用在未显式请求推理时会自动设置 `reasoning_effort: "none"`，避免模型默认 Thinking 模式拒绝工具；客户端显式启用 Claude thinking 时不会静默覆盖其选择。
+- DeepSeek V4 Flash / V4 Flash Free 的 Chat 工具调用在未显式请求推理时会自动设置 `reasoning_effort: "none"`，避免模型默认 Thinking 模式拒绝工具；客户端显式启用 Claude thinking 时不会静默覆盖其选择。Console Go 的这两个模型当前只接受文本内容块：桥接服务监听本机回环地址时，Claude base64 图片会暂存到当前进程的系统临时目录，并把绝对路径作为文本交给 Claude Code 的 vision 技能；正常退出会删除这些副本。远程部署可配置 `OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL`，中转会改为生成默认 15 分钟有效的随机附件 URL，提示 Claude Code 下载到本机临时文件后再调用 vision 技能。未配置远程基址时，图片会替换为明确的“图片未发送”文本提示，历史消息中的图片也会处理，以避免上游因 `image_url` 返回 400。短时 URL 是无需额外请求头的能力链接，请只在可信的 HTTPS 部署中启用；如果没有可读取本机文件或下载 URL 的 vision 技能，请改用原生支持视觉输入的模型。
 - 请求日志默认仅保存在内存中；管理面板可启用有界持久化，文件为 `data/request-logs.json`。日志不包含提示词、响应正文或密钥，启动时的并发请求只共享一次旧日志加载，写盘会在短时间窗口内合并，并在管理读取或服务正常退出时强制刷新；临时写盘失败会保留待写状态供下次刷新重试。关闭持久化会取消尚未执行的延迟写盘，但不会自动删除已有文件；需要删除历史内容时再点击“清空记录”。请求记录列表会直接显示使用的 Key 槽位、面板 Key 名称和自动切换尝试次数，并支持按这些字段筛选，便于把 401/429/代理错误关联到具体 Key。
 - 管理面板“用量统计”按全部记录、最近 24 小时或最近 7 天汇总请求数、成功率、自动 Key 切换次数、平均/P95 耗时以及输入、输出、缓存读取、缓存写入和推理 token，并可按上游、实际模型、协议转换、客户端和 Key 槽位拆分；每个分组同时显示总耗时、上游等待和响应体阶段的平均/P95，时间趋势悬浮提示会显示该时段的平均阶段耗时。上游等待累计所有 Key 尝试中的连接、排队与等待响应头时间，响应体阶段从最终响应头到完成响应体读取与转换，流式请求还包含向客户端传输及背压等待。Key 表还展示当前健康状态、连续失败、冷却截止时间、实时剩余时间与最近事件。Key 统计只保存“环境变量编号/面板 Key”等安全标识，不保存密钥内容。请求记录会同时显示本地请求 ID、最终上游请求 ID、限流等待时间和安全错误码；连接超时、响应超时、DNS、拒绝连接、意外断连与 TLS 故障会分开标识，不回显底层 URL 或代理凭据。日志支持按关键词、错误码、时间、上游、成功/4xx/429/5xx 组合筛选，可复制两类请求 ID，并能将当前筛选结果导出为防公式注入的 UTF-8 CSV，便于关联排障。页面提供最近 24 小时、7 天或 14 天的请求/Token 趋势。统计会统一 OpenAI“缓存读取是输入子集、缓存写入为独立指标”和 Claude“缓存创建字段独立于普通输入”的两种 usage 口径：缓存写入不再从 OpenAI 的未缓存输入中重复扣除。统计只基于当前最多 1000 条保留日志；推理 token 是输出 token 的明细项，不会重复加总。上游没有返回 usage 时会计入“缺失用量”的请求数。由于 OpenCode 各模型的缓存价格会变化，面板不估算账单金额，应以 OpenCode 官方账单为准。
 - 管理面板只有配置读取是启动强依赖；请求日志、运行状态、客户端列表、用量统计或 Claude 提示词快照短暂失败时，页面会继续显示上一次成功数据，并在顶部列出未更新的数据源。后续刷新成功会自动清除对应告警。

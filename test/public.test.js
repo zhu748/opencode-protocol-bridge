@@ -40,6 +40,16 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /loadDataSource\('用量统计', refreshStats/);
   assert.match(script, /renderRecentPrompt\(\{\}\)/);
   assert.doesNotMatch(script, /api\('\/api\/config'\), api\('\/api\/logs'\), api\('\/api\/status'\), api\('\/api\/clients'\)/);
+  assert.match(html, /TUIC\/VLESS\/VMess/);
+  assert.match(html, /data-proxy-value="mixed:\/\/127\.0\.0\.1:7890"/);
+  assert.match(script, /function fillProxyPreset\(button\)/);
+  assert.match(script, /providerCredentialClearProxy'\)\.checked = false/);
+  assert.match(settings, /flex-wrap: wrap/);
+  assert.match(html, /id="imageHandoffCredential"/);
+  assert.match(html, /id="image-handoff-model-list"/);
+  assert.match(script, /\/api\/models\?provider=/);
+  assert.match(script, /credentialId/);
+  assert.match(script, /imageHandoffModels/);
   assert.match(html, /<svg class="cache-meter-graphic" viewBox="0 0 100 12"/);
   assert.match(script, /querySelector\('\.cache-read'\)\.setAttribute\('width'/);
   assert.match(script, /querySelector\('\.cache-uncached'\)\.setAttribute\('x'/);
@@ -50,9 +60,9 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(settings, /@media \(max-width: 720px\)[\s\S]*?\.log-toolbar/);
 });
 
-test('Render Blueprint 暴露批量 Key 与逐项代理变量', async () => {
+test('Render Blueprint 暴露批量 Key、逐项代理与远程图片交接变量', async () => {
   const blueprint = await readFile(resolve(projectDir, 'render.yaml'), 'utf8');
-  for (const name of ['OPENCODE_ZEN_KEYS', 'OPENCODE_GO_KEYS', 'OPENCODE_ZEN_PROXY_URLS', 'OPENCODE_GO_PROXY_URLS']) {
+  for (const name of ['OPENCODE_ZEN_KEYS', 'OPENCODE_GO_KEYS', 'OPENCODE_ZEN_PROXY_URLS', 'OPENCODE_GO_PROXY_URLS', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL']) {
     assert.equal((blueprint.match(new RegExp(`key: ${name}\\b`, 'g')) || []).length, 1, `${name} 应出现一次`);
   }
 });

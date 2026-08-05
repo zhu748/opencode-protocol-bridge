@@ -60,7 +60,7 @@
         <div class="section-intro"><h3>连接设置</h3><p>密钥保存在本机 <code>data/config.json</code>，页面只显示遮罩。<span id="encryption-state" class="security-state"></span></p></div>
         <form id="settings-form" class="panel form-grid">
           <label>默认上游<select id="defaultProvider"><option value="zen">OpenCode Zen</option><option value="go">OpenCode Go</option></select></label>
-          <label>默认代理（可选回退）<input id="proxyUrl" autocomplete="off" placeholder="http://127.0.0.1:7890"><small>仅在对应 Key 未设置独立代理时使用；留空保持原值</small><span class="field-tools"><button type="button" class="link-btn clear-proxy" data-provider="default">清除默认代理</button></span></label>
+          <label>默认代理（可选回退）<input id="proxyUrl" autocomplete="off" placeholder="http://127.0.0.1:7890"><small>仅在对应 Key 未设置独立代理时使用；TUIC/VLESS/VMess 等需先用 sing-box、Xray 或 Clash 转成本地 HTTP/SOCKS 端口</small><span class="field-tools proxy-presets"><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="http://127.0.0.1:7890">HTTP 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:7890">SOCKS5h 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:1080">SOCKS5h 1080</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="mixed://127.0.0.1:7890">mixed://7890</button><button type="button" class="link-btn clear-proxy" data-provider="default">清除默认代理</button></span></label>
           <label>主访问令牌<input id="clientToken" type="password" minlength="6" maxlength="256" pattern="[A-Za-z0-9]{6,256}" autocomplete="off" placeholder="留空则保持原值"><small>自定义时须为 6–256 位英文字母或数字</small></label>
           <label>日志保留条数<input id="requestLogLimit" type="number" min="10" max="1000"></label>
           <label class="check-field"><input id="persistLogs" type="checkbox"><span>持久化请求日志<small>仅保存请求元数据，不保存提示词和响应正文</small></span></label>
@@ -69,17 +69,30 @@
           <div class="form-actions"><button type="button" id="regen-token" class="ghost">重新生成访问令牌</button><button type="submit" class="primary compact">保存设置</button></div>
         </form>
         <section class="panel credential-manager">
-          <div class="panel-head"><div><h3>上游 Key 池</h3><p>每把 Key 可使用独立 HTTP(S) 或 SOCKS 代理；环境变量 Key 优先且只能在部署平台修改。</p></div><button id="add-provider-credential" class="primary compact" type="button">添加 Key</button></div>
+          <div class="panel-head"><div><h3>上游 Key 池</h3><p>每把 Key 可使用独立 HTTP(S)、SOCKS 或 Clash/mihomo mixed-port；TUIC/VLESS/VMess/Trojan/SS/Hysteria 分享链接请先由本地客户端转换为 HTTP/SOCKS 端口。</p></div><button id="add-provider-credential" class="primary compact" type="button">添加 Key</button></div>
           <div id="provider-credential-list" class="provider-credential-list"></div>
           <form id="provider-credential-form" class="credential-editor hidden">
             <input id="providerCredentialId" type="hidden">
             <label>上游<select id="providerCredentialProvider"><option value="zen">OpenCode Zen</option><option value="go">OpenCode Go</option></select></label>
             <label>名称<input id="providerCredentialName" maxlength="64" placeholder="例如：Go 编程套餐" required></label>
             <label>API Key<input id="providerCredentialKey" type="password" maxlength="4096" autocomplete="off" placeholder="编辑时留空保持原值"></label>
-            <label>独立代理<input id="providerCredentialProxy" maxlength="2048" autocomplete="off" placeholder="留空则直连或使用默认代理"><small>支持 HTTP(S)、SOCKS4/4a/5/5h；编辑时留空保持当前</small></label>
+            <label>独立代理<input id="providerCredentialProxy" maxlength="2048" autocomplete="off" placeholder="留空则直连或使用默认代理"><small>支持 HTTP(S)、SOCKS4/4a/5/5h 和 mixed://；隧道分享链接需填本地转换后的端口</small><span class="field-tools proxy-presets"><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="http://127.0.0.1:7890">HTTP 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="socks5h://127.0.0.1:7890">SOCKS5h 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="socks5h://127.0.0.1:1080">SOCKS5h 1080</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="mixed://127.0.0.1:7890">mixed://7890</button></span></label>
             <label id="providerCredentialClearProxyField" class="check-field credential-clear-proxy hidden"><input id="providerCredentialClearProxy" type="checkbox"><span>清除当前独立代理</span></label>
             <div class="credential-editor-actions"><button id="test-provider-credential" class="ghost" type="button">测试连接</button><button id="cancel-provider-credential" class="ghost" type="button">取消</button><button class="primary compact" type="submit">保存 Key</button></div>
           </form>
+        </section>
+        <section class="panel image-handoff-manager">
+          <div class="panel-head"><div><h3>图片附件交接</h3><p>为不接受图片内容块的 Chat 模型开启附件交接。先选择项目中已配置的 Key 拉取模型，再勾选需要启用的模型。</p></div><button id="save-image-handoff" class="primary compact" type="button">保存选择</button></div>
+          <div class="image-handoff-toolbar">
+            <label>上游<select id="imageHandoffProvider"><option value="go">OpenCode Go</option><option value="zen">OpenCode Zen</option></select></label>
+            <label>用于拉取模型的项目 Key<select id="imageHandoffCredential"></select></label>
+            <label>筛选模型<input id="imageHandoffSearch" type="search" placeholder="输入模型名"></label>
+            <button id="load-image-handoff-models" class="ghost" type="button">拉取模型</button>
+          </div>
+          <div class="image-handoff-summary"><span id="image-handoff-mode" class="pill"></span><span id="image-handoff-status">尚未拉取模型</span><span class="client-actions"><button id="select-visible-image-models" class="mini-btn" type="button">选择当前结果</button><button id="clear-provider-image-models" class="mini-btn revoke" type="button">清除当前上游</button></span></div>
+          <div id="image-handoff-selected" class="image-handoff-selected"></div>
+          <div id="image-handoff-model-list" class="image-handoff-model-list"><p class="empty-inline">请选择上游和 Key，然后拉取模型列表</p></div>
+          <p class="hint">只影响选中上游的精确模型名。Claude 图片会转成本地路径或短时 URL；直接 Chat 图片会降级为明确文本提示。未选中的模型保持标准图片块透传。</p>
         </section>
         <form id="password-form" class="panel inline-form"><div><h3>修改管理密码</h3><p>修改后所有现有登录会话都会失效。</p></div><input id="currentPassword" type="password" placeholder="当前密码" required><input id="newPassword" type="password" minlength="6" maxlength="256" pattern="[A-Za-z0-9]{6,256}" placeholder="6 位以上英文字母或数字" required><button class="ghost" type="submit">修改</button></form>
       </section>

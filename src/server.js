@@ -1,9 +1,9 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { extname, join, relative, resolve } from 'node:path';
 import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from './auth.js';
-import { loadConfig, saveConfig, updateConfig, publicConfig, ROOT } from './config.js';
+import { loadConfig, saveConfig, updateConfig, publicConfig, normalizeImageHandoffModels, ROOT } from './config.js';
 import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, hasUsageData } from './adapters.js';
 import { callUpstream, closeDirectUpstreamDispatcher, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJson, readResponseText, upstreamConnectionFailure } from './upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl } from './proxy.js';
@@ -13,6 +13,7 @@ import { observeSse, translateSse } from './stream.js';
 import { RequestLogStore } from './request-log.js';
 import { aggregateRequestStats } from './stats.js';
 import { applyPromptRules, MAX_PROMPT_BYTES, normalizePromptRules, promptSnapshotText, rewriteClaudeSystem } from './prompt-rewrite.js';
+import { ImageHandoffStore, localImageHandoffEnabled } from './image-handoff.js';
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
@@ -21,6 +22,12 @@ const TRUST_PROXY = /^(?:1|true)$/i.test(String(process.env.OPENCODE_BRIDGE_TRUS
 const REQUIRE_ENV_BOOTSTRAP = /^(?:1|true)$/i.test(String(process.env.OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP || ''));
 const PUBLIC = join(ROOT, 'public');
 const requestLogs = new RequestLogStore(process.env.LOG_FILE || resolve(ROOT, 'data', 'request-logs.json'));
+const imageHandoffPublicUrl = process.env.OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL || '';
+const imageHandoff = new ImageHandoffStore({
+  enabled: localImageHandoffEnabled(HOST, process.env.OPENCODE_BRIDGE_IMAGE_HANDOFF),
+  publicBaseUrl: imageHandoffPublicUrl,
+  ...(process.env.OPENCODE_BRIDGE_IMAGE_HANDOFF_DIR ? { baseDirectory: process.env.OPENCODE_BRIDGE_IMAGE_HANDOFF_DIR } : {})
+});
 let setupInProgress = false;
 let activeLogins = 0;
 let activeProxyRequests = 0;
@@ -310,6 +317,7 @@ function runtimePublicConfig(config) {
     goEnvironmentKeyCount: environmentCredentialPools.go.length,
     zenEnvironmentCredentials: environmentCredentials('zen'),
     goEnvironmentCredentials: environmentCredentials('go'),
+    imageHandoffTransport: imageHandoff.publicBaseUrl ? 'remote' : imageHandoff.enabled ? 'local' : 'disabled',
     zenProxyConfigured: environmentCredentialPools.zen.some((credential) => credential.proxyUrl) || base.zenProxyConfigured,
     goProxyConfigured: environmentCredentialPools.go.some((credential) => credential.proxyUrl) || base.goProxyConfigured
   };
@@ -501,6 +509,9 @@ async function adminApi(req, res, url, config) {
     let promptRewriteRules;
     try { promptRewriteRules = normalizePromptRules(next.promptRewriteRules ?? config.promptRewriteRules); }
     catch (error) { return json(res, 400, { error: error.message }); }
+    let imageHandoffModels;
+    try { imageHandoffModels = normalizeImageHandoffModels(next.imageHandoffModels ?? config.imageHandoffModels); }
+    catch (error) { return json(res, 400, { error: error.message }); }
     const routeEntries = Object.entries(next.modelRoutes);
     if (routeEntries.length > 500) return json(res, 400, { error: '模型路由不能超过 500 条' });
     for (const [model, route] of routeEntries) {
@@ -534,6 +545,7 @@ async function adminApi(req, res, url, config) {
     if (next.clearGoProxy) updated.goProxyUrl = '';
     updated.defaultProvider = next.defaultProvider;
     updated.modelRoutes = next.modelRoutes;
+    updated.imageHandoffModels = imageHandoffModels;
     updated.promptRewriteRules = promptRewriteRules;
     updated.requestLogLimit = boundedInteger(next.requestLogLimit, '日志保留条数', 10, 1000, config.requestLogLimit);
     updated.upstreamTimeoutMs = boundedInteger(next.upstreamTimeoutMs, '上游超时', 1000, 600000, config.upstreamTimeoutMs);
@@ -735,6 +747,12 @@ function resolveRoute(model, config, forcedProvider = null) {
   return { provider, upstreamModel, protocol: upstreamProtocol(upstreamModel, explicit, provider), toolChoiceFallback: explicit.toolChoiceFallback };
 }
 
+function imageHandoffEnabledForRoute(config, route) {
+  const model = route.upstreamModel.toLowerCase();
+  return config.imageHandoffModels
+    .some((entry) => entry.provider === route.provider && entry.model.toLowerCase() === model);
+}
+
 function upstreamSystemText(body, protocol) {
   if (protocol === 'responses') return typeof body.instructions === 'string' ? body.instructions : '';
   if (protocol === 'claude') {
@@ -763,7 +781,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
   const started = Date.now();
   const requestId = randomBytes(8).toString('hex');
   res.setHeader('x-request-id', requestId);
-  const body = await bodyJson(req);
+  let body = await bodyJson(req);
   if (typeof body.model !== 'string' || !body.model.trim() || body.model.length > 256) return protocolError(res, 400, incomingProtocol, 'model 必须是长度 1–256 的非空字符串');
   let promptRewrite;
   if (incomingProtocol === 'claude') {
@@ -773,9 +791,13 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
   const route = resolveRoute(body.model, config, forcedProvider);
   const responseOptions = responsesOutputOptions(body, incomingProtocol);
   if (!route.upstreamModel) return protocolError(res, 400, incomingProtocol, '上游模型名不能为空');
+  const imageHandoffEnabled = imageHandoffEnabledForRoute(config, route);
   let upstreamBody;
   try {
-    upstreamBody = prepareUpstreamRequest(body, incomingProtocol, route.protocol, route.upstreamModel, { toolChoiceFallback: route.toolChoiceFallback });
+    if (incomingProtocol === 'claude' && route.protocol === 'chat' && imageHandoffEnabled) {
+      body = await imageHandoff.prepareClaudeRequest(body, true);
+    }
+    upstreamBody = prepareUpstreamRequest(body, incomingProtocol, route.protocol, route.upstreamModel, { toolChoiceFallback: route.toolChoiceFallback, imageHandoffEnabled });
   } catch (error) {
     return protocolError(res, error.status || 400, incomingProtocol, error.message, error.type || 'invalid_request_error');
   }
@@ -1034,7 +1056,24 @@ const server = createServer(async (req, res) => {
     res.setHeader('referrer-policy', 'no-referrer');
     res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
     res.setHeader('content-security-policy', "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
-    if (url.pathname === '/health' || url.pathname.startsWith('/api/') || apiScope) res.setHeader('cache-control', 'no-store');
+    const publicImageMatch = url.pathname.match(/^\/_bridge\/images\/([a-f0-9]{64})$/);
+    if (url.pathname === '/health' || url.pathname.startsWith('/api/') || publicImageMatch || apiScope) res.setHeader('cache-control', 'no-store');
+    if (publicImageMatch) {
+      if (!['GET', 'HEAD'].includes(req.method)) return json(res, 405, { error: '该接口仅支持 GET 或 HEAD' }, { allow: 'GET, HEAD' });
+      const image = imageHandoff.publicImage(publicImageMatch[1]);
+      if (!image) return json(res, 404, { error: '图片附件不存在或已经过期' });
+      let size;
+      try { size = (await stat(image.filePath)).size; }
+      catch (error) { if (error.code === 'ENOENT') return json(res, 404, { error: '图片附件不存在或已经过期' }); throw error; }
+      res.writeHead(200, {
+        'content-type': image.mediaType,
+        'content-length': size,
+        'content-disposition': `inline; filename="image.${image.extension}"`,
+        'cache-control': 'no-store'
+      });
+      if (req.method === 'HEAD') return res.end();
+      return res.end(await readFile(image.filePath));
+    }
     const config = await loadConfig();
     if (url.pathname === '/health') {
       return json(res, 200, { ok: true, ready: serviceReady(config), configured: Boolean(config.password), uptime: Math.floor(process.uptime()) });
@@ -1179,7 +1218,7 @@ async function finalizeShutdown(exitCode, forceExit) {
   clearTimeout(forceExit);
   await requestLogs.flush().catch((error) => console.error(`退出前刷新请求日志失败：${error.message}`));
   const force = exitCode !== 0;
-  await Promise.all([closeProxyDispatchers({ force }), closeDirectUpstreamDispatcher({ force })]);
+  await Promise.all([closeProxyDispatchers({ force }), closeDirectUpstreamDispatcher({ force }), imageHandoff.close()]);
   process.exit(exitCode);
 }
 

@@ -284,10 +284,30 @@ function responsesFilePart(part) {
   throw unsupportedFeature('文件内容块缺少可转换的 URL、file_id 或 base64 数据');
 }
 
-function chatImagePart(part) {
+function chatImagePart(part, imageHandoffEnabled) {
+  if (imageHandoffEnabled) {
+    return { type: 'text', text: '[图片未发送：当前模型不支持图片输入。]' };
+  }
   const url = imageDataUrl(part.source);
   if (!url) throw unsupportedFeature('Chat Completions 无法表达 image file_id；请改用图片 URL/base64，或将模型路由设为 responses/claude');
   return { type: 'image_url', image_url: { url, ...(part.detail ? { detail: part.detail } : {}) } };
+}
+
+function replaceUnsupportedChatImages(body, imageHandoffEnabled) {
+  if (!imageHandoffEnabled || !Array.isArray(body.messages)) return body;
+  let changed = false;
+  const messages = body.messages.map((message) => {
+    if (!Array.isArray(message?.content)) return message;
+    let messageChanged = false;
+    const content = message.content.map((part) => {
+      if (!['image', 'image_url', 'input_image'].includes(part?.type)) return part;
+      changed = true;
+      messageChanged = true;
+      return { type: 'text', text: '[图片未发送：当前模型不支持图片输入。]' };
+    });
+    return messageChanged ? { ...message, content } : message;
+  });
+  return changed ? { ...body, messages } : body;
 }
 
 function appendChatAssistantMessage(messages, next) {
@@ -331,7 +351,7 @@ function claudeContent(parts, { includeReasoning = false } = {}) {
   });
 }
 
-export function formatRequest(request, protocol) {
+export function formatRequest(request, protocol, options = {}) {
   const common = Object.fromEntries(Object.entries({
     model: request.model,
     stream: request.stream,
@@ -403,7 +423,7 @@ export function formatRequest(request, protocol) {
     for (const result of results) messages.push({ role: 'tool', tool_call_id: result.id, content: typeof result.content === 'string' ? result.content : canonicalJsonString(result.content) });
     if (text || images.length || calls.length) appendChatAssistantMessage(messages, {
       role: message.role,
-      content: images.length || hasCacheControl ? [...textParts.map((x) => ({ type: 'text', text: x.text, ...(x.cacheControl ? { cache_control: x.cacheControl } : {}) })), ...images.map(chatImagePart)] : (text || null),
+      content: images.length || hasCacheControl ? [...textParts.map((x) => ({ type: 'text', text: x.text, ...(x.cacheControl ? { cache_control: x.cacheControl } : {}) })), ...images.map((part) => chatImagePart(part, options.imageHandoffEnabled))] : (text || null),
       ...(message.role === 'assistant' && usesReasoningContent(request.model) && (reasoning || calls.length) ? { reasoning_content: reasoning || 'tool call' } : {}),
       ...(calls.length ? { tool_calls: calls.map((x) => ({ id: x.id, type: 'function', function: { name: x.name, arguments: canonicalJsonString(x.arguments) } })) } : {})
     });
@@ -438,10 +458,13 @@ function mergeClaudeMessages(messages) {
 }
 
 export function prepareUpstreamRequest(body, incomingProtocol, targetProtocol, upstreamModel, options = {}) {
-  if (incomingProtocol === targetProtocol) return applyCompatibilityOptions(withStreamUsage({ ...body, model: upstreamModel }, targetProtocol), targetProtocol, options);
+  if (incomingProtocol === targetProtocol) {
+    const upstreamBody = withStreamUsage({ ...body, model: upstreamModel }, targetProtocol);
+    return applyCompatibilityOptions(replaceUnsupportedChatImages(upstreamBody, options.imageHandoffEnabled), targetProtocol, options);
+  }
   const normalized = normalizeRequest(body, incomingProtocol);
   normalized.model = upstreamModel;
-  return applyCompatibilityOptions(formatRequest(normalized, targetProtocol), targetProtocol, options);
+  return applyCompatibilityOptions(formatRequest(normalized, targetProtocol, options), targetProtocol, options);
 }
 
 function withStreamUsage(body, protocol) {

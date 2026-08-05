@@ -147,6 +147,37 @@ test('Responses 与 Chat 跨协议保留图片 detail', () => {
   assert.deepEqual(toResponses.input[0].content[0], { type: 'input_image', image_url: 'https://example.com/b.png', detail: 'original' });
 });
 
+test('DeepSeek V4 Flash 的 Chat 请求将不支持的图片替换为明确文本提示', () => {
+  const fromClaude = prepareUpstreamRequest({
+    model: 'alias', max_tokens: 64,
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: '解释这张图' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AA==' } }
+    ] }]
+  }, 'claude', 'chat', 'deepseek-v4-flash', { imageHandoffEnabled: true });
+  assert.deepEqual(fromClaude.messages[0].content, [
+    { type: 'text', text: '解释这张图' },
+    { type: 'text', text: '[图片未发送：当前模型不支持图片输入。]' }
+  ]);
+  assert.doesNotMatch(JSON.stringify(fromClaude), /image_url/);
+
+  const directChat = prepareUpstreamRequest({
+    model: 'alias', messages: [{ role: 'user', content: [
+      { type: 'text', text: '历史文本' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }
+    ] }]
+  }, 'chat', 'chat', 'deepseek-v4-flash-free', { imageHandoffEnabled: true });
+  assert.deepEqual(directChat.messages[0].content[1], {
+    type: 'text', text: '[图片未发送：当前模型不支持图片输入。]'
+  });
+
+  const visionModel = prepareUpstreamRequest({
+    model: 'alias', max_tokens: 64,
+    messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } }] }]
+  }, 'claude', 'chat', 'vision-chat');
+  assert.equal(visionModel.messages[0].content[0].type, 'image_url');
+});
+
 test('Chat 目标不会生成缺失 URL 的 image_url', () => {
   assert.throws(() => prepareUpstreamRequest({
     model: 'alias', input: [{ role: 'user', content: [{ type: 'input_image', file_id: 'file_image_1' }] }]
@@ -354,14 +385,14 @@ test('空 tools 会移除工具约束并清理不兼容 URI Schema', () => {
   assert.equal(properties.day.format, 'date-time');
 });
 
-test('Claude 计费头仅从 system 开头移除且纯图片消息不会丢失', () => {
+test('Claude 计费头仅从 system 开头移除且 DeepSeek 纯图片消息会明确降级', () => {
   const result = prepareUpstreamRequest({
     model: 'alias', max_tokens: 64,
     system: 'x-anthropic-billing-header: cch=test\n\n真实系统提示',
     messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }] }]
-  }, 'claude', 'chat', 'deepseek-v4-flash-free');
+  }, 'claude', 'chat', 'deepseek-v4-flash-free', { imageHandoffEnabled: true });
   assert.equal(result.messages[0].content, '真实系统提示');
-  assert.equal(result.messages[1].content[0].type, 'image_url');
+  assert.deepEqual(result.messages[1].content[0], { type: 'text', text: '[图片未发送：当前模型不支持图片输入。]' });
 });
 
 test('Claude 转 Chat 保留兼容代理使用的 cache_control', () => {

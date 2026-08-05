@@ -10,7 +10,7 @@
     "test:live:go": "node scripts/live-go-smoke.mjs",
     "rekey": "node scripts/rekey.js",
     "test": "node --test",
-    "check": "node --check src/server.js && node --check src/adapters.js && node --check src/auth.js && node --check src/config.js && node --check src/stream.js && node --check src/upstream.js && node --check src/prompt-rewrite.js && node --check src/proxy.js && node --check src/provider-credentials.js && node --check src/credential-health.js && node --check src/stats.js && node --check src/secrets.js && node --check src/request-log.js && node --check scripts/rekey.js && node --check scripts/live-go-smoke.mjs && node --check public/log-utils.js && node --check public/refresh-utils.js && node --check public/app.js && node --test"
+    "check": "node --check src/server.js && node --check src/adapters.js && node --check src/auth.js && node --check src/config.js && node --check src/stream.js && node --check src/upstream.js && node --check src/prompt-rewrite.js && node --check src/image-handoff.js && node --check src/proxy.js && node --check src/provider-credentials.js && node --check src/credential-health.js && node --check src/stats.js && node --check src/secrets.js && node --check src/request-log.js && node --check scripts/rekey.js && node --check scripts/live-go-smoke.mjs && node --check public/log-utils.js && node --check public/refresh-utils.js && node --check public/app.js && node --test"
   },
   "engines": {
     "node": ">=20.18.1 <25"

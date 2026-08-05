@@ -24,6 +24,8 @@ services:
         sync: false
       - key: OPENCODE_BRIDGE_CLIENT_TOKEN
         sync: false
+      - key: OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL
+        sync: false
       - key: OPENCODE_BRIDGE_DEFAULT_PROVIDER
         value: zen
       - key: OPENCODE_PROXY_URL

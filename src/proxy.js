@@ -2,6 +2,20 @@ import { ProxyAgent } from 'undici';
 import { socksDispatcher } from 'fetch-socks';
 
 const SUPPORTED_PROTOCOLS = new Set(['http:', 'https:', 'socks:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:']);
+const PROXY_ALIASES = new Map([
+  ['mixed:', 'http:']
+]);
+const TUNNEL_PROTOCOLS = new Map([
+  ['tuic:', 'TUIC'],
+  ['vless:', 'VLESS'],
+  ['vmess:', 'VMess'],
+  ['trojan:', 'Trojan'],
+  ['ss:', 'Shadowsocks'],
+  ['ssr:', 'ShadowsocksR'],
+  ['hysteria:', 'Hysteria'],
+  ['hysteria2:', 'Hysteria2'],
+  ['hy2:', 'Hysteria2']
+]);
 const MAX_PROXY_DISPATCHERS = 64;
 const dispatchers = new Map();
 
@@ -12,6 +26,8 @@ export function normalizeProxyUrl(value) {
   let parsed;
   try { parsed = new URL(candidate); }
   catch { throw new Error('代理地址必须是有效的 URL 或 host:port'); }
+  if (TUNNEL_PROTOCOLS.has(parsed.protocol)) throw new Error(`${TUNNEL_PROTOCOLS.get(parsed.protocol)} 分享链接不能直接作为 Node.js HTTP 代理使用；请先用 sing-box、Xray 或 Clash 将它暴露为本地 HTTP/SOCKS 端口，再填写 http://127.0.0.1:7890 或 socks5h://127.0.0.1:1080`);
+  if (PROXY_ALIASES.has(parsed.protocol)) parsed = aliasProxyUrl(parsed, PROXY_ALIASES.get(parsed.protocol));
   if (!SUPPORTED_PROTOCOLS.has(parsed.protocol)) throw new Error('代理协议仅支持 HTTP、HTTPS、SOCKS4、SOCKS4a、SOCKS5 和 SOCKS5h');
   if (!parsed.hostname) throw new Error('代理地址缺少主机名');
   if (!['', '/'].includes(parsed.pathname) || parsed.search || parsed.hash) throw new Error('代理地址不能包含路径、查询参数或片段');
@@ -23,6 +39,11 @@ export function normalizeProxyUrl(value) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('代理端口必须是 1–65535');
   if (!parsed.port) parsed.port = String(port);
   return parsed.toString();
+}
+
+function aliasProxyUrl(url, protocol) {
+  const auth = url.username ? `${url.username}${url.password ? `:${url.password}` : ''}@` : '';
+  return new URL(`${protocol}//${auth}${url.host}${url.pathname}${url.search}${url.hash}`);
 }
 
 export function proxyDispatcher(proxyUrl) {

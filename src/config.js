@@ -10,6 +10,28 @@ const CONFIG_FILE = process.env.CONFIG_FILE || resolve(ROOT, 'data', 'config.jso
 const ENCRYPTION_KEY = process.env.CONFIG_ENCRYPTION_KEY || '';
 if (ENCRYPTION_KEY && ENCRYPTION_KEY.length < 16) throw new Error('CONFIG_ENCRYPTION_KEY 至少需要 16 个字符');
 
+export const DEFAULT_IMAGE_HANDOFF_MODELS = Object.freeze(['zen', 'go'].flatMap((provider) => [
+  { provider, model: 'deepseek-v4-flash' },
+  { provider, model: 'deepseek-v4-flash-free' }
+]));
+
+export function normalizeImageHandoffModels(value = DEFAULT_IMAGE_HANDOFF_MODELS) {
+  if (!Array.isArray(value)) throw new Error('图片交接模型必须是数组');
+  if (value.length > 500) throw new Error('图片交接模型不能超过 500 个');
+  const seen = new Set();
+  return value.map((entry, index) => {
+    if (!entry || Array.isArray(entry) || typeof entry !== 'object') throw new Error(`图片交接模型第 ${index + 1} 项格式无效`);
+    const provider = typeof entry.provider === 'string' ? entry.provider.trim().toLowerCase() : '';
+    const model = typeof entry.model === 'string' ? entry.model.trim() : '';
+    if (!['zen', 'go'].includes(provider)) throw new Error(`图片交接模型第 ${index + 1} 项 provider 无效`);
+    if (!model || model.length > 256 || /[\u0000-\u001f\u007f]/.test(model)) throw new Error(`图片交接模型第 ${index + 1} 项 model 无效`);
+    const key = `${provider}\n${model.toLowerCase()}`;
+    if (seen.has(key)) throw new Error(`图片交接模型重复：${provider}/${model}`);
+    seen.add(key);
+    return { provider, model };
+  });
+}
+
 const defaults = {
   version: 1,
   password: null,
@@ -24,6 +46,7 @@ const defaults = {
   goProxyUrl: '',
   defaultProvider: 'zen',
   modelRoutes: {},
+  imageHandoffModels: DEFAULT_IMAGE_HANDOFF_MODELS,
   promptRewriteRules: DEFAULT_PROMPT_REWRITE_RULES,
   requestLogLimit: 100,
   upstreamTimeoutMs: 120000,
@@ -40,6 +63,7 @@ export async function loadConfig() {
   try {
     const parsed = JSON.parse(await readFile(CONFIG_FILE, 'utf8'));
     state = { ...defaults, ...decryptConfig(parsed, ENCRYPTION_KEY) };
+    state.imageHandoffModels = normalizeImageHandoffModels(state.imageHandoffModels);
     state.promptRewriteRules = migratePromptRules(state.promptRewriteRules);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
@@ -50,6 +74,7 @@ export async function loadConfig() {
 
 export async function saveConfig(next) {
   const snapshot = structuredClone({ ...defaults, ...next, version: 1 });
+  snapshot.imageHandoffModels = normalizeImageHandoffModels(snapshot.imageHandoffModels);
   saveQueue = saveQueue.catch(() => {}).then(async () => {
     await persist(snapshot);
     state = snapshot;
@@ -64,6 +89,7 @@ export async function updateConfig(mutator) {
   saveQueue = saveQueue.catch(() => {}).then(async () => {
     const next = await mutator(structuredClone(state));
     snapshot = structuredClone({ ...defaults, ...next, version: 1 });
+    snapshot.imageHandoffModels = normalizeImageHandoffModels(snapshot.imageHandoffModels);
     await persist(snapshot);
     state = snapshot;
   });
@@ -111,6 +137,7 @@ export function publicConfig(config) {
     goProxyConfigured: Boolean(config.goProxyUrl) || goCredentials.some((entry) => entry.proxyUrl),
     defaultProvider: config.defaultProvider,
     modelRoutes: config.modelRoutes,
+    imageHandoffModels: normalizeImageHandoffModels(config.imageHandoffModels),
     promptRewriteRules: config.promptRewriteRules,
     promptRewriteDefaults: DEFAULT_PROMPT_REWRITE_RULES,
     requestLogLimit: config.requestLogLimit,

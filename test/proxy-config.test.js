@@ -8,11 +8,20 @@ import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, proxyDispat
 
 test('代理地址支持 HTTP、HTTPS、SOCKS4/4a/5/5h 和省略协议的 host:port', () => {
   assert.equal(normalizeProxyUrl('127.0.0.1:7890'), 'http://127.0.0.1:7890/');
+  assert.equal(normalizeProxyUrl('mixed://127.0.0.1:7890'), 'http://127.0.0.1:7890/');
+  assert.equal(normalizeProxyUrl('mixed://user:pass@127.0.0.1:7890'), 'http://user:pass@127.0.0.1:7890/');
   for (const protocol of ['http', 'https', 'socks', 'socks4', 'socks4a', 'socks5', 'socks5h']) {
     assert.match(normalizeProxyUrl(`${protocol}://user:pass@127.0.0.1:1080`), new RegExp(`^${protocol}:`));
   }
   assert.throws(() => normalizeProxyUrl('ftp://127.0.0.1:21'), /仅支持/);
+  assert.throws(() => normalizeProxyUrl('tuic://user:pass@example.com:443'), /TUIC 分享链接不能直接.*sing-box.*HTTP\/SOCKS/);
+  assert.throws(() => normalizeProxyUrl('vless://uuid@example.com:443?type=tcp'), /VLESS 分享链接不能直接.*Xray.*127\.0\.0\.1:7890/);
+  assert.throws(() => normalizeProxyUrl('vmess://eyJhZGQiOiJleGFtcGxlLmNvbSJ9'), /VMess 分享链接不能直接.*socks5h:\/\/127\.0\.0\.1:1080/);
+  assert.throws(() => normalizeProxyUrl('trojan://password@example.com:443'), /Trojan 分享链接不能直接/);
+  assert.throws(() => normalizeProxyUrl('ss://YWVzLTI1Ni1nY206cGFzcw@example.com:8388'), /Shadowsocks 分享链接不能直接/);
+  assert.throws(() => normalizeProxyUrl('hysteria2://password@example.com:443'), /Hysteria2 分享链接不能直接/);
   assert.throws(() => normalizeProxyUrl('socks5://127.0.0.1:0'), /1–65535/);
+  assert.throws(() => normalizeProxyUrl('mixed://127.0.0.1:7890/path'), /不能包含路径/);
   assert.throws(() => normalizeProxyUrl('http://127.0.0.1:7890/path'), /不能包含路径/);
   assert.throws(() => normalizeProxyUrl('socks5://user:%zz@127.0.0.1:1080'), /百分号编码/);
 });

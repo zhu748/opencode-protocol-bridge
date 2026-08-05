@@ -113,6 +113,9 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
 
     const invalidRoute = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', proxyUrl: '', modelRoutes: { bad: { protocol: 'invalid' } } }) });
     assert.equal(invalidRoute.status, 400);
+    const invalidImageHandoff = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, imageHandoffModels: [{ provider: 'other', model: 'bad' }] }) });
+    assert.equal(invalidImageHandoff.status, 400);
+    assert.match((await invalidImageHandoff.json()).error, /provider 无效/);
     const invalidToolFallback = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', proxyUrl: '', modelRoutes: { bad: { toolChoiceFallback: 'required' } } }) });
     assert.equal(invalidToolFallback.status, 400);
     const invalidPromptRule = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', proxyUrl: '', modelRoutes: {}, promptRewriteRules: [{ name: '空规则', find: '' }] }) });
