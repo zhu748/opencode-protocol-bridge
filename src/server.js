@@ -433,9 +433,9 @@ function withStoredCredentials(config, provider, entries) {
   return { ...config, [fields.collection]: entries, [fields.legacyKey]: '', [fields.legacyProxy]: '' };
 }
 
-function configPrecondition(req) {
+function configPrecondition(req, snapshot) {
   const value = req.headers['if-match'];
-  if (value === undefined) return undefined;
+  if (value === undefined) return configRevision(snapshot);
   if (typeof value !== 'string') throw Object.assign(new Error('If-Match 配置修订号格式无效'), { status: 400 });
   const match = /^"([a-f0-9]{32})"$/.exec(value.trim());
   if (!match) throw Object.assign(new Error('If-Match 配置修订号格式无效'), { status: 400 });
@@ -624,7 +624,7 @@ async function adminApiOperation(req, res, url, config) {
     return json(res, 200, { ok: true, credential: credentialHealth.snapshot(provider, [credential])[0] });
   }
   if (url.pathname === '/api/provider-credentials' && req.method === 'POST') {
-    const expectedRevision = configPrecondition(req);
+    const expectedRevision = configPrecondition(req, config);
     const body = await bodyJson(req);
     const provider = body.provider === 'go' ? 'go' : body.provider === 'zen' ? 'zen' : null;
     if (!provider) return json(res, 400, { error: 'provider 仅支持 zen 或 go' });
@@ -643,7 +643,7 @@ async function adminApiOperation(req, res, url, config) {
   const providerCredentialMatch = url.pathname.match(/^\/api\/provider-credentials\/(zen|go)\/([A-Za-z0-9_-]{1,64})$/);
   if (providerCredentialMatch && req.method === 'PUT') {
     const [, provider, id] = providerCredentialMatch;
-    const expectedRevision = configPrecondition(req);
+    const expectedRevision = configPrecondition(req, config);
     const body = await bodyJson(req);
     const saved = await updateConfig((current) => {
       const entries = storedProviderCredentialEntries(current, provider);
@@ -660,7 +660,7 @@ async function adminApiOperation(req, res, url, config) {
   }
   if (providerCredentialMatch && req.method === 'DELETE') {
     const [, provider, id] = providerCredentialMatch;
-    const expectedRevision = configPrecondition(req);
+    const expectedRevision = configPrecondition(req, config);
     const saved = await updateConfig((current) => {
       const entries = storedProviderCredentialEntries(current, provider);
       if (!entries.some((entry) => entry.id === id)) throw Object.assign(new Error('面板 Key 不存在'), { status: 404 });
@@ -687,7 +687,7 @@ async function adminApiOperation(req, res, url, config) {
   }
   if (url.pathname === '/api/config' && req.method === 'PUT') {
     const next = await bodyJson(req, MAX_CONFIG_REQUEST_BYTES);
-    const expectedRevision = configPrecondition(req);
+    const expectedRevision = configPrecondition(req, config);
     const updated = { ...config };
     const normalizedProxies = {};
     for (const [field, label] of [['proxyUrl', '默认代理'], ['zenProxyUrl', 'Zen 代理'], ['goProxyUrl', 'Go 代理']]) {
@@ -754,7 +754,7 @@ async function adminApiOperation(req, res, url, config) {
     return runtimeConfigResponse(res, 200, saved);
   }
   if (url.pathname === '/api/password' && req.method === 'PUT') {
-    const expectedRevision = configPrecondition(req);
+    const expectedRevision = configPrecondition(req, config);
     const next = await bodyJson(req);
     if (typeof next.currentPassword !== 'string' || next.currentPassword.length > 256 || !await verifyPassword(next.currentPassword, config.password)) return json(res, 401, { error: '当前密码错误' });
     if (!validAlphaNumericSecret(next.newPassword)) return json(res, 400, { error: '新密码必须是 6–256 位英文字母或数字' });
@@ -763,7 +763,7 @@ async function adminApiOperation(req, res, url, config) {
     return json(res, 200, { ok: true }, { 'set-cookie': sessionCookie(req, '', 0) });
   }
   if (url.pathname === '/api/token/regenerate' && req.method === 'POST') {
-    const expectedRevision = configPrecondition(req);
+    const expectedRevision = configPrecondition(req, config);
     const updated = await updateConfig((current) => ({ ...current, clientToken: randomClientToken() }), { expectedRevision });
     return configMutationResponse(res, 200, { token: updated.clientToken }, updated);
   }
@@ -771,7 +771,7 @@ async function adminApiOperation(req, res, url, config) {
     return json(res, 200, (Array.isArray(config.apiClients) ? config.apiClients : []).map(publicClient));
   }
   if (url.pathname === '/api/clients' && req.method === 'POST') {
-    const expectedRevision = configPrecondition(req);
+    const expectedRevision = configPrecondition(req, config);
     const body = await bodyJson(req);
     const name = String(body.name || '').trim();
     if (!name || name.length > 64) return json(res, 400, { error: '客户端名称长度必须为 1–64 个字符' });
@@ -791,7 +791,7 @@ async function adminApiOperation(req, res, url, config) {
   }
   const regenerateClientMatch = url.pathname.match(/^\/api\/clients\/([a-f0-9]{16})\/regenerate$/);
   if (regenerateClientMatch && req.method === 'POST') {
-    const expectedRevision = configPrecondition(req);
+    const expectedRevision = configPrecondition(req, config);
     const token = `ocb${randomBytes(32).toString('hex')}`;
     let replacement;
     const saved = await updateConfig((current) => {
@@ -805,7 +805,7 @@ async function adminApiOperation(req, res, url, config) {
   }
   const clientMatch = url.pathname.match(/^\/api\/clients\/([a-f0-9]{16})$/);
   if (clientMatch && ['PUT', 'DELETE'].includes(req.method)) {
-    const expectedRevision = configPrecondition(req);
+    const expectedRevision = configPrecondition(req, config);
     if (req.method === 'DELETE') {
       const saved = await updateConfig((current) => {
         const clients = Array.isArray(current.apiClients) ? current.apiClients : [];

@@ -117,13 +117,36 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal('token' in clients[0], false);
     assert.equal('tokenHash' in clients[0], false);
 
-    const concurrentCreates = await Promise.all(['并发客户端 A', '并发客户端 B'].map((name) => fetch(`http://127.0.0.1:${bridgePort}/api/clients`, {
+    const concurrentNames = ['并发客户端 A', '并发客户端 B'];
+    const concurrentCreates = await Promise.all(concurrentNames.map((name) => fetch(`http://127.0.0.1:${bridgePort}/api/clients`, {
       method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ name, maxConcurrentRequests: 2 })
     })));
-    assert.deepEqual(concurrentCreates.map((result) => result.status), [201, 201]);
-    const concurrentClients = await Promise.all(concurrentCreates.map((result) => result.json()));
+    assert.deepEqual(concurrentCreates.map((result) => result.status).sort((left, right) => left - right), [201, 412]);
+    const concurrentClients = [];
+    for (let index = 0; index < concurrentCreates.length; index++) {
+      const result = concurrentCreates[index];
+      if (result.status === 201) {
+        concurrentClients.push(await result.json());
+        continue;
+      }
+      assert.match((await result.json()).error, /其他页面修改/);
+      const latestConfig = await fetch(`http://127.0.0.1:${bridgePort}/api/config`, { headers: { cookie } }).then((response) => response.json());
+      const retry = await fetch(`http://127.0.0.1:${bridgePort}/api/clients`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie, 'if-match': `"${latestConfig.revision}"` },
+        body: JSON.stringify({ name: concurrentNames[index], maxConcurrentRequests: 2 })
+      });
+      assert.equal(retry.status, 201);
+      concurrentClients.push(await retry.json());
+    }
     assert.equal((await fetch(`http://127.0.0.1:${bridgePort}/api/clients`, { headers: { cookie } }).then((result) => result.json())).length, 3);
-    await Promise.all(concurrentClients.map((client) => fetch(`http://127.0.0.1:${bridgePort}/api/clients/${client.id}`, { method: 'DELETE', headers: { cookie } })));
+    for (const client of concurrentClients) {
+      const latestConfig = await fetch(`http://127.0.0.1:${bridgePort}/api/config`, { headers: { cookie } }).then((result) => result.json());
+      const deleted = await fetch(`http://127.0.0.1:${bridgePort}/api/clients/${client.id}`, {
+        method: 'DELETE', headers: { cookie, 'if-match': `"${latestConfig.revision}"` }
+      });
+      assert.equal(deleted.status, 200);
+    }
 
     const response = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token, 'anthropic-beta': 'must-not-cross-protocols' },

@@ -375,7 +375,7 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
   }
 });
 
-test('并发首次初始化只有一个请求可以写入配置', { timeout: 10_000 }, async () => {
+test('并发首次初始化和密码变更都只允许一个请求写入配置', { timeout: 10_000 }, async () => {
   const port = 20_000 + Math.floor(Math.random() * 10_000);
   const configFile = resolve(import.meta.dirname, `../data/setup-race-${randomUUID()}.json`);
   const child = spawn(process.execPath, ['src/server.js'], {
@@ -434,8 +434,22 @@ test('并发首次初始化只有一个请求可以写入配置', { timeout: 10_
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ password })
     });
-    assert.equal((await login(winner.password)).status, 200);
+    const winnerLogin = await login(winner.password);
+    assert.equal(winnerLogin.status, 200);
     assert.equal((await login(loser.password)).status, 401);
+
+    const winnerCookie = winnerLogin.headers.get('set-cookie').split(';', 1)[0];
+    const changePassword = (newPassword) => fetch(`http://127.0.0.1:${port}/api/password`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', cookie: winnerCookie },
+      body: JSON.stringify({ currentPassword: winner.password, newPassword })
+    }).then((response) => ({ response, newPassword }));
+    const passwordChanges = await Promise.all([changePassword('newpass001'), changePassword('newpass002')]);
+    assert.deepEqual(passwordChanges.map(({ response }) => response.status).sort((left, right) => left - right), [200, 412]);
+    const acceptedPassword = passwordChanges.find(({ response }) => response.status === 200).newPassword;
+    const rejectedPassword = passwordChanges.find(({ response }) => response.status === 412).newPassword;
+    assert.equal((await login(acceptedPassword)).status, 200);
+    assert.equal((await login(rejectedPassword)).status, 401);
   } finally {
     if (child.exitCode === null) {
       child.kill();

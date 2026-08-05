@@ -365,7 +365,7 @@ $env:OLD_CONFIG_ENCRYPTION_KEY = "旧主密钥"
 $env:CONFIG_ENCRYPTION_KEY = "新主密钥"
 npm run rekey
 ```
-- 首次初始化采用单飞写入并在保存前重新读取最新配置；并发或延迟到达的初始化请求不能覆盖已经设置的管理密码。管理密码使用随机盐的 scrypt 哈希保存；登录 Cookie 为 HttpOnly、SameSite=Strict，可信 HTTPS 反向代理下同时启用 Secure 与 HSTS。
+- 首次初始化采用单飞写入并在保存前重新读取最新配置；并发或延迟到达的初始化请求不能覆盖已经设置的管理密码。所有持久化管理操作都会绑定请求开始时的配置修订，即使 API 调用方省略 `If-Match`，并发旧快照也会返回 412 而不是覆盖较新的设置；显式携带管理 API 返回的 ETag 仍是跨请求更新的推荐方式。管理密码使用随机盐的 scrypt 哈希保存；登录 Cookie 为 HttpOnly、SameSite=Strict，可信 HTTPS 反向代理下同时启用 Secure 与 HSTS。
 - 命名客户端令牌由高强度随机数生成，配置中仅保存不可逆摘要；主访问令牌仍受 `CONFIG_ENCRYPTION_KEY` 加密保护。
 - 请求日志不包含提示词、响应正文或密钥。持久化默认关闭，启用后应像其他运行日志一样限制文件访问权限。
 - 依赖安装默认关闭第三方生命周期脚本并使用 `package-lock.json`；CI 固定第三方 Action 的完整提交 SHA，执行生产依赖漏洞与 npm 注册表签名审计，并为 Node 24 构建生成保留 14 天的 CycloneDX SBOM。也可在本地运行 `npm run --silent sbom:prod` 输出依赖清单。
