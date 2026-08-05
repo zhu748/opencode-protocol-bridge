@@ -1,4 +1,4 @@
-FROM node:24.18.0-alpine3.24
+FROM node:24.18.1-alpine3.24
 WORKDIR /app
 COPY package*.json .npmrc ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
