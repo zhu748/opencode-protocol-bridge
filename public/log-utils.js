@@ -12,7 +12,7 @@ export function filterRequestLogs(items, { query = '', provider = 'all', status 
     if (status === 'server-error' && item.status < 500) return false;
     if (status === 'rate-limit' && item.status !== 429) return false;
     if (!needle) return true;
-    return [item.requestId, item.upstreamRequestId, item.clientName, item.model, item.upstreamModel, item.provider, item.protocol, item.credentialLabel, item.errorCode, item.error]
+    return [item.requestId, item.upstreamRequestId, item.clientName, item.model, item.upstreamModel, item.provider, item.protocol, item.credentialId, item.credentialLabel, item.credentialAttempts, item.retryAfter, item.errorCode, item.error]
       .some((value) => String(value || '').toLocaleLowerCase().includes(needle));
   });
 }

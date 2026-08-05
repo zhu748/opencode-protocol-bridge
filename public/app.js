@@ -251,6 +251,14 @@ function requestIdButton(value, label = '') {
   return `<button class="log-id-copy" type="button" data-copy-value="${escapeHtml(value)}" aria-label="复制 ${escapeHtml(label || '请求 ID')}" title="复制 ${escapeHtml(label || '请求 ID')}：${escapeHtml(value)}"><code>${escapeHtml(compactIdentifier(value))}</code></button>`;
 }
 
+function credentialLabel(item) {
+  const provider = String(item.provider || '').toUpperCase();
+  const [source, slot] = String(item.credentialId || '').split(':');
+  if (source === 'environment' && slot) return `${provider} 环境 #${slot}`;
+  if (source === 'config') return `${provider} · ${item.credentialLabel || '面板 Key'}`;
+  return item.credentialLabel || '—';
+}
+
 function renderLogs() {
   const items = filteredLogs();
   $('#empty-logs').textContent = requestLogItems.length ? '没有符合筛选条件的请求记录' : '还没有请求记录';
@@ -267,12 +275,14 @@ function renderLogs() {
       ? `<small class="log-upstream-id">上游 ${requestIdButton(item.upstreamRequestId, '上游请求 ID')}</small>`
       : '';
     const retryAfter = item.retryAfter ? `<small class="log-retry-after">等待 ${escapeHtml(item.retryAfter)}</small>` : '';
+    const attempts = Number(item.credentialAttempts) > 1 ? `<small class="log-key-attempts">尝试 ${formatNumber(item.credentialAttempts)} 把 Key</small>` : '';
+    const credential = `${escapeHtml(credentialLabel(item))}${attempts}`;
     const phases = [
       Object.hasOwn(item, 'upstreamWaitMs') ? `等待 ${formatDuration(item.upstreamWaitMs)}` : '',
       Object.hasOwn(item, 'upstreamBodyMs') ? `响应体 ${formatDuration(item.upstreamBodyMs)}` : ''
     ].filter(Boolean).join(' · ');
     const timing = `${formatDuration(item.duration)}${phases ? `<small class="log-timing">${phases}</small>` : ''}`;
-    return `<tr><td>${new Date(item.time).toLocaleString()}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.protocol)}</td><td class="${statusClass}">${item.status}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
+    return `<tr><td>${new Date(item.time).toLocaleString()}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}</td><td class="${statusClass}">${item.status}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
   }).join('');
 }
 

@@ -419,6 +419,7 @@
 .log-error,
 .log-upstream-id,
 .log-retry-after,
+.log-key-attempts,
 .log-timing {
   display: block;
   overflow: hidden;
@@ -438,6 +439,16 @@
 
 .log-retry-after {
   color: var(--orange);
+}
+
+.log-key {
+  min-width: 110px;
+}
+
+.log-key-attempts {
+  max-width: 160px;
+  color: var(--orange);
+  font-variant-numeric: tabular-nums;
 }
 
 .log-timing {

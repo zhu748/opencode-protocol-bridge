@@ -5,7 +5,7 @@ import { compactIdentifier, filterRequestLogs, formatCooldownRemaining, requestL
 const logs = [
   { time: '2026-08-04T11:30:00Z', requestId: 'local-success', upstreamRequestId: 'trace-a', provider: 'zen', status: 200, model: 'model-a', clientName: '工作机' },
   { time: '2026-08-04T10:30:00Z', requestId: 'local-rate', upstreamRequestId: 'trace-b', provider: 'go', status: 429, model: 'model-b', error: 'rate limited' },
-  { time: '2026-08-03T11:30:00Z', requestId: 'local-bad', provider: 'go', status: 401, upstreamModel: 'real-model', credentialLabel: '备用' },
+  { time: '2026-08-03T11:30:00Z', requestId: 'local-bad', provider: 'go', status: 401, upstreamModel: 'real-model', credentialId: 'config:backup', credentialLabel: '备用', credentialAttempts: 2, retryAfter: '9' },
   { time: 'invalid', requestId: 'local-upstream', provider: 'zen', status: 502, protocol: 'claude → chat', errorCode: 'upstream_dns_error', error: '连接失败' }
 ];
 
@@ -16,6 +16,8 @@ test('日志筛选可组合关键词、上游与互斥状态', () => {
   assert.deepEqual(filterRequestLogs(logs, { status: 'server-error' }).map((item) => item.requestId), ['local-upstream']);
   assert.deepEqual(filterRequestLogs(logs, { query: 'TRACE-B', provider: 'go', status: 'rate-limit' }).map((item) => item.requestId), ['local-rate']);
   assert.deepEqual(filterRequestLogs(logs, { query: '备用' }).map((item) => item.requestId), ['local-bad']);
+  assert.deepEqual(filterRequestLogs(logs, { query: 'config:backup' }).map((item) => item.requestId), ['local-bad']);
+  assert.deepEqual(filterRequestLogs(logs, { query: '9' }).map((item) => item.requestId), ['local-bad']);
   assert.deepEqual(filterRequestLogs(logs, { query: 'upstream_dns_error' }).map((item) => item.requestId), ['local-upstream']);
   const now = Date.parse('2026-08-04T12:00:00Z');
   assert.deepEqual(filterRequestLogs(logs, { timeRange: '1h', now }).map((item) => item.requestId), ['local-success']);

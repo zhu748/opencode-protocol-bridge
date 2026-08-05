@@ -21,6 +21,9 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /setInterval\(updateCooldownCountdowns, 1000\)/);
   assert.match(script, /x-opencode-upstream-request-id|upstreamRequestId/);
   assert.match(script, /function filteredLogs\(\)/);
+  assert.match(script, /function credentialLabel\(item\)/);
+  assert.match(html, /Key \/ 尝试/);
+  assert.match(script, /log-key-attempts/);
   assert.match(script, /navigator\.clipboard\.writeText\(button\.dataset\.copyValue\)/);
   assert.match(script, /requestLogsToCsv\(items\)/);
   assert.match(html, /id="stats-avg-phases"/);
