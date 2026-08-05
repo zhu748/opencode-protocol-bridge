@@ -36,6 +36,7 @@ if (!Number.isInteger(STREAM_WRITE_TIMEOUT_MS) || STREAM_WRITE_TIMEOUT_MS < 100 
 const MAX_HTTP_HEADER_BYTES = 16 * 1024;
 const MAX_HTTP_HEADERS = 128;
 const MAX_REQUESTS_PER_SOCKET = 1000;
+const MAX_MODEL_COUNT = 5000;
 const CONNECTIONS_CHECKING_INTERVAL_MS = 1000;
 const SINGLETON_REQUEST_HEADERS = new Set([
   'authorization', 'x-api-key', 'cookie', 'host', 'origin', 'sec-fetch-site',
@@ -110,7 +111,8 @@ function upstreamFailureStatus(error) {
 function upstreamOperationFailure(error) {
   const responseCodes = {
     UPSTREAM_BODY_TOO_LARGE: 'upstream_response_too_large',
-    UPSTREAM_INVALID_JSON: 'upstream_invalid_json'
+    UPSTREAM_INVALID_JSON: 'upstream_invalid_json',
+    UPSTREAM_INVALID_RESPONSE: 'upstream_invalid_response'
   };
   return {
     status: error?.upstreamCode ? upstreamFailureStatus(error) : 502,
@@ -314,16 +316,46 @@ function recordCredentialResponse(provider, credential, response) {
   credentialHealth.recordResponse(provider, credential, response.status, response.headers.get('retry-after'));
 }
 
-async function readModelResponse(response, label, jsonBody = false) {
-  const text = await readResponseText(response, MAX_MODEL_LIST_BYTES, label);
-  if (!response.ok && !jsonBody) return text;
-  let parsed;
-  try { parsed = JSON.parse(text); }
-  catch { throw Object.assign(new Error(`${label}格式无效`), { code: 'UPSTREAM_INVALID_JSON' }); }
-  return jsonBody ? parsed : text;
+function modelUpstreamErrorBody(status) {
+  const message = status === 401
+    ? 'OpenCode 上游拒绝了模型列表请求（HTTP 401），请检查 Key'
+    : status === 403
+      ? 'OpenCode 上游拒绝了模型列表请求（HTTP 403），请检查 Key 权限'
+      : status === 429
+        ? 'OpenCode 上游模型列表请求过于频繁（HTTP 429），请稍后重试'
+        : `OpenCode 上游模型列表返回 HTTP ${status}`;
+  return { error: { message, type: 'upstream_error', code: 'upstream_http_error' } };
 }
 
-async function listModelsWithCredentialFailover(config, provider, signal, { jsonBody = false, label = '模型列表' } = {}) {
+function modelResponseStatus(response) {
+  if (response.ok) return 200;
+  return response.status >= 400 && response.status <= 599 ? response.status : 502;
+}
+
+async function readModelResponse(response, label) {
+  const text = await readResponseText(response, response.ok ? MAX_MODEL_LIST_BYTES : MAX_UPSTREAM_ERROR_BYTES, label);
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch {
+    if (!response.ok) return modelUpstreamErrorBody(response.status);
+    throw Object.assign(new Error(`${label}格式无效`), { code: 'UPSTREAM_INVALID_JSON' });
+  }
+  if (!response.ok) return modelUpstreamErrorBody(response.status);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object' || !Array.isArray(parsed.data)) {
+    throw Object.assign(new Error(`${label}结构无效：缺少 data 数组`), { code: 'UPSTREAM_INVALID_RESPONSE' });
+  }
+  if (parsed.data.length > MAX_MODEL_COUNT) {
+    throw Object.assign(new Error(`${label}结构无效：模型数量超过 ${MAX_MODEL_COUNT}`), { code: 'UPSTREAM_INVALID_RESPONSE' });
+  }
+  const invalidIndex = parsed.data.findIndex((model) => !model || Array.isArray(model) || typeof model !== 'object'
+    || typeof model.id !== 'string' || !model.id.trim() || model.id.length > 256 || /[\u0000-\u001f\u007f]/.test(model.id));
+  if (invalidIndex !== -1) {
+    throw Object.assign(new Error(`${label}结构无效：data[${invalidIndex}].id 无效`), { code: 'UPSTREAM_INVALID_RESPONSE' });
+  }
+  return parsed;
+}
+
+async function listModelsWithCredentialFailover(config, provider, signal, { label = '模型列表' } = {}) {
   const credentials = providerCredentials(config, provider);
   const initial = credentialHealth.select(provider, credentials);
   if (!initial.credential) return { response: null, credential: null, attempts: 0, selection: initial };
@@ -369,7 +401,7 @@ async function listModelsWithCredentialFailover(config, provider, signal, { json
     }
     let body;
     try {
-      body = await readModelResponse(response, label, jsonBody);
+      body = await readModelResponse(response, label);
     } catch (error) {
       if (signal?.aborted) {
         if (!responseRecorded) credentialHealth.releaseProbe(provider, credential);
@@ -892,9 +924,7 @@ async function adminApiOperation(req, res, url, config) {
         if (result.attempts > 1) res.setHeader('x-opencode-key-attempts', String(result.attempts));
         const response = result.response;
         applyUpstreamResponseHeaders(res, response);
-        const text = result.body;
-        res.writeHead(response.status, { 'content-type': response.headers.get('content-type') || 'application/json; charset=utf-8' });
-        return res.end(text);
+        return json(res, modelResponseStatus(response), result.body);
       } catch (error) {
         if (signal.aborted) return;
         if (error.credentialAttempts > 1) res.setHeader('x-opencode-key-attempts', String(error.credentialAttempts));
@@ -934,10 +964,9 @@ async function adminApiOperation(req, res, url, config) {
         responseRecorded = true;
       }
       applyUpstreamResponseHeaders(res, response);
-      const text = await readModelResponse(response, '模型列表');
+      const modelBody = await readModelResponse(response, '模型列表');
       if (selected && !body.apiKey && !responseRecorded) recordCredentialResponse(provider, selected, response);
-      res.writeHead(response.status, { 'content-type': response.headers.get('content-type') || 'application/json; charset=utf-8' });
-      return res.end(text);
+      return json(res, modelResponseStatus(response), modelBody);
     } catch (error) {
       if (signal.aborted) {
         if (selected && !body.apiKey && !responseRecorded) credentialHealth.releaseProbe(provider, selected);
@@ -1381,7 +1410,7 @@ const server = createServer({
           const provider = apiScope.provider || (goModel ? 'go' : (['zen', 'go'].includes(requestedProvider) ? requestedProvider : config.defaultProvider));
           const upstreamModel = goModel ? requestedModel.slice('opencode-go/'.length) : requestedModel.startsWith('opencode/') ? requestedModel.slice('opencode/'.length) : requestedModel;
           try {
-            const result = await listModelsWithCredentialFailover(config, provider, modelSignal, { jsonBody: true });
+            const result = await listModelsWithCredentialFailover(config, provider, modelSignal);
             if (!result.response) {
               applyCredentialRetryHeader(res, result.selection);
               return json(res, 503, { error: { message: credentialUnavailableMessage(provider, result.selection), type: result.selection.reason === 'cooldown' ? 'overloaded_error' : 'configuration_error' } });
@@ -1390,7 +1419,7 @@ const server = createServer({
             const upstream = result.response;
             applyUpstreamResponseHeaders(res, upstream);
             const body = result.body;
-            if (!upstream.ok) return json(res, upstream.status, body);
+            if (!upstream.ok) return json(res, modelResponseStatus(upstream), body);
             const model = (Array.isArray(body.data) ? body.data : []).find((item) => item.id === upstreamModel);
             if (!model) return json(res, 404, { error: { message: `模型 ${requestedModel} 不存在`, type: 'not_found_error' } });
             return json(res, 200, { ...model, id: requestedModel, provider });
@@ -1413,7 +1442,7 @@ const server = createServer({
             const configuredProviders = ['zen', 'go'].filter((item) => providerCredentials(config, item).length);
             if (!configuredProviders.length) return json(res, 503, { error: { message: '尚未配置 OpenCode Zen 或 Go 密钥', type: 'configuration_error' } });
             const settled = await Promise.allSettled(configuredProviders.map(async (item) => {
-              const result = await listModelsWithCredentialFailover(config, item, modelSignal, { jsonBody: true, label: `${item} 模型列表` });
+              const result = await listModelsWithCredentialFailover(config, item, modelSignal, { label: `${item} 模型列表` });
               if (!result.response) {
                 throw Object.assign(new Error(credentialUnavailableMessage(item, result.selection)), {
                   provider: item, credentialAttempts: result.attempts, selection: result.selection
@@ -1454,9 +1483,7 @@ const server = createServer({
             if (result.attempts > 1) res.setHeader('x-opencode-key-attempts', String(result.attempts));
             const upstream = result.response;
             applyUpstreamResponseHeaders(res, upstream);
-            const content = result.body;
-            res.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') || 'application/json; charset=utf-8' });
-            return res.end(content);
+            return json(res, modelResponseStatus(upstream), result.body);
           } catch (error) {
             if (modelSignal.aborted) return;
             if (error.credentialAttempts > 1) res.setHeader('x-opencode-key-attempts', String(error.credentialAttempts));

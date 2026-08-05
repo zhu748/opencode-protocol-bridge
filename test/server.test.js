@@ -1685,6 +1685,10 @@ test('模型发现会在 200 正文断开后切换 Key 并保持取消中性', {
   const upstream = createHttpServer((req, res) => {
     const authorization = req.headers.authorization;
     authorizations.push(authorization);
+    if (authorization === 'Bearer html-error-key') {
+      res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+      return res.end('<html>UPSTREAM_PRIVATE_MARKER</html>');
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     if (authorization === 'Bearer first-model-key') {
       firstKeyCalls++;
@@ -1701,6 +1705,7 @@ test('模型发现会在 200 正文断开后切换 Key 并保持取消中性', {
       return;
     }
     if (authorization === 'Bearer malformed-model-key') return res.end('{"broken":');
+    if (authorization === 'Bearer invalid-shape-key') return res.end(JSON.stringify({ object: 'list', data: [{ object: 'model' }] }));
     return res.end(JSON.stringify({ object: 'list', data: [{ id: 'gpt-model', object: 'model' }] }));
   });
   upstream.listen(0, '127.0.0.1');
@@ -1715,8 +1720,10 @@ test('模型发现会在 200 正文断开后切换 Key 并保持取消中性', {
     CONFIG_ENCRYPTION_KEY: 'model-body-failover-master-key',
     OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
     OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_ZEN_KEY: 'html-error-key',
     OPENCODE_GO_KEY_1: 'first-model-key',
     OPENCODE_GO_KEY_2: 'second-model-key',
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`,
     OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
   });
   const child = spawn(process.execPath, ['src/server.js'], {
@@ -1740,8 +1747,8 @@ test('模型发现会在 200 正文断开后切换 Key 并保持取消中性', {
     assert.deepEqual((await models.json()).data.map((model) => model.id), ['gpt-model']);
     assert.deepEqual(authorizations, ['Bearer first-model-key', 'Bearer second-model-key']);
     const failoverStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
-    const failed = failoverStats.credentialHealth.find((item) => item.credentialId === 'environment:1');
-    const healthy = failoverStats.credentialHealth.find((item) => item.credentialId === 'environment:2');
+    const failed = failoverStats.credentialHealth.find((item) => item.provider === 'go' && item.credentialId === 'environment:1');
+    const healthy = failoverStats.credentialHealth.find((item) => item.provider === 'go' && item.credentialId === 'environment:2');
     assert.equal(failed.state, 'degraded');
     assert.equal(failed.consecutiveFailures, 1);
     assert.equal(failed.lastFailureKind, 'network');
@@ -1759,7 +1766,7 @@ test('模型发现会在 200 正文断开后切换 Key 并保持取消中性', {
     assert.equal(tested.status, 502);
     assert.equal((await tested.json()).code, 'upstream_connection_reset');
     const testedStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
-    assert.equal(testedStats.credentialHealth.find((item) => item.credentialId === 'environment:1').consecutiveFailures, 1);
+    assert.equal(testedStats.credentialHealth.find((item) => item.provider === 'go' && item.credentialId === 'environment:1').consecutiveFailures, 1);
 
     assert.equal((await resetFirst()).status, 200);
     const cancellation = new AbortController();
@@ -1776,7 +1783,7 @@ test('模型发现会在 200 正文断开后切换 Key 并保持取消中性', {
       new Promise((_, reject) => setTimeout(() => reject(new Error('取消后模型正文连接未及时关闭')), 1_000))
     ]);
     const canceledStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
-    const canceledCredential = canceledStats.credentialHealth.find((item) => item.credentialId === 'environment:1');
+    const canceledCredential = canceledStats.credentialHealth.find((item) => item.provider === 'go' && item.credentialId === 'environment:1');
     assert.equal(canceledCredential.state, 'unknown');
     assert.equal(canceledCredential.consecutiveFailures, 0);
 
@@ -1786,6 +1793,39 @@ test('模型发现会在 200 正文断开后切换 Key 并保持取消中性', {
     });
     assert.equal(malformed.status, 502);
     assert.equal((await malformed.json()).code, 'upstream_invalid_json');
+
+    const invalidShape = await fetch(`http://127.0.0.1:${port}/api/models/test`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'go', apiKey: 'invalid-shape-key' })
+    });
+    assert.equal(invalidShape.status, 502);
+    assert.equal((await invalidShape.json()).code, 'upstream_invalid_response');
+
+    const directHtmlError = await fetch(`http://127.0.0.1:${port}/api/models/test`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'zen', apiKey: 'html-error-key' })
+    });
+    assert.equal(directHtmlError.status, 403);
+    assert.match(directHtmlError.headers.get('content-type'), /^application\/json/);
+    const directHtmlBody = await directHtmlError.json();
+    assert.equal(directHtmlBody.error.code, 'upstream_http_error');
+    assert.doesNotMatch(JSON.stringify(directHtmlBody), /UPSTREAM_PRIVATE_MARKER/);
+
+    const adminHtmlError = await fetch(`http://127.0.0.1:${port}/api/models?provider=zen`, { headers: { cookie } });
+    assert.equal(adminHtmlError.status, 403);
+    assert.match(adminHtmlError.headers.get('content-type'), /^application\/json/);
+    assert.doesNotMatch(JSON.stringify(await adminHtmlError.json()), /UPSTREAM_PRIVATE_MARKER/);
+    const resetZen = await fetch(`http://127.0.0.1:${port}/api/credential-health/reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'zen', credentialId: 'environment:1' })
+    });
+    assert.equal(resetZen.status, 200);
+    const publicHtmlError = await fetch(`http://127.0.0.1:${port}/zen/v1/models`, { headers: { authorization: 'Bearer Api123' } });
+    assert.equal(publicHtmlError.status, 403);
+    assert.match(publicHtmlError.headers.get('content-type'), /^application\/json/);
+    const publicHtmlBody = await publicHtmlError.json();
+    assert.equal(publicHtmlBody.error.code, 'upstream_http_error');
+    assert.doesNotMatch(JSON.stringify(publicHtmlBody), /UPSTREAM_PRIVATE_MARKER/);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});
