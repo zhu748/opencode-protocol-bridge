@@ -20,11 +20,17 @@ test('管理会话验证签名和过期时间', () => {
   const valid = createSession(secret);
   assert.equal(verifySession(valid, secret), true);
   assert.equal(verifySession(`${valid}x`, secret), false);
+  assert.equal(verifySession(`${valid}.ignored`, secret), false);
   assert.equal(verifySession(valid, 'other-secret'), false);
 
   const payload = Buffer.from(JSON.stringify({ exp: Date.now() - 1000 })).toString('base64url');
   const signature = createHmac('sha256', secret).update(payload).digest('base64url');
   assert.equal(verifySession(`${payload}.${signature}`, secret), false);
+
+  const stringExpiry = Buffer.from(JSON.stringify({ exp: String(Date.now() + 60_000) })).toString('base64url');
+  const stringExpirySignature = createHmac('sha256', secret).update(stringExpiry).digest('base64url');
+  assert.equal(verifySession(`${stringExpiry}.${stringExpirySignature}`, secret), false);
+  assert.equal(verifySession('x'.repeat(1025), secret), false);
 });
 
 test('登录失败达到阈值后限速，成功登录会清除记录', () => {

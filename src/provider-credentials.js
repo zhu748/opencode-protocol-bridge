@@ -93,7 +93,7 @@ function cleanSingle(raw) {
 function normalizedProxy(raw, name) {
   const value = String(raw ?? '').trim();
   if (!value) return '';
-  if (value.length > 2048) throw new Error(`${name} 不能超过 2048 个字符`);
+  if (value.length > 4096) throw new Error(`${name} 不能超过 4096 个字符`);
   try { return normalizeProxyUrl(value); }
   catch (error) { throw new Error(`${name} 无效：${error.message}`); }
 }

@@ -6,6 +6,22 @@ export async function optionalLoad(loader, fallback) {
   }
 }
 
+export function createLatestRequestGate() {
+  let current = null;
+  return {
+    begin() {
+      current?.controller.abort();
+      current = { controller: new AbortController() };
+      return current;
+    },
+    isCurrent(candidate) { return candidate === current; },
+    invalidate() {
+      current?.controller.abort();
+      current = null;
+    }
+  };
+}
+
 export function summarizeSourceFailures(failures) {
   const entries = [...(failures instanceof Map ? failures : new Map())];
   if (!entries.length) return { message: '', detail: '' };

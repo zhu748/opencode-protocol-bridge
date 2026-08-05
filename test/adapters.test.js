@@ -288,6 +288,37 @@ test('同协议流式 Chat 也会请求 usage 且只把真实 token 字段算作
   assert.equal(hasUsageData({ usage: { prompt_tokens_details: { cached_tokens: 0 } } }), true);
   assert.equal(hasUsageData({ usage: { input_tokens_details: { cache_write_tokens: 0 } } }), true);
   assert.equal(hasUsageData({ usage: { prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0 } }), true);
+  assert.equal(hasUsageData({ usage: { prompt_tokens: 'not-a-number', completion_tokens: -1 } }), false);
+});
+
+test('跨协议 usage 规范为非负安全整数并正确计算总量', () => {
+  const normalized = normalizeResponse({
+    id: 'chat_usage_bounds', model: 'chat-model',
+    choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+    usage: {
+      prompt_tokens: '12', completion_tokens: -3,
+      cache_read_input_tokens: 1.5, prompt_cache_hit_tokens: '4',
+      completion_tokens_details: { reasoning_tokens: 1e100 }
+    }
+  }, 'chat');
+  assert.deepEqual({
+    inputTokens: normalized.inputTokens,
+    outputTokens: normalized.outputTokens,
+    cachedInputTokens: normalized.cachedInputTokens,
+    reasoningTokens: normalized.reasoningTokens
+  }, {
+    inputTokens: 12,
+    outputTokens: 0,
+    cachedInputTokens: 4,
+    reasoningTokens: Number.MAX_SAFE_INTEGER
+  });
+  const response = formatResponse(normalized, 'responses');
+  assert.equal(response.usage.total_tokens, 12);
+  assert.equal(typeof response.usage.total_tokens, 'number');
+  const saturated = formatResponse({ ...normalized, inputTokens: 1e100, outputTokens: 1e100 }, 'chat');
+  assert.equal(saturated.usage.prompt_tokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(saturated.usage.completion_tokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(saturated.usage.total_tokens, Number.MAX_SAFE_INTEGER);
 });
 
 test('o 系列 Chat 请求使用 max_completion_tokens', () => {

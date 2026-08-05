@@ -7,13 +7,17 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "install:sing-box": "node scripts/install-sing-box.mjs",
+    "audit:prod": "npm audit --omit=dev --audit-level=high",
+    "audit:signatures": "npm audit signatures",
+    "sbom:prod": "npm sbom --omit=dev --sbom-format=cyclonedx",
     "test:live:go": "node scripts/live-go-smoke.mjs",
     "rekey": "node scripts/rekey.js",
     "test": "node --test",
-    "check": "node --check src/server.js && node --check src/adapters.js && node --check src/auth.js && node --check src/config.js && node --check src/stream.js && node --check src/upstream.js && node --check src/prompt-rewrite.js && node --check src/image-handoff.js && node --check src/proxy.js && node --check src/provider-credentials.js && node --check src/credential-health.js && node --check src/stats.js && node --check src/secrets.js && node --check src/request-log.js && node --check scripts/rekey.js && node --check scripts/live-go-smoke.mjs && node --check public/log-utils.js && node --check public/refresh-utils.js && node --check public/app.js && node --test"
+    "check": "node --check src/server.js && node --check src/adapters.js && node --check src/auth.js && node --check src/config.js && node --check src/stream.js && node --check src/upstream.js && node --check src/prompt-rewrite.js && node --check src/image-handoff.js && node --check src/proxy.js && node --check src/tunnel-proxy.js && node --check src/provider-credentials.js && node --check src/credential-health.js && node --check src/stats.js && node --check src/secrets.js && node --check src/file-io.js && node --check src/static-files.js && node --check src/request-target.js && node --check src/response-write.js && node --check src/request-log.js && node --check scripts/rekey.js && node --check scripts/live-go-smoke.mjs && node --check scripts/install-sing-box.mjs && node --check test-fixtures/fake-sing-box.mjs && node --check public/log-utils.js && node --check public/refresh-utils.js && node --check public/html-utils.js && node --check public/app.js && node --test"
   },
   "engines": {
-    "node": ">=20.18.1 <25"
+    "node": "^22.20.0 || ^24.11.0"
   },
   "dependencies": {
     "fetch-socks": "^1.3.3",

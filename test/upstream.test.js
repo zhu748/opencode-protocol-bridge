@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { closeDirectUpstreamDispatcher, DIRECT_CONNECT_TIMEOUT_MS, directUpstreamDispatcher, isUpstreamConnectionError, MAX_UPSTREAM_JSON_BYTES, readResponseJson, readResponseText, upstreamBase, upstreamConnectionFailure } from '../src/upstream.js';
+import { closeDirectUpstreamDispatcher, DIRECT_CONNECT_TIMEOUT_MS, directUpstreamDispatcher, isUpstreamConnectionError, listModels, MAX_UPSTREAM_JSON_BYTES, readResponseJson, readResponseText, upstreamBase, upstreamConnectionFailure } from '../src/upstream.js';
 
 test('自定义上游地址会清理空白和末尾斜杠', () => {
   const previous = process.env.OPENCODE_ZEN_BASE_URL;
@@ -28,6 +28,16 @@ test('直连上游复用连接池并可在退出时安全重建', async () => {
   const third = directUpstreamDispatcher();
   await closeDirectUpstreamDispatcher({ force: true });
   assert.equal(third.destroyed, true);
+});
+
+test('模型发现会响应调用方取消信号', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    () => listModels({ provider: 'zen', apiKey: 'test', signal: controller.signal, timeoutMs: 5000 }),
+    (error) => error?.name === 'AbortError'
+  );
+  await closeDirectUpstreamDispatcher({ force: true });
 });
 
 test('上游响应读取器限制声明长度和实际流大小', async () => {

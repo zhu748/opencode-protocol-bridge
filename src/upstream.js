@@ -1,5 +1,5 @@
 import { Agent, fetch } from 'undici';
-import { proxyDispatcher } from './proxy.js';
+import { proxyDispatcherForUrl } from './proxy.js';
 
 export const MAX_UPSTREAM_JSON_BYTES = 20 * 1024 * 1024;
 export const MAX_UPSTREAM_ERROR_BYTES = 1024 * 1024;
@@ -18,7 +18,7 @@ export function isUpstreamConnectionError(error) {
   const chain = upstreamErrorChain(error);
   const codes = new Set([
     'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
-    'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE'
+    'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'PROXY_TUNNEL_ERROR'
   ]);
   return chain.some((item) => item?.name === 'TimeoutError'
     || codes.has(item?.code)
@@ -30,6 +30,10 @@ export function upstreamConnectionFailure(error) {
   const hasCode = (...codes) => chain.some((item) => codes.includes(item?.code));
   const tlsFailure = chain.some((item) => /^(?:CERT_|ERR_TLS_CERT_ALTNAME_INVALID$|DEPTH_ZERO_SELF_SIGNED_CERT$|SELF_SIGNED_CERT_IN_CHAIN$|UNABLE_TO_VERIFY_LEAF_SIGNATURE$)/.test(String(item?.code || '')));
 
+  const proxyTunnelFailure = chain.find((item) => item?.code === 'PROXY_TUNNEL_ERROR');
+  if (proxyTunnelFailure) {
+    return { status: 502, code: 'proxy_tunnel_error', message: proxyTunnelFailure.message || '托管隧道代理不可用' };
+  }
   if (hasCode('UND_ERR_CONNECT_TIMEOUT')) {
     return { status: 504, code: 'upstream_connect_timeout', message: '连接上游失败：建立连接超时，请检查网络或该 Key 的代理' };
   }
@@ -84,8 +88,8 @@ export async function closeDirectUpstreamDispatcher({ force = false } = {}) {
   else if (!active.closed) await active.close();
 }
 
-function requestDispatcher(proxyUrl) {
-  return proxyUrl ? proxyDispatcher(proxyUrl) : directUpstreamDispatcher();
+async function requestDispatcher(proxyUrl) {
+  return proxyUrl ? await proxyDispatcherForUrl(proxyUrl) : directUpstreamDispatcher();
 }
 
 export async function callUpstream({ provider, protocol, apiKey, proxyUrl, body, signal, timeoutMs = 120000, forwardHeaders = {} }) {
@@ -103,15 +107,15 @@ export async function callUpstream({ provider, protocol, apiKey, proxyUrl, body,
     },
     body: JSON.stringify(body),
     signal: combinedSignal(signal, timeoutMs),
-    dispatcher: requestDispatcher(proxyUrl)
+    dispatcher: await requestDispatcher(proxyUrl)
   });
 }
 
-export async function listModels({ provider, apiKey, proxyUrl, timeoutMs = 120000 }) {
+export async function listModels({ provider, apiKey, proxyUrl, signal, timeoutMs = 120000 }) {
   const response = await fetch(`${upstreamBase(provider)}/models`, {
     headers: { authorization: `Bearer ${apiKey}` },
-    signal: combinedSignal(undefined, timeoutMs),
-    dispatcher: requestDispatcher(proxyUrl)
+    signal: combinedSignal(signal, timeoutMs),
+    dispatcher: await requestDispatcher(proxyUrl)
   });
   return response;
 }

@@ -130,7 +130,8 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
       body: JSON.stringify({ model: 'alias', max_tokens: 256, system: 'x-anthropic-billing-header: test\n\n系统提示', messages: [{ role: 'user', content: '你好' }] })
     });
     assert.equal(response.status, 200);
-    assert.ok(response.headers.get('x-request-id'));
+    const localRequestId = response.headers.get('x-request-id');
+    assert.match(localRequestId, /^[a-f0-9]{32}$/);
     const output = await response.json();
     assert.equal(output.type, 'message');
     assert.equal(output.content[0].text, '转换成功');
@@ -151,6 +152,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
 
     const logs = await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json());
     assert.equal(logs.length, 1);
+    assert.equal(logs[0].requestId, localRequestId);
     assert.equal(logs[0].protocol, 'claude → responses');
     assert.equal(logs[0].clientId, createdClient.id);
     assert.equal(logs[0].clientName, '测试客户端');

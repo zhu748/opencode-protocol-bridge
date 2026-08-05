@@ -39,7 +39,7 @@
       <div class="side-foot"><span class="dot"></span><div><strong>服务在线</strong><small>OpenCode Zen / Go</small></div><button id="logout" class="side-logout" title="退出登录">↪</button></div>
     </aside>
     <main>
-      <header><div><p class="eyebrow">CONTROL CENTER</p><h2 id="page-title">运行概览</h2></div><button id="refresh" class="icon-btn" title="刷新">↻</button></header>
+      <header><div><p class="eyebrow">CONTROL CENTER</p><h2 id="page-title">运行概览</h2></div><div class="header-actions"><span id="config-draft-status" class="config-draft-status hidden" role="status" aria-live="polite" aria-atomic="true"></span><button id="refresh" class="icon-btn" title="刷新">↻</button></div></header>
       <div id="data-source-warning" class="data-source-warning hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 
       <section id="overview" class="view active">
@@ -57,10 +57,10 @@
       </section>
 
       <section id="settings" class="view">
-        <div class="section-intro"><h3>连接设置</h3><p>密钥保存在本机 <code>data/config.json</code>，页面只显示遮罩。<span id="encryption-state" class="security-state"></span></p></div>
+        <div class="section-intro"><h3>连接设置</h3><p>密钥保存在本机 <code>data/config.json</code>，页面只显示遮罩。<span id="encryption-state" class="security-state"></span><span id="sing-box-state" class="security-state"></span></p></div>
         <form id="settings-form" class="panel form-grid">
           <label>默认上游<select id="defaultProvider"><option value="zen">OpenCode Zen</option><option value="go">OpenCode Go</option></select></label>
-          <label>默认代理（可选回退）<input id="proxyUrl" autocomplete="off" placeholder="http://127.0.0.1:7890"><small>仅在对应 Key 未设置独立代理时使用；TUIC/VLESS/VMess 等需先用 sing-box、Xray 或 Clash 转成本地 HTTP/SOCKS 端口</small><span class="field-tools proxy-presets"><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="http://127.0.0.1:7890">HTTP 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:7890">SOCKS5h 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:1080">SOCKS5h 1080</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="mixed://127.0.0.1:7890">mixed://7890</button><button type="button" class="link-btn clear-proxy" data-provider="default">清除默认代理</button></span></label>
+          <label>默认代理（可选回退）<input id="proxyUrl" autocomplete="off" placeholder="http://127.0.0.1:7890"><small>仅在对应 Key 未设置独立代理时使用；支持 HTTP(S)、SOCKS、mixed://，也可直接填写 hy2/TUIC/VLESS/VMess/Trojan/SS/Hysteria 分享链接（服务端需有 sing-box）。</small><span class="field-tools proxy-presets"><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="http://127.0.0.1:7890">HTTP 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:7890">SOCKS5h 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:1080">SOCKS5h 1080</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="mixed://127.0.0.1:7890">mixed://7890</button><button type="button" class="link-btn clear-proxy" data-provider="default">清除默认代理</button></span></label>
           <label>主访问令牌<input id="clientToken" type="password" minlength="6" maxlength="256" pattern="[A-Za-z0-9]{6,256}" autocomplete="off" placeholder="留空则保持原值"><small>自定义时须为 6–256 位英文字母或数字</small></label>
           <label>日志保留条数<input id="requestLogLimit" type="number" min="10" max="1000"></label>
           <label class="check-field"><input id="persistLogs" type="checkbox"><span>持久化请求日志<small>仅保存请求元数据，不保存提示词和响应正文</small></span></label>
@@ -69,14 +69,14 @@
           <div class="form-actions"><button type="button" id="regen-token" class="ghost">重新生成访问令牌</button><button type="submit" class="primary compact">保存设置</button></div>
         </form>
         <section class="panel credential-manager">
-          <div class="panel-head"><div><h3>上游 Key 池</h3><p>每把 Key 可使用独立 HTTP(S)、SOCKS 或 Clash/mihomo mixed-port；TUIC/VLESS/VMess/Trojan/SS/Hysteria 分享链接请先由本地客户端转换为 HTTP/SOCKS 端口。</p></div><button id="add-provider-credential" class="primary compact" type="button">添加 Key</button></div>
+          <div class="panel-head"><div><h3>上游 Key 池</h3><p>每把 Key 可使用独立 HTTP(S)、SOCKS、Clash/mihomo mixed-port，或由服务端 sing-box 托管的 hy2/TUIC/VLESS/VMess/Trojan/SS/Hysteria 分享链接。</p></div><button id="add-provider-credential" class="primary compact" type="button">添加 Key</button></div>
           <div id="provider-credential-list" class="provider-credential-list"></div>
           <form id="provider-credential-form" class="credential-editor hidden">
             <input id="providerCredentialId" type="hidden">
             <label>上游<select id="providerCredentialProvider"><option value="zen">OpenCode Zen</option><option value="go">OpenCode Go</option></select></label>
             <label>名称<input id="providerCredentialName" maxlength="64" placeholder="例如：Go 编程套餐" required></label>
             <label>API Key<input id="providerCredentialKey" type="password" maxlength="4096" autocomplete="off" placeholder="编辑时留空保持原值"></label>
-            <label>独立代理<input id="providerCredentialProxy" maxlength="2048" autocomplete="off" placeholder="留空则直连或使用默认代理"><small>支持 HTTP(S)、SOCKS4/4a/5/5h 和 mixed://；隧道分享链接需填本地转换后的端口</small><span class="field-tools proxy-presets"><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="http://127.0.0.1:7890">HTTP 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="socks5h://127.0.0.1:7890">SOCKS5h 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="socks5h://127.0.0.1:1080">SOCKS5h 1080</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="mixed://127.0.0.1:7890">mixed://7890</button></span></label>
+            <label>独立代理<input id="providerCredentialProxy" maxlength="4096" autocomplete="off" placeholder="留空则直连或使用默认代理"><small>支持 HTTP(S)、SOCKS4/4a/5/5h、mixed://，以及 hy2/TUIC/VLESS/VMess/Trojan/SS/Hysteria 分享链接；分享链接需服务端安装 sing-box。</small><span class="field-tools proxy-presets"><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="http://127.0.0.1:7890">HTTP 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="socks5h://127.0.0.1:7890">SOCKS5h 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="socks5h://127.0.0.1:1080">SOCKS5h 1080</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#providerCredentialProxy" data-proxy-value="mixed://127.0.0.1:7890">mixed://7890</button></span></label>
             <label id="providerCredentialClearProxyField" class="check-field credential-clear-proxy hidden"><input id="providerCredentialClearProxy" type="checkbox"><span>清除当前独立代理</span></label>
             <div class="credential-editor-actions"><button id="test-provider-credential" class="ghost" type="button">测试连接</button><button id="cancel-provider-credential" class="ghost" type="button">取消</button><button class="primary compact" type="submit">保存 Key</button></div>
           </form>

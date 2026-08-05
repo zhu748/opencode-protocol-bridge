@@ -1,5 +1,6 @@
 import { compactIdentifier, filterRequestLogs, formatCooldownRemaining, requestLogsToCsv } from './log-utils.js';
-import { optionalLoad, summarizeSourceFailures } from './refresh-utils.js';
+import { createLatestRequestGate, optionalLoad, summarizeSourceFailures } from './refresh-utils.js';
+import { escapeHtml } from './html-utils.js';
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -14,14 +15,63 @@ let serviceStatus = null;
 let imageHandoffModels = [];
 const discoveredImageModels = new Map();
 const dataSourceFailures = new Map();
+const refreshGate = createLatestRequestGate();
+const dataSourceGates = new Map();
+const imageModelDiscoveryGate = createLatestRequestGate();
+const dirtyConfigSections = new Set();
 let toastTimer;
+let configSaveInProgress = false;
+let configConflictMessage = '';
+
+function renderConfigDraftStatus() {
+  const node = $('#config-draft-status');
+  const dirty = dirtyConfigMessage();
+  node.textContent = configConflictMessage || (dirty ? `未保存：${dirty}` : '');
+  node.classList.toggle('conflict', Boolean(configConflictMessage));
+  node.classList.toggle('hidden', !node.textContent);
+  node.title = node.textContent;
+}
+
+function markConfigDirty(section) {
+  dirtyConfigSections.add(section);
+  renderConfigDraftStatus();
+}
+
+function clearConfigDirty(section) {
+  if (section) dirtyConfigSections.delete(section);
+  renderConfigDraftStatus();
+}
+
+function dirtyConfigMessage() {
+  const labels = { settings: '连接设置', routes: '模型路由', images: '图片附件交接', prompts: '提示词规则' };
+  return [...dirtyConfigSections].map((section) => labels[section] || section).join('、');
+}
+
+function confirmDiscardConfigDrafts(action) {
+  return !dirtyConfigSections.size || confirm(`${dirtyConfigMessage()}有未保存修改，${action}会丢弃这些内容。确认继续？`);
+}
+
+function discardConfigDrafts() {
+  dirtyConfigSections.clear();
+  configConflictMessage = '';
+  renderConfigDraftStatus();
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { 'content-type': 'application/json', ...options.headers } });
-  const data = await response.json().catch(() => ({}));
+  let data;
+  try { data = await response.json(); }
+  catch (error) {
+    if (error?.name === 'AbortError') throw error;
+    if (response.ok) throw new Error(`接口返回的 JSON 无效（HTTP ${response.status}）`);
+    data = {};
+  }
   if (!response.ok) {
     if (response.status === 401 && !['/api/login', '/api/session'].includes(path)) location.reload();
-    throw new Error(data.error?.message || data.error || `HTTP ${response.status}`);
+    const error = new Error(data.error?.message || data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.code = data.error?.code || data.code || '';
+    throw error;
   }
   return data;
 }
@@ -32,10 +82,48 @@ function toast(message) {
   toastTimer = setTimeout(() => node.classList.remove('show'), 2200);
 }
 
+function configPreconditionHeaders() {
+  return config.revision ? { 'if-match': `"${config.revision}"` } : {};
+}
+
+function acceptConfigRevision(result) {
+  if (typeof result?.revision === 'string') config.revision = result.revision;
+  return result;
+}
+
+async function normalizedConfigMutationError(error) {
+  if (error.status !== 412) return error;
+  let refreshed = true;
+  try { await refresh(); }
+  catch { refreshed = false; }
+  configConflictMessage = refreshed
+    ? '配置已在其他页面更新；最新修订已载入，当前草稿仍保留，请核对后再次操作'
+    : '配置已在其他页面更新；当前草稿仍保留，但自动载入最新修订失败，请稍后刷新';
+  renderConfigDraftStatus();
+  const conflict = new Error(configConflictMessage);
+  conflict.status = 412;
+  return conflict;
+}
+
+async function withPendingControl(control, pendingText, operation) {
+  if (!control || control.disabled || control.dataset.pending === 'true') return undefined;
+  const originalText = control.textContent;
+  control.dataset.pending = 'true';
+  control.disabled = true;
+  if (pendingText) control.textContent = pendingText;
+  try { return await operation(); }
+  finally {
+    delete control.dataset.pending;
+    control.disabled = false;
+    control.textContent = originalText;
+  }
+}
+
 function fillProxyPreset(button) {
   const field = $(button.dataset.proxyTarget);
   if (!field) return;
   field.value = button.dataset.proxyValue;
+  if (field.id === 'proxyUrl') markConfigDirty('settings');
   if (field.id === 'providerCredentialProxy') $('#providerCredentialClearProxy').checked = false;
   field.focus();
   toast(`已填入代理：${button.dataset.proxyValue}`);
@@ -49,12 +137,21 @@ function renderDataSourceFailures() {
   warning.classList.toggle('hidden', !summary.message);
 }
 
-async function loadDataSource(name, loader, fallback) {
-  const result = await optionalLoad(loader, fallback);
+function dataSourceGate(name) {
+  if (!dataSourceGates.has(name)) dataSourceGates.set(name, createLatestRequestGate());
+  return dataSourceGates.get(name);
+}
+
+async function loadDataSource(name, loader, fallback, apply) {
+  const gate = dataSourceGate(name);
+  const generation = gate.begin();
+  const result = await optionalLoad(() => loader(generation.controller.signal), fallback);
+  if (!gate.isCurrent(generation)) return { ...result, current: false };
   if (result.fresh) dataSourceFailures.delete(name);
   else dataSourceFailures.set(name, result.error.message);
+  if (result.fresh && apply) apply(result.value);
   renderDataSourceFailures();
-  return result;
+  return { ...result, current: true };
 }
 
 function renderRuntimeSummary() {
@@ -67,7 +164,12 @@ function renderRuntimeSummary() {
     const upstreamTiming = serviceStatus.upstreamTimingCoverageRate > 0
       ? ` · 上游等待 ${formatDuration(serviceStatus.averageUpstreamWait)} · 响应体 ${averageUpstreamBody}`
       : '';
-    $('#request-summary').textContent = `${successSummary} · 活跃 ${serviceStatus.activeRequests} · 平均 ${formatDuration(serviceStatus.averageDuration)}${upstreamTiming} · ${serviceStatus.memoryMb} MiB${serviceStatus.logPersistenceError ? ' · 日志异常' : ''}${statusStale ? ' · 状态未更新' : ''}${logsStale ? ' · 日志未更新' : ''}`;
+    const httpConnections = Number.isFinite(serviceStatus.activeHttpConnections)
+      ? ` · 连接 ${formatNumber(serviceStatus.activeHttpConnections)}/${formatNumber(serviceStatus.maxHttpConnections)}`
+      : '';
+    const adminMutations = serviceStatus.activeAdminMutations ? ` · 管理写 ${formatNumber(serviceStatus.activeAdminMutations)}/${formatNumber(serviceStatus.maxAdminMutations)}` : '';
+    const adminDiscoveries = serviceStatus.activeAdminModelDiscoveries ? ` · 模型发现 ${formatNumber(serviceStatus.activeAdminModelDiscoveries)}/${formatNumber(serviceStatus.maxAdminModelDiscoveries)}` : '';
+    $('#request-summary').textContent = `${successSummary} · 活跃 ${serviceStatus.activeRequests}${httpConnections}${adminMutations}${adminDiscoveries} · 平均 ${formatDuration(serviceStatus.averageDuration)}${upstreamTiming} · ${serviceStatus.memoryMb} MiB${serviceStatus.logPersistenceError ? ' · 日志异常' : ''}${statusStale ? ' · 状态未更新' : ''}${logsStale ? ' · 日志未更新' : ''}`;
     $('#request-summary').title = serviceStatus.logPersistenceError || '';
   } else {
     $('#request-summary').textContent = `运行状态暂不可用${logsStale ? ' · 日志未更新' : ''}`;
@@ -106,16 +208,25 @@ $('#auth-form').addEventListener('submit', async (event) => {
 });
 
 async function refresh() {
-  const [nextConfig, logsResult, statusResult, clientsResult] = await Promise.all([
-    api('/api/config'),
-    loadDataSource('请求日志', () => api('/api/logs'), requestLogItems),
-    loadDataSource('运行状态', () => api('/api/status'), serviceStatus),
-    loadDataSource('客户端列表', () => api('/api/clients'), clientItems)
-  ]);
+  const generation = refreshGate.begin();
+  dataSourceGate('Claude 提示词快照').invalidate();
+  if ($('#stats').classList.contains('active')) dataSourceGate('用量统计').invalidate();
+  let nextConfig;
+  try {
+    [nextConfig] = await Promise.all([
+      api('/api/config', { signal: generation.controller.signal }),
+      loadDataSource('请求日志', (signal) => api('/api/logs', { signal }), requestLogItems, (value) => { requestLogItems = value; }),
+      loadDataSource('运行状态', (signal) => api('/api/status', { signal }), serviceStatus, (value) => { serviceStatus = value; }),
+      loadDataSource('客户端列表', (signal) => api('/api/clients', { signal }), clientItems, (value) => { clientItems = value; })
+    ]);
+  } catch (error) {
+    if (!refreshGate.isCurrent(generation)) return { degraded: dataSourceFailures.size, superseded: true };
+    throw error;
+  }
+  if (!refreshGate.isCurrent(generation)) return { degraded: dataSourceFailures.size, superseded: true };
   config = nextConfig;
-  requestLogItems = logsResult.value;
-  serviceStatus = statusResult.value;
-  clientItems = clientsResult.value;
+  configConflictMessage = '';
+  renderConfigDraftStatus();
   $('#base-url').textContent = location.origin;
   $('#endpoint-code').textContent = `${location.origin}/zen/v1`;
   $('#go-endpoint-code').textContent = `${location.origin}/go/v1`;
@@ -129,36 +240,51 @@ async function refresh() {
   $('#zen-proxy-state').textContent = config.zenProxyConfigured ? '使用 Zen 独立代理' : config.proxyConfigured ? '使用默认代理' : '直连上游';
   $('#go-proxy-state').textContent = config.goProxyConfigured ? '使用 Go 独立代理' : config.proxyConfigured ? '使用默认代理' : '直连上游';
   renderRuntimeSummary();
-  $('#defaultProvider').value = config.defaultProvider;
-  for (const [field, configured, fallback] of [['proxyUrl', config.proxyConfigured, 'http://127.0.0.1:7890']]) {
-    $(`#${field}`).value = '';
-    $(`#${field}`).placeholder = configured ? `当前：${config[field]}` : fallback;
+  if (!dirtyConfigSections.has('settings')) {
+    $('#defaultProvider').value = config.defaultProvider;
+    for (const [field, configured, fallback] of [['proxyUrl', config.proxyConfigured, 'http://127.0.0.1:7890']]) {
+      $(`#${field}`).value = '';
+      $(`#${field}`).placeholder = configured ? `当前：${config[field]}` : fallback;
+    }
+    $('#requestLogLimit').value = config.requestLogLimit;
+    $('#persistLogs').checked = Boolean(config.persistLogs);
+    $('#upstreamTimeoutMs').value = config.upstreamTimeoutMs;
+    $('#maxConcurrentRequests').value = config.maxConcurrentRequests;
+    $('#clientToken').placeholder = config.clientToken ? `当前：${config.clientToken}` : '填写客户端访问令牌';
   }
-  $('#requestLogLimit').value = config.requestLogLimit;
-  $('#persistLogs').checked = Boolean(config.persistLogs);
-  $('#upstreamTimeoutMs').value = config.upstreamTimeoutMs;
-  $('#maxConcurrentRequests').value = config.maxConcurrentRequests;
-  $('#clientToken').placeholder = config.clientToken ? `当前：${config.clientToken}` : '填写客户端访问令牌';
   $('#encryption-state').textContent = config.encryptionEnabled ? '配置已加密' : '配置未加密';
   $('#encryption-state').classList.toggle('enabled', config.encryptionEnabled);
-  $('#modelRoutes').value = JSON.stringify(config.modelRoutes || {}, null, 2);
-  imageHandoffModels = Array.isArray(config.imageHandoffModels) ? config.imageHandoffModels.map((entry) => ({ ...entry })) : [];
-  $('#promptRules').value = JSON.stringify(config.promptRewriteRules || [], null, 2);
-  renderPromptRuleList();
-  renderRouteList(config.modelRoutes || {});
+  const singBox = config.singBoxRuntime || {};
+  const singBoxSources = { project: '项目内', path: 'PATH', environment: '环境路径' };
+  $('#sing-box-state').textContent = singBox.available
+    ? `sing-box ${singBox.version || ''} 可用`
+    : 'sing-box 未检测到';
+  $('#sing-box-state').title = singBox.available
+    ? `来源：${singBoxSources[singBox.source] || '未知'}`
+    : 'hy2/TUIC/VLESS/VMess 等分享链接需要安装 sing-box';
+  $('#sing-box-state').classList.toggle('enabled', Boolean(singBox.available));
+  if (!dirtyConfigSections.has('routes')) {
+    $('#modelRoutes').value = JSON.stringify(config.modelRoutes || {}, null, 2);
+    renderRouteList(config.modelRoutes || {});
+  }
+  if (!dirtyConfigSections.has('images')) imageHandoffModels = Array.isArray(config.imageHandoffModels) ? config.imageHandoffModels.map((entry) => ({ ...entry })) : [];
+  if (!dirtyConfigSections.has('prompts')) {
+    $('#promptRules').value = JSON.stringify(config.promptRewriteRules || [], null, 2);
+    renderPromptRuleList();
+  }
   renderClients(clientItems);
   renderProviderCredentials();
   renderImageHandoffSettings();
   renderLogs();
   renderExamples();
-  const secondaryLoads = [loadDataSource('Claude 提示词快照', refreshPrompt, undefined)];
-  if ($('#stats').classList.contains('active')) secondaryLoads.push(loadDataSource('用量统计', refreshStats, undefined));
+  const secondaryLoads = [loadDataSource('Claude 提示词快照', refreshPrompt, undefined, renderRecentPrompt)];
+  if ($('#stats').classList.contains('active')) secondaryLoads.push(loadDataSource('用量统计', refreshStats, undefined, renderStats));
   await Promise.all(secondaryLoads);
   return { degraded: dataSourceFailures.size };
 }
 
-async function refreshPrompt() {
-  renderRecentPrompt(await api('/api/prompt-rewrite/recent'));
+async function refreshPrompt(signal) {
+  return api('/api/prompt-rewrite/recent', { signal });
 }
 
 function renderRecentPrompt(snapshot = {}) {
@@ -186,6 +312,7 @@ function promptRulesFromEditor() {
 
 function setPromptRules(rules) {
   $('#promptRules').value = JSON.stringify(rules, null, 2);
+  markConfigDirty('prompts');
   renderPromptRuleList();
 }
 
@@ -205,7 +332,7 @@ function renderPromptRuleList() {
     const state = promptRuleState(rule);
     const action = String(rule.replace ?? '') ? '替换' : '删除';
     const preview = String(rule.find ?? '').replace(/\s+/g, ' ').slice(0, 120);
-    return `<article class="prompt-rule-item"><div class="prompt-rule-main"><span class="rule-state ${state.className}">${state.label}</span><div><strong>${escapeHtml(rule.name || `规则 ${index + 1}`)}</strong><p>${action} · ${escapeHtml(preview || '未填写查找内容')}${String(rule.find ?? '').length > 120 ? '…' : ''}</p></div></div><span class="client-actions"><button class="mini-btn toggle-prompt-rule" data-index="${index}" type="button">${rule.enabled === false ? '启用' : '停用'}</button><button class="mini-btn edit-prompt-rule" data-index="${index}" type="button">编辑</button><button class="mini-btn revoke delete-prompt-rule" data-index="${index}" type="button">删除</button></span></article>`;
+    return `<article class="prompt-rule-item"><div class="prompt-rule-main"><span class="rule-state ${state.className}">${escapeHtml(state.label)}</span><div><strong>${escapeHtml(rule.name || `规则 ${index + 1}`)}</strong><p>${action} · ${escapeHtml(preview || '未填写查找内容')}${String(rule.find ?? '').length > 120 ? '…' : ''}</p></div></div><span class="client-actions"><button class="mini-btn toggle-prompt-rule" data-index="${index}" type="button">${rule.enabled === false ? '启用' : '停用'}</button><button class="mini-btn edit-prompt-rule" data-index="${index}" type="button">编辑</button><button class="mini-btn revoke delete-prompt-rule" data-index="${index}" type="button">删除</button></span></article>`;
   }).join('') : '<p class="empty-inline">还没有提示词规则</p>';
   $$('.toggle-prompt-rule').forEach((button) => button.addEventListener('click', () => {
     const next = promptRulesFromEditor();
@@ -226,7 +353,7 @@ function renderPromptRuleList() {
 function renderPromptRuleResults(results) {
   const labels = { applied: '已生效', unmatched: '未命中', disabled: '已停用' };
   const classes = { applied: 'applied', unmatched: 'unmatched', disabled: 'disabled' };
-  $('#prompt-rule-results').innerHTML = results.length ? results.map((item) => `<div class="prompt-result"><span class="rule-state ${classes[item.status] || 'pending'}">${labels[item.status] || '未知'}</span><strong>${escapeHtml(item.name)}</strong><span>${item.action === 'delete' ? '删除' : '替换'}${item.count ? ` ×${item.count}` : ''}</span></div>`).join('') : '<p class="empty-inline">收到 Claude 请求后显示</p>';
+  $('#prompt-rule-results').innerHTML = results.length ? results.map((item) => `<div class="prompt-result"><span class="rule-state ${classes[item.status] || 'pending'}">${labels[item.status] || '未知'}</span><strong>${escapeHtml(item.name)}</strong><span>${item.action === 'delete' ? '删除' : '替换'}${item.count ? ` ×${formatNumber(item.count)}` : ''}</span></div>`).join('') : '<p class="empty-inline">收到 Claude 请求后显示</p>';
 }
 
 function beginPromptRuleEdit(index) {
@@ -295,7 +422,7 @@ function renderLogs() {
       Object.hasOwn(item, 'upstreamBodyMs') ? `响应体 ${formatDuration(item.upstreamBodyMs)}` : ''
     ].filter(Boolean).join(' · ');
     const timing = `${formatDuration(item.duration)}${phases ? `<small class="log-timing">${phases}</small>` : ''}`;
-    return `<tr><td>${new Date(item.time).toLocaleString()}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}</td><td class="${statusClass}">${item.status}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
+    return `<tr><td>${escapeHtml(new Date(item.time).toLocaleString())}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}</td><td class="${statusClass}">${formatNumber(item.status)}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
   }).join('');
 }
 
@@ -377,7 +504,7 @@ function renderTimeline(timeline) {
       item.upstreamBodyRequests ? `平均响应体阶段 ${formatDuration(item.averageUpstreamBodyMs)}` : ''
     ].filter(Boolean).join('，');
     const title = `${label}：${formatNumber(item.requests)} 个请求，${formatNumber(item.errors)} 个失败，${formatNumber(item.totalTokens)} Token${phaseDetail ? `，${phaseDetail}` : ''}`;
-    return `<div class="trend-column" title="${escapeHtml(title)}"><div class="trend-bars"><span class="trend-bar token-bar ${portionClass(item.totalTokens, maximumTokens)}"></span><span class="trend-bar request-bar ${portionClass(item.requests, maximumRequests)}">${item.errors ? `<i class="error-mark" title="${item.errors} 个失败"></i>` : ''}</span></div><time>${escapeHtml(label)}</time></div>`;
+    return `<div class="trend-column" title="${escapeHtml(title)}"><div class="trend-bars"><span class="trend-bar token-bar ${portionClass(item.totalTokens, maximumTokens)}"></span><span class="trend-bar request-bar ${portionClass(item.requests, maximumRequests)}">${item.errors ? `<i class="error-mark" title="${formatNumber(item.errors)} 个失败"></i>` : ''}</span></div><time>${escapeHtml(label)}</time></div>`;
   }).join('');
   const totalRequests = buckets.reduce((sum, item) => sum + item.requests, 0);
   const totalTokens = buckets.reduce((sum, item) => sum + item.totalTokens, 0);
@@ -431,11 +558,9 @@ function renderStats(stats) {
   renderTimeline(stats.timeline);
 }
 
-async function refreshStats() {
-  renderStats(await api(`/api/stats?window=${encodeURIComponent($('#stats-window').value)}`));
+async function refreshStats(signal) {
+  return api(`/api/stats?window=${encodeURIComponent($('#stats-window').value)}`, { signal });
 }
-
-function escapeHtml(value = '') { const node = document.createElement('span'); node.textContent = value; return node.innerHTML; }
 
 function formatPercentage(value) {
   if (value === null || value === undefined || value === '') return '—';
@@ -521,6 +646,7 @@ function setImageHandoffModel(provider, model, enabled) {
   imageHandoffModels = imageHandoffModels.filter((entry) => imageHandoffKey(entry.provider, entry.model) !== key);
   if (enabled) imageHandoffModels.push({ provider, model });
   imageHandoffModels.sort((left, right) => left.provider.localeCompare(right.provider) || left.model.localeCompare(right.model));
+  markConfigDirty('images');
   renderSelectedImageHandoffModels();
 }
 
@@ -583,23 +709,37 @@ async function testProviderCredential(payload, button) {
 
 function renderClients(clients) {
   $('#empty-clients').classList.toggle('hidden', clients.length > 0);
-  $('#client-rows').innerHTML = clients.map((client) => `<tr><td>${escapeHtml(client.name)}</td><td><code>${escapeHtml(client.tokenPrefix)}…</code></td><td class="${client.enabled ? 'status-ok' : 'status-bad'}">${client.enabled ? '启用' : '停用'}</td><td>${client.maxConcurrentRequests}</td><td>${new Date(client.createdAt).toLocaleString()}</td><td><span class="client-actions"><button class="mini-btn toggle-client" data-id="${client.id}" data-enabled="${client.enabled}">${client.enabled ? '停用' : '启用'}</button><button class="mini-btn regenerate-client" data-id="${client.id}" data-name="${escapeHtml(client.name)}">轮换</button><button class="mini-btn revoke revoke-client" data-id="${client.id}" data-name="${escapeHtml(client.name)}">撤销</button></span></td></tr>`).join('');
+  $('#client-rows').innerHTML = clients.map((client) => `<tr><td>${escapeHtml(client.name)}</td><td><code>${escapeHtml(client.tokenPrefix)}…</code></td><td class="${client.enabled ? 'status-ok' : 'status-bad'}">${client.enabled ? '启用' : '停用'}</td><td>${formatNumber(client.maxConcurrentRequests)}</td><td>${escapeHtml(new Date(client.createdAt).toLocaleString())}</td><td><span class="client-actions"><button class="mini-btn toggle-client" data-id="${escapeHtml(client.id)}" data-enabled="${client.enabled}">${client.enabled ? '停用' : '启用'}</button><button class="mini-btn regenerate-client" data-id="${escapeHtml(client.id)}" data-name="${escapeHtml(client.name)}">轮换</button><button class="mini-btn revoke revoke-client" data-id="${escapeHtml(client.id)}" data-name="${escapeHtml(client.name)}">撤销</button></span></td></tr>`).join('');
   $$('.toggle-client').forEach((button) => button.addEventListener('click', async () => {
-    try { await api(`/api/clients/${button.dataset.id}`, { method: 'PUT', body: JSON.stringify({ enabled: button.dataset.enabled !== 'true' }) }); await refresh(); }
-    catch (error) { toast(error.message); }
+    await withPendingControl(button, '更新中…', async () => {
+      try {
+        acceptConfigRevision(await api(`/api/clients/${button.dataset.id}`, {
+          method: 'PUT', headers: configPreconditionHeaders(), body: JSON.stringify({ enabled: button.dataset.enabled !== 'true' })
+        }));
+        await refresh();
+      } catch (error) { toast((await normalizedConfigMutationError(error)).message); }
+    });
   }));
   $$('.regenerate-client').forEach((button) => button.addEventListener('click', async () => {
     if (!confirm(`轮换客户端“${button.dataset.name}”的令牌？旧令牌将立即失效。`)) return;
-    try {
-      const result = await api(`/api/clients/${button.dataset.id}/regenerate`, { method: 'POST' });
-      alert(`客户端“${result.name}”的新令牌（仅显示一次，请立即保存）：\n\n${result.token}`);
-      await refresh();
-    } catch (error) { toast(error.message); }
+    await withPendingControl(button, '轮换中…', async () => {
+      try {
+        const result = await api(`/api/clients/${button.dataset.id}/regenerate`, { method: 'POST', headers: configPreconditionHeaders() });
+        acceptConfigRevision(result);
+        alert(`客户端“${result.name}”的新令牌（仅显示一次，请立即保存）：\n\n${result.token}`);
+        await refresh();
+      } catch (error) { toast((await normalizedConfigMutationError(error)).message); }
+    });
   }));
   $$('.revoke-client').forEach((button) => button.addEventListener('click', async () => {
     if (!confirm(`确认撤销客户端“${button.dataset.name}”？该令牌会立即失效。`)) return;
-    try { await api(`/api/clients/${button.dataset.id}`, { method: 'DELETE' }); await refresh(); toast('客户端令牌已撤销'); }
-    catch (error) { toast(error.message); }
+    await withPendingControl(button, '撤销中…', async () => {
+      try {
+        acceptConfigRevision(await api(`/api/clients/${button.dataset.id}`, { method: 'DELETE', headers: configPreconditionHeaders() }));
+        await refresh();
+        toast('客户端令牌已撤销');
+      } catch (error) { toast((await normalizedConfigMutationError(error)).message); }
+    });
   }));
 }
 
@@ -610,6 +750,7 @@ function renderRouteList(routes) {
       const routes = JSON.parse($('#modelRoutes').value);
       delete routes[button.dataset.model];
       $('#modelRoutes').value = JSON.stringify(routes, null, 2);
+      markConfigDirty('routes');
       renderRouteList(routes);
     } catch (error) { toast(`路由 JSON 无效：${error.message}`); }
   }));
@@ -639,15 +780,17 @@ $$('nav button').forEach((button) => button.addEventListener('click', async () =
   $$('nav button,.view').forEach((x) => x.classList.remove('active'));
   button.classList.add('active'); $(`#${button.dataset.view}`).classList.add('active'); $('#page-title').textContent = titles[button.dataset.view];
   if (button.dataset.view === 'logs') {
-    const result = await loadDataSource('请求日志', () => api('/api/logs'), requestLogItems);
-    requestLogItems = result.value;
-    renderLogs();
-    renderRuntimeSummary();
+    const result = await loadDataSource('请求日志', (signal) => api('/api/logs', { signal }), requestLogItems, (value) => { requestLogItems = value; });
+    if (result.current) {
+      renderLogs();
+      renderRuntimeSummary();
+    }
   }
-  if (button.dataset.view === 'stats') await loadDataSource('用量统计', refreshStats, undefined);
-  if (button.dataset.view === 'prompts') await loadDataSource('Claude 提示词快照', refreshPrompt, undefined);
+  if (button.dataset.view === 'stats') await loadDataSource('用量统计', refreshStats, undefined, renderStats);
+  if (button.dataset.view === 'prompts') await loadDataSource('Claude 提示词快照', refreshPrompt, undefined, renderRecentPrompt);
 }));
 
+$('#settings-form').addEventListener('input', () => markConfigDirty('settings'));
 $('#settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   try {
@@ -657,7 +800,7 @@ $('#settings-form').addEventListener('submit', async (event) => {
       requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes
     });
     if ($('#proxyUrl').value.trim()) payload.proxyUrl = $('#proxyUrl').value.trim();
-    await saveConfig(payload);
+    await saveConfig(payload, 'settings');
   } catch (error) { toast(error.message); }
 });
 
@@ -675,20 +818,42 @@ function configPayload(overrides = {}) {
   };
 }
 
-async function saveConfig(payload) {
-  config = await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) });
-  $('#clientToken').value = '';
-  toast('设置已保存'); await refresh();
+async function saveConfig(payload, section) {
+  if (configSaveInProgress) throw new Error('另一项设置正在保存，请稍候');
+  configSaveInProgress = true;
+  refreshGate.invalidate();
+  const controls = $$('#settings-form button[type="submit"],#save-routes,#save-image-handoff,#save-prompt-rules,.clear-proxy');
+  controls.forEach((control) => { control.disabled = true; });
+  try {
+    config = await api('/api/config', {
+      method: 'PUT',
+      headers: configPreconditionHeaders(),
+      body: JSON.stringify(payload)
+    });
+    clearConfigDirty(section);
+    if (section === 'settings') $('#clientToken').value = '';
+    toast('设置已保存');
+    try { await refresh(); }
+    catch (error) { toast(`设置已保存，但刷新失败：${error.message}`); }
+  } catch (error) {
+    throw await normalizedConfigMutationError(error);
+  } finally {
+    configSaveInProgress = false;
+    controls.forEach((control) => { control.disabled = false; });
+  }
 }
 
 $('#save-routes').addEventListener('click', async () => {
+  let routes;
   try {
-    const routes = JSON.parse($('#modelRoutes').value);
-    await saveConfig(configPayload({ modelRoutes: routes }));
-  } catch (error) { toast(`路由 JSON 无效：${error.message}`); }
+    routes = JSON.parse($('#modelRoutes').value);
+  } catch (error) { return toast(`路由 JSON 无效：${error.message}`); }
+  try { await saveConfig(configPayload({ modelRoutes: routes }), 'routes'); }
+  catch (error) { toast(error.message); }
 });
 
 $('#imageHandoffProvider').addEventListener('change', () => {
+  imageModelDiscoveryGate.invalidate();
   $('#imageHandoffSearch').value = '';
   renderImageHandoffSettings();
 });
@@ -698,6 +863,7 @@ $('#imageHandoffSearch').addEventListener('input', renderImageHandoffModelList);
 $('#load-image-handoff-models').addEventListener('click', async (event) => {
   const provider = $('#imageHandoffProvider').value;
   const credentialId = $('#imageHandoffCredential').value;
+  const generation = imageModelDiscoveryGate.begin();
   const button = event.currentTarget;
   const original = button.textContent;
   button.disabled = true;
@@ -705,14 +871,16 @@ $('#load-image-handoff-models').addEventListener('click', async (event) => {
   $('#image-handoff-status').textContent = '正在使用项目 Key 拉取模型…';
   try {
     const result = credentialId
-      ? await api('/api/models/test', { method: 'POST', body: JSON.stringify({ provider, credentialId }) })
-      : await api(`/api/models?provider=${encodeURIComponent(provider)}`);
+      ? await api('/api/models/test', { method: 'POST', body: JSON.stringify({ provider, credentialId }), signal: generation.controller.signal })
+      : await api(`/api/models?provider=${encodeURIComponent(provider)}`, { signal: generation.controller.signal });
     const models = [...new Set((Array.isArray(result.data) ? result.data : []).map((item) => typeof item?.id === 'string' ? item.id.trim() : '').filter((model) => model && model.length <= 256 && !/[\u0000-\u001f\u007f]/.test(model)))]
       .sort((left, right) => left.localeCompare(right));
     discoveredImageModels.set(provider, models);
+    if (!imageModelDiscoveryGate.isCurrent(generation)) return;
     $('#image-handoff-status').textContent = `已从 ${provider.toUpperCase()} 获取 ${models.length} 个模型 · 已选择 ${imageHandoffModels.length} 个`;
     renderImageHandoffModelList();
   } catch (error) {
+    if (!imageModelDiscoveryGate.isCurrent(generation)) return;
     $('#image-handoff-status').textContent = `拉取失败：${error.message}`;
     toast(`模型拉取失败：${error.message}`);
   } finally {
@@ -748,6 +916,7 @@ $('#select-visible-image-models').addEventListener('click', () => {
     byKey.set(imageHandoffKey(provider, model), { provider, model });
   }
   imageHandoffModels = [...byKey.values()].sort((left, right) => left.provider.localeCompare(right.provider) || left.model.localeCompare(right.model));
+  markConfigDirty('images');
   renderSelectedImageHandoffModels();
   renderImageHandoffModelList();
   $('#image-handoff-status').textContent = `已选择 ${imageHandoffModels.length} 个模型，尚未保存`;
@@ -757,6 +926,7 @@ $('#select-visible-image-models').addEventListener('click', () => {
 $('#clear-provider-image-models').addEventListener('click', () => {
   const provider = $('#imageHandoffProvider').value;
   imageHandoffModels = imageHandoffModels.filter((entry) => entry.provider !== provider);
+  markConfigDirty('images');
   renderSelectedImageHandoffModels();
   renderImageHandoffModelList();
   $('#image-handoff-status').textContent = `已清除 ${provider.toUpperCase()} 的选择，尚未保存`;
@@ -764,10 +934,10 @@ $('#clear-provider-image-models').addEventListener('click', () => {
 
 $('#save-image-handoff').addEventListener('click', async () => {
   try {
-    await saveConfig(configPayload({ imageHandoffModels }));
+    await saveConfig(configPayload({ imageHandoffModels }), 'images');
     $('#image-handoff-status').textContent = `已保存 ${imageHandoffModels.length} 个模型`;
   }
-  catch (error) { toast(`图片交接设置无效：${error.message}`); }
+  catch (error) { toast(error.message); }
 });
 
 $('#add-route').addEventListener('click', () => {
@@ -782,6 +952,7 @@ $('#add-route').addEventListener('click', () => {
       ...($('#routeUpstream').value.trim() ? { upstreamModel: $('#routeUpstream').value.trim() } : {})
     };
     $('#modelRoutes').value = JSON.stringify(routes, null, 2);
+    markConfigDirty('routes');
     renderRouteList(routes);
     $('#routeModel').value = $('#routeUpstream').value = '';
     $('#routeToolChoice').value = '';
@@ -790,14 +961,17 @@ $('#add-route').addEventListener('click', () => {
 });
 
 $('#modelRoutes').addEventListener('input', () => {
+  markConfigDirty('routes');
   try { renderRouteList(JSON.parse($('#modelRoutes').value)); } catch { /* 保存时显示详细错误 */ }
 });
 
 $('#save-prompt-rules').addEventListener('click', async () => {
+  let promptRewriteRules;
   try {
-    const promptRewriteRules = JSON.parse($('#promptRules').value);
-    await saveConfig(configPayload({ promptRewriteRules }));
-  } catch (error) { toast(`提示词规则无效：${error.message}`); }
+    promptRewriteRules = JSON.parse($('#promptRules').value);
+  } catch (error) { return toast(`提示词规则无效：${error.message}`); }
+  try { await saveConfig(configPayload({ promptRewriteRules }), 'prompts'); }
+  catch (error) { toast(error.message); }
 });
 
 $('#restore-prompt-rules').addEventListener('click', () => {
@@ -831,6 +1005,7 @@ $('#prompt-rule-form').addEventListener('submit', (event) => {
 $('#cancel-prompt-rule').addEventListener('click', resetPromptRuleForm);
 
 $('#promptRules').addEventListener('input', () => {
+  markConfigDirty('prompts');
   try { renderPromptRuleList(); } catch { /* 保存时显示详细错误 */ }
 });
 
@@ -846,13 +1021,16 @@ $('#preview-prompt').addEventListener('click', async () => {
 });
 
 $('#refresh-prompt').addEventListener('click', async () => {
-  const result = await loadDataSource('Claude 提示词快照', refreshPrompt, undefined);
-  toast(result.fresh ? '已刷新最近请求' : '最近请求暂未更新');
+  const result = await loadDataSource('Claude 提示词快照', refreshPrompt, undefined, renderRecentPrompt);
+  if (result.current) toast(result.fresh ? '已刷新最近请求' : '最近请求暂未更新');
 });
 
 $('#clear-prompt').addEventListener('click', async () => {
+  const gate = dataSourceGate('Claude 提示词快照');
+  gate.invalidate();
   try {
     await api('/api/prompt-rewrite/recent', { method: 'DELETE' });
+    gate.invalidate();
     renderRecentPrompt({});
     dataSourceFailures.delete('Claude 提示词快照');
     renderDataSourceFailures();
@@ -884,17 +1062,31 @@ $('#copy-prompt-final').addEventListener('click', () => copyPrompt('#promptFinal
 
 $('#client-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  try {
-    const created = await api('/api/clients', { method: 'POST', body: JSON.stringify({ name: $('#clientName').value, maxConcurrentRequests: Number($('#clientConcurrency').value) }) });
-    alert(`客户端“${created.name}”令牌（仅显示一次，请立即保存）：\n\n${created.token}`);
-    $('#clientName').value = '';
-    await refresh();
-  } catch (error) { toast(error.message); }
+  const submit = event.currentTarget.querySelector('button[type="submit"]');
+  await withPendingControl(submit, '创建中…', async () => {
+    try {
+      const created = await api('/api/clients', {
+        method: 'POST', headers: configPreconditionHeaders(),
+        body: JSON.stringify({ name: $('#clientName').value, maxConcurrentRequests: Number($('#clientConcurrency').value) })
+      });
+      acceptConfigRevision(created);
+      alert(`客户端“${created.name}”令牌（仅显示一次，请立即保存）：\n\n${created.token}`);
+      $('#clientName').value = '';
+      await refresh();
+    } catch (error) { toast((await normalizedConfigMutationError(error)).message); }
+  });
 });
 
-$('#regen-token').addEventListener('click', async () => {
+$('#regen-token').addEventListener('click', async (event) => {
   if (!confirm('旧访问令牌将立即失效，确认继续？')) return;
-  try { const result = await api('/api/token/regenerate', { method: 'POST' }); alert(`新访问令牌（请立即保存）：\n\n${result.token}`); await refresh(); } catch (error) { toast(error.message); }
+  await withPendingControl(event.currentTarget, '轮换中…', async () => {
+    try {
+      const result = await api('/api/token/regenerate', { method: 'POST', headers: configPreconditionHeaders() });
+      acceptConfigRevision(result);
+      alert(`新访问令牌（请立即保存）：\n\n${result.token}`);
+      await refresh();
+    } catch (error) { toast((await normalizedConfigMutationError(error)).message); }
+  });
 });
 
 $('#add-provider-credential').addEventListener('click', () => openProviderCredentialForm(config.defaultProvider || 'zen'));
@@ -902,24 +1094,27 @@ $('#cancel-provider-credential').addEventListener('click', resetProviderCredenti
 
 $('#provider-credential-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  try {
-    const wasEditing = Boolean(editingProviderCredential);
-    const provider = $('#providerCredentialProvider').value;
-    const apiKey = $('#providerCredentialKey').value.trim();
-    const proxyUrl = $('#providerCredentialProxy').value.trim();
-    const clearProxy = $('#providerCredentialClearProxy').checked;
-    const body = {
-      provider,
-      name: $('#providerCredentialName').value.trim(),
-      ...(apiKey ? { apiKey } : {}),
-      ...(proxyUrl || clearProxy || !editingProviderCredential ? { proxyUrl: clearProxy ? '' : proxyUrl } : {})
-    };
-    const path = editingProviderCredential ? `/api/provider-credentials/${provider}/${encodeURIComponent(editingProviderCredential.id)}` : '/api/provider-credentials';
-    config = await api(path, { method: editingProviderCredential ? 'PUT' : 'POST', body: JSON.stringify(body) });
-    resetProviderCredentialForm();
-    toast(wasEditing ? 'Key 已更新' : 'Key 已添加');
-    await refresh();
-  } catch (error) { toast(error.message); }
+  const submit = event.currentTarget.querySelector('button[type="submit"]');
+  await withPendingControl(submit, editingProviderCredential ? '保存中…' : '添加中…', async () => {
+    try {
+      const wasEditing = Boolean(editingProviderCredential);
+      const provider = $('#providerCredentialProvider').value;
+      const apiKey = $('#providerCredentialKey').value.trim();
+      const proxyUrl = $('#providerCredentialProxy').value.trim();
+      const clearProxy = $('#providerCredentialClearProxy').checked;
+      const body = {
+        provider,
+        name: $('#providerCredentialName').value.trim(),
+        ...(apiKey ? { apiKey } : {}),
+        ...(proxyUrl || clearProxy || !editingProviderCredential ? { proxyUrl: clearProxy ? '' : proxyUrl } : {})
+      };
+      const path = editingProviderCredential ? `/api/provider-credentials/${provider}/${encodeURIComponent(editingProviderCredential.id)}` : '/api/provider-credentials';
+      config = await api(path, { method: editingProviderCredential ? 'PUT' : 'POST', headers: configPreconditionHeaders(), body: JSON.stringify(body) });
+      resetProviderCredentialForm();
+      toast(wasEditing ? 'Key 已更新' : 'Key 已添加');
+      await refresh();
+    } catch (error) { toast((await normalizedConfigMutationError(error)).message); }
+  });
 });
 
 $('#test-provider-credential').addEventListener('click', (event) => {
@@ -942,12 +1137,14 @@ $('#provider-credential-list').addEventListener('click', async (event) => {
   }
   if (button.classList.contains('delete-provider-row')) {
     if (!confirm(`确认删除 Key“${button.dataset.name}”？`)) return;
-    try {
-      config = await api(`/api/provider-credentials/${provider}/${encodeURIComponent(button.dataset.id)}`, { method: 'DELETE' });
-      if (editingProviderCredential?.id === button.dataset.id && editingProviderCredential.provider === provider) resetProviderCredentialForm();
-      toast('Key 已删除');
-      await refresh();
-    } catch (error) { toast(error.message); }
+    await withPendingControl(button, '删除中…', async () => {
+      try {
+        config = await api(`/api/provider-credentials/${provider}/${encodeURIComponent(button.dataset.id)}`, { method: 'DELETE', headers: configPreconditionHeaders() });
+        if (editingProviderCredential?.id === button.dataset.id && editingProviderCredential.provider === provider) resetProviderCredentialForm();
+        toast('Key 已删除');
+        await refresh();
+      } catch (error) { toast((await normalizedConfigMutationError(error)).message); }
+    });
   }
 });
 
@@ -961,11 +1158,26 @@ $$('.proxy-preset').forEach((button) => button.addEventListener('click', () => f
 
 $('#password-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  try { await api('/api/password', { method: 'PUT', body: JSON.stringify({ currentPassword: $('#currentPassword').value, newPassword: $('#newPassword').value }) }); alert('密码已修改，请重新登录。'); location.reload(); } catch (error) { toast(error.message); }
+  if (!confirmDiscardConfigDrafts('修改密码并重新登录')) return;
+  const submit = event.currentTarget.querySelector('button[type="submit"]');
+  await withPendingControl(submit, '修改中…', async () => {
+    try {
+      await api('/api/password', {
+        method: 'PUT', headers: configPreconditionHeaders(),
+        body: JSON.stringify({ currentPassword: $('#currentPassword').value, newPassword: $('#newPassword').value })
+      });
+      alert('密码已修改，请重新登录。');
+      discardConfigDrafts();
+      location.reload();
+    } catch (error) { toast((await normalizedConfigMutationError(error)).message); }
+  });
 });
 
 $('#clear-logs').addEventListener('click', async () => {
+  const gate = dataSourceGate('请求日志');
+  gate.invalidate();
   await api('/api/logs', { method: 'DELETE' });
+  gate.invalidate();
   requestLogItems = [];
   renderLogs();
   toast('记录已清空');
@@ -998,10 +1210,10 @@ $('#log-rows').addEventListener('click', async (event) => {
   } catch { toast('复制失败，请手动复制'); }
 });
 $('#refresh-stats').addEventListener('click', async () => {
-  const result = await loadDataSource('用量统计', refreshStats, undefined);
-  toast(result.fresh ? '统计已刷新' : '统计暂未更新');
+  const result = await loadDataSource('用量统计', refreshStats, undefined, renderStats);
+  if (result.current) toast(result.fresh ? '统计已刷新' : '统计暂未更新');
 });
-$('#stats-window').addEventListener('change', () => loadDataSource('用量统计', refreshStats, undefined));
+$('#stats-window').addEventListener('change', () => loadDataSource('用量统计', refreshStats, undefined, renderStats));
 $('#stats-credential-rows').addEventListener('click', async (event) => {
   const button = event.target.closest('.reset-credential-health');
   if (!button) return;
@@ -1011,15 +1223,41 @@ $('#stats-credential-rows').addEventListener('click', async (event) => {
       method: 'POST',
       body: JSON.stringify({ provider: button.dataset.provider, credentialId: button.dataset.credentialId })
     });
-    const result = await loadDataSource('用量统计', refreshStats, undefined);
-    toast(result.fresh ? 'Key 健康状态已重置' : 'Key 健康状态已重置，统计暂未更新');
+    const result = await loadDataSource('用量统计', refreshStats, undefined, renderStats);
+    if (result.current) toast(result.fresh ? 'Key 健康状态已重置' : 'Key 健康状态已重置，统计暂未更新');
   } catch (error) {
     toast(error.message);
   } finally { button.disabled = false; }
 });
-$('#logout').addEventListener('click', async () => { await api('/api/logout', { method: 'POST' }); location.reload(); });
-$('#refresh').addEventListener('click', () => refresh().then((result) => toast(result.degraded ? '已刷新可用数据' : '已刷新')).catch((error) => toast(error.message)));
+$('#logout').addEventListener('click', async () => {
+  if (!confirmDiscardConfigDrafts('退出登录')) return;
+  try {
+    await api('/api/logout', { method: 'POST' });
+    discardConfigDrafts();
+    location.reload();
+  } catch (error) { toast(error.message); }
+});
+$('#refresh').addEventListener('click', async () => {
+  const dirty = [...dirtyConfigSections];
+  if (dirty.length && !confirm(`${dirtyConfigMessage()}有未保存修改，刷新会丢弃这些内容。确认继续？`)) return;
+  dirtyConfigSections.clear();
+  renderConfigDraftStatus();
+  try {
+    const result = await refresh();
+    if (!result.superseded) toast(result.degraded ? '已刷新可用数据' : '已刷新');
+  } catch (error) {
+    dirty.forEach((section) => dirtyConfigSections.add(section));
+    renderConfigDraftStatus();
+    toast(error.message);
+  }
+});
 $$('.copy').forEach((button) => button.addEventListener('click', () => navigator.clipboard.writeText(`${location.origin}/${button.dataset.copy}/v1`).then(() => toast(`已复制 ${button.dataset.copy === 'go' ? 'Go' : 'Zen'} 地址`))));
+
+window.addEventListener('beforeunload', (event) => {
+  if (!dirtyConfigSections.size) return;
+  event.preventDefault();
+  event.returnValue = '';
+});
 
 setInterval(updateCooldownCountdowns, 1000);
 boot().catch((error) => { $('#auth').classList.remove('hidden'); $('#auth-error').textContent = `无法连接服务：${error.message}`; });

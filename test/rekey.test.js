@@ -31,6 +31,6 @@ test('rekey 命令可原子轮换配置主密钥', async () => {
   } finally {
     if (!child.killed && child.exitCode === null) child.kill();
     await unlink(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
-    await unlink(`${file}.${child.pid}.rekey.tmp`).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    await unlink(`${file}.tmp`).catch((error) => { if (error.code !== 'ENOENT') throw error; });
   }
 });

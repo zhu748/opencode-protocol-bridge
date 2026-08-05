@@ -38,6 +38,25 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /loadDataSource\('请求日志'/);
   assert.match(script, /loadDataSource\('运行状态'/);
   assert.match(script, /loadDataSource\('用量统计', refreshStats/);
+  assert.match(script, /createLatestRequestGate/);
+  assert.match(script, /if \(!result\.superseded\) toast/);
+  assert.match(script, /configSaveInProgress/);
+  assert.match(script, /dirtyConfigSections/);
+  assert.match(script, /beforeunload/);
+  assert.match(script, /'if-match': `"\$\{config\.revision\}"`/);
+  assert.match(script, /error\.status !== 412/);
+  assert.match(script, /最新修订已载入，当前草稿仍保留/);
+  assert.match(script, /function withPendingControl/);
+  assert.match(script, /function configPreconditionHeaders/);
+  assert.match(script, /function acceptConfigRevision/);
+  assert.match(script, /provider-credentials[\s\S]*?headers: configPreconditionHeaders\(\)/);
+  assert.match(script, /acceptConfigRevision\(await api\(`\/api\/clients/);
+  assert.match(script, /activeAdminMutations/);
+  assert.match(script, /activeAdminModelDiscoveries/);
+  assert.match(script, /activeHttpConnections/);
+  assert.match(script, /confirmDiscardConfigDrafts\('退出登录'\)/);
+  assert.match(html, /id="config-draft-status"[^>]*aria-live="polite"/);
+  assert.match(settings, /\.config-draft-status\.conflict/);
   assert.match(script, /renderRecentPrompt\(\{\}\)/);
   assert.doesNotMatch(script, /api\('\/api\/config'\), api\('\/api\/logs'\), api\('\/api\/status'\), api\('\/api\/clients'\)/);
   assert.match(html, /TUIC\/VLESS\/VMess/);
@@ -60,11 +79,57 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(settings, /@media \(max-width: 720px\)[\s\S]*?\.log-toolbar/);
 });
 
-test('Render Blueprint 暴露批量 Key、逐项代理与远程图片交接变量', async () => {
+test('Render Blueprint 暴露批量 Key、逐项代理、远程图片交接和 sing-box 变量', async () => {
   const blueprint = await readFile(resolve(projectDir, 'render.yaml'), 'utf8');
-  for (const name of ['OPENCODE_ZEN_KEYS', 'OPENCODE_GO_KEYS', 'OPENCODE_ZEN_PROXY_URLS', 'OPENCODE_GO_PROXY_URLS', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL']) {
+  assert.match(blueprint, /buildCommand: npm ci --omit=dev --ignore-scripts && npm run install:sing-box/);
+  for (const name of ['OPENCODE_ZEN_KEYS', 'OPENCODE_GO_KEYS', 'OPENCODE_ZEN_PROXY_URLS', 'OPENCODE_GO_PROXY_URLS', 'OPENCODE_BRIDGE_MAX_ADMIN_MUTATIONS', 'OPENCODE_BRIDGE_MAX_ADMIN_MODEL_DISCOVERIES', 'OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS', 'OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_MAX_BYTES', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_LOCAL_RETENTION_MS', 'OPENCODE_BRIDGE_SING_BOX_PATH', 'OPENCODE_BRIDGE_SING_BOX_VERSION']) {
     assert.equal((blueprint.match(new RegExp(`key: ${name}\\b`, 'g')) || []).length, 1, `${name} 应出现一次`);
   }
+});
+
+test('部署构建固定受支持的 Node 版本并排除本地密钥与运行数据', async () => {
+  const [dockerignore, dockerfile, nodeVersion, workflow, dependabot, manifestText, lockText] = await Promise.all([
+    readFile(resolve(projectDir, '.dockerignore'), 'utf8'),
+    readFile(resolve(projectDir, 'Dockerfile'), 'utf8'),
+    readFile(resolve(projectDir, '.node-version'), 'utf8'),
+    readFile(resolve(projectDir, '.github/workflows/ci.yml'), 'utf8'),
+    readFile(resolve(projectDir, '.github/dependabot.yml'), 'utf8'),
+    readFile(resolve(projectDir, 'package.json'), 'utf8'),
+    readFile(resolve(projectDir, 'package-lock.json'), 'utf8')
+  ]);
+  const manifest = JSON.parse(manifestText);
+  const lock = JSON.parse(lockText);
+
+  assert.equal(nodeVersion.trim(), '24.18.0');
+  assert.equal(manifest.engines.node, '^22.20.0 || ^24.11.0');
+  assert.equal(lock.packages[''].engines.node, manifest.engines.node);
+  assert.match(dockerfile, /^FROM node:24\.18\.0-alpine3\.24$/m);
+  assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
+  assert.match(workflow, /runs-on: ubuntu-24\.04/);
+  assert.match(workflow, /node-version: \[22\.23\.2, 24\.18\.0\]/);
+  const actionReferences = [...workflow.matchAll(/\buses:\s+([^\s#]+)/g)].map((match) => match[1]);
+  assert.ok(actionReferences.length > 0);
+  for (const reference of actionReferences) {
+    assert.match(reference, /^[^@\s]+@[a-f0-9]{40}$/, `Action 必须固定完整提交 SHA：${reference}`);
+  }
+  for (const action of ['actions/checkout', 'actions/setup-node', 'actions/upload-artifact']) {
+    assert.match(workflow, new RegExp(`uses: ${action}@[a-f0-9]{40} # v`));
+  }
+  assert.match(workflow, /npm ci --ignore-scripts/);
+  assert.match(workflow, /npm run audit:prod/);
+  assert.match(workflow, /npm run audit:signatures/);
+  assert.match(workflow, /npm run --silent sbom:prod > sbom\.cdx\.json/);
+  assert.match(workflow, /name: production-sbom/);
+  assert.match(workflow, /retention-days: 14/);
+  assert.equal(manifest.scripts['sbom:prod'], 'npm sbom --omit=dev --sbom-format=cyclonedx');
+  for (const ecosystem of ['npm', 'docker', 'github-actions']) {
+    assert.match(dependabot, new RegExp(`package-ecosystem: ${ecosystem}\\b`));
+  }
+
+  for (const pattern of ['.env', '.env.*', '*.key', '*.pem', '*.p12', '*.pfx', 'data/', 'node_modules/', 'vendor/']) {
+    assert.ok(dockerignore.split(/\r?\n/).includes(pattern), `.dockerignore 应包含 ${pattern}`);
+  }
+  assert.match(dockerfile, /COPY package\*\.json \.npmrc \.\//);
 });
 
 test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async () => {
@@ -76,6 +141,11 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.equal(spec.paths['/responses'].post.responses['504'].$ref, '#/components/responses/UpstreamTimeout');
   assert.equal(spec.paths['/models'].get.responses['504'].$ref, '#/components/responses/UpstreamTimeout');
   assert.ok(spec.paths['/messages'].post.responses['429']);
+  assert.equal(spec.paths['/models'].get.responses['429'].$ref, '#/components/responses/RateLimited');
+  assert.equal(spec.paths['/models/{model}'].get.responses['429'].$ref, '#/components/responses/RateLimited');
+  assert.equal(spec.components.headers.LocalRequestId.schema.pattern, '^[a-f0-9]{32}$');
+  assert.equal(spec.paths['/messages'].post.responses['200'].headers['x-request-id'].$ref, '#/components/headers/LocalRequestId');
+  assert.equal(spec.paths['/messages'].post.responses['415'].$ref, '#/components/responses/UnsupportedMediaType');
   assert.equal(spec.paths['/messages'].post.responses['200'].headers['x-opencode-key-attempts'].$ref, '#/components/headers/KeyAttempts');
   assert.equal(spec.paths['/models'].get.responses['200'].headers['x-opencode-key-attempts'].$ref, '#/components/headers/KeyAttempts');
   assert.equal(spec.paths['/models'].get.responses['400'].$ref, '#/components/responses/InvalidRequest');

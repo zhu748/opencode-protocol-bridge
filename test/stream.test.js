@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_SSE_EVENT_BYTES, observeSse, translateSse } from '../src/stream.js';
+import { createSseObserver, MAX_SSE_EVENT_BYTES, observeSse, translateSse } from '../src/stream.js';
 
 function responseFrom(events) {
   const encoder = new TextEncoder();
@@ -156,6 +156,64 @@ test('同协议观察器提取 usage 但不参与流转换', async () => {
   const observed = await observeSse(source, 'chat', 'alias');
   assert.equal(observed.error, undefined);
   assert.deepEqual(observed.usage, { inputTokens: 6, outputTokens: 2, cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0 });
+});
+
+test('流式 usage 规范化数字字符串并隔离非法或超大计数', async () => {
+  const source = responseFrom([
+    ['message', { id: 'chat_usage_bounds', model: 'kimi', choices: [{ delta: { content: 'ok' }, finish_reason: null }] }],
+    ['message', {
+      id: 'chat_usage_bounds', choices: [{ delta: {}, finish_reason: 'stop' }],
+      usage: {
+        prompt_tokens: '8', completion_tokens: -2,
+        prompt_tokens_details: { cached_tokens: '3', cache_creation_tokens: 1.25 },
+        completion_tokens_details: { reasoning_tokens: 1e100 }
+      }
+    }]
+  ]);
+  let usage;
+  const output = await collect(translateSse(source, 'chat', 'responses', 'alias', { onUsage: (value) => { usage = value; } }));
+  assert.deepEqual(usage, {
+    inputTokens: 8,
+    outputTokens: 0,
+    cachedInputTokens: 3,
+    cacheCreationInputTokens: 0,
+    reasoningTokens: Number.MAX_SAFE_INTEGER
+  });
+  const completedBlock = output.split(/\n\n/).find((block) => block.includes('event: response.completed'));
+  const completed = JSON.parse(completedBlock.split(/\r?\n/).find((line) => line.startsWith('data: ')).slice(6));
+  assert.equal(completed.response.usage.total_tokens, 8);
+  assert.equal(typeof completed.response.usage.total_tokens, 'number');
+});
+
+test('增量 SSE 观察器可跨 chunk 解析且不会持有独立读取分支', () => {
+  const encoder = new TextEncoder();
+  let callbackUsage;
+  const observer = createSseObserver('chat', 'alias', { onUsage: (usage) => { callbackUsage = usage; } });
+  const raw = [
+    'data: {"id":"chat_incremental","choices":[{"delta":{"content":"原样"},"finish_reason":null}]}\r',
+    '\n\r\ndata: {"id":"chat_incremental","choices":[{"delta":{},"finish_reason":"stop"}],',
+    '"usage":{"prompt_tokens":4,"completion_tokens":2}}\r\n\r\n'
+  ];
+  for (const chunk of raw) observer.write(encoder.encode(chunk));
+  const observed = observer.end();
+  assert.equal(observed.error, undefined);
+  assert.deepEqual(observed.usage, { inputTokens: 4, outputTokens: 2, cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0 });
+  assert.deepEqual(callbackUsage, observed.usage);
+});
+
+test('同协议观察器保留底层流读取错误而不被残缺事件覆盖', async () => {
+  const encoder = new TextEncoder();
+  let firstPull = true;
+  const source = new Response(new ReadableStream({
+    pull(controller) {
+      if (firstPull) {
+        firstPull = false;
+        controller.enqueue(encoder.encode('data: {"id":"partial"'));
+      } else controller.error(new Error('socket lost'));
+    }
+  }));
+  const observed = await observeSse(source, 'chat', 'alias');
+  assert.equal(observed.error.message, 'socket lost');
 });
 
 test('同协议观察器不会把缺失 usage 的正常流伪记为零 token', async () => {

@@ -97,13 +97,19 @@ if (-not $npmCommand) {
 
 $nodeVersionText = (& node -p "process.versions.node").Trim()
 $nodeParts = $nodeVersionText.Split('.') | ForEach-Object { [int]$_ }
-if ($nodeParts[0] -lt 20 -or $nodeParts[0] -ge 25 -or ($nodeParts[0] -eq 20 -and $nodeParts[1] -lt 18)) {
-  Write-Warning "Current Node.js version is $nodeVersionText; recommended range is 20.18.1-24.x."
+if (
+  $nodeParts[0] -ge 25 -or
+  $nodeParts[0] -lt 22 -or
+  $nodeParts[0] -eq 23 -or
+  ($nodeParts[0] -eq 22 -and $nodeParts[1] -lt 20) -or
+  ($nodeParts[0] -eq 24 -and $nodeParts[1] -lt 11)
+) {
+  Write-Warning "Current Node.js version is $nodeVersionText; recommended versions are Node.js 22.20+ or 24.11+."
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $Root 'node_modules'))) {
-  Write-Host "node_modules not found; installing dependencies with npm install"
-  & npm install
+  Write-Host "node_modules not found; restoring locked dependencies with npm ci"
+  & npm ci --ignore-scripts
   if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
   }

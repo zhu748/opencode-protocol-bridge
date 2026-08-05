@@ -309,6 +309,33 @@
   line-height: 1.5;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.config-draft-status {
+  max-width: min(52vw, 560px);
+  padding: 7px 10px;
+  border: 1px solid rgba(245, 184, 75, .35);
+  border-radius: 999px;
+  background: rgba(245, 184, 75, .08);
+  color: #f5c76e;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-draft-status.conflict {
+  border-color: rgba(255, 107, 118, .4);
+  background: rgba(255, 107, 118, .1);
+  color: var(--red);
+}
+
 .prompt-recent {
   margin-top: 14px;
 }

@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     region: singapore
-    buildCommand: npm ci --omit=dev
+    buildCommand: npm ci --omit=dev --ignore-scripts && npm run install:sing-box
     startCommand: npm start
     healthCheckPath: /health
     autoDeployTrigger: commit
@@ -18,6 +18,14 @@ services:
         value: true
       - key: OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP
         value: true
+      - key: OPENCODE_BRIDGE_MAX_ADMIN_MUTATIONS
+        value: 16
+      - key: OPENCODE_BRIDGE_MAX_ADMIN_MODEL_DISCOVERIES
+        value: 4
+      - key: OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS
+        value: 256
+      - key: OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS
+        value: 30000
       - key: CONFIG_ENCRYPTION_KEY
         generateValue: true
       - key: OPENCODE_BRIDGE_ADMIN_PASSWORD
@@ -26,6 +34,14 @@ services:
         sync: false
       - key: OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL
         sync: false
+      - key: OPENCODE_BRIDGE_IMAGE_HANDOFF_MAX_BYTES
+        value: 268435456
+      - key: OPENCODE_BRIDGE_IMAGE_HANDOFF_LOCAL_RETENTION_MS
+        value: 86400000
+      - key: OPENCODE_BRIDGE_SING_BOX_PATH
+        value: /opt/render/project/src/vendor/sing-box/sing-box
+      - key: OPENCODE_BRIDGE_SING_BOX_VERSION
+        value: 1.13.16
       - key: OPENCODE_BRIDGE_DEFAULT_PROVIDER
         value: zen
       - key: OPENCODE_PROXY_URL

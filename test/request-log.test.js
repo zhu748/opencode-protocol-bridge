@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { RequestLogStore } from '../src/request-log.js';
 
@@ -67,6 +67,37 @@ test('损坏的日志文件不会阻止服务启动并会暴露诊断信息', as
   }
 });
 
+test('持久化日志加载会清理异常退出遗留的固定临时副本', async () => {
+  const file = resolve(import.meta.dirname, `../data/log-${randomUUID()}.json`);
+  try {
+    await writeFile(file, '[]\n', 'utf8');
+    await writeFile(`${file}.tmp`, '[{"requestId":"stale"}]', 'utf8');
+    const store = new RequestLogStore(file);
+    await store.ensureLoaded({ persist: true, limit: 100 });
+    assert.deepEqual(store.list(), []);
+    await assert.rejects(readFile(`${file}.tmp`, 'utf8'), (error) => error.code === 'ENOENT');
+  } finally {
+    await unlink(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    await unlink(`${file}.tmp`).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('临时副本无法清理时仍加载正式日志并保留诊断', async () => {
+  const file = resolve(import.meta.dirname, `../data/log-${randomUUID()}.json`);
+  try {
+    await writeFile(file, '[{"requestId":"persisted","status":200}]\n', 'utf8');
+    await rmdir(`${file}.tmp`).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    await mkdir(`${file}.tmp`);
+    const store = new RequestLogStore(file);
+    await store.ensureLoaded({ persist: true, limit: 100 });
+    assert.equal(store.list()[0].requestId, 'persisted');
+    assert.match(store.lastError, /无法清理日志临时文件/);
+  } finally {
+    await unlink(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    await rmdir(`${file}.tmp`).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
 test('日志会保留阶段耗时、缓存读取、缓存写入和推理 token', async () => {
   const store = new RequestLogStore('unused.json');
   await store.add({ requestId: 'usage', model: 'alias', upstreamModel: 'real-model', credentialId: 'environment:2', upstreamRequestId: 'upstream-trace', retryAfter: '7', errorCode: 'upstream_connect_timeout', upstreamWaitMs: 123, upstreamBodyMs: 45, inputTokens: 10, outputTokens: 4, inputTokensIncludeCache: true, cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningTokens: 1 });
@@ -75,6 +106,23 @@ test('日志会保留阶段耗时、缓存读取、缓存写入和推理 token',
     status: 0, duration: 0, upstreamWaitMs: 123, upstreamBodyMs: 45, stream: false, inputTokens: 10, outputTokens: 4, inputTokensIncludeCache: true,
     cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningTokens: 1, errorCode: 'upstream_connect_timeout'
   });
+});
+
+test('日志会钳制异常数值，避免持久化数据污染统计', async () => {
+  const store = new RequestLogStore('unused.json');
+  await store.add({
+    requestId: 'numeric-bounds', status: 1e100, duration: Infinity,
+    credentialAttempts: 1e100, upstreamWaitMs: -5,
+    inputTokens: 1e100, outputTokens: -2, cachedInputTokens: '3'
+  });
+  const entry = store.list()[0];
+  assert.equal(entry.status, 999);
+  assert.equal(entry.duration, 0);
+  assert.equal(entry.credentialAttempts, 1000);
+  assert.equal(entry.upstreamWaitMs, 0);
+  assert.equal(entry.inputTokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(entry.outputTokens, 0);
+  assert.equal(entry.cachedInputTokens, 3);
 });
 
 test('关闭持久化会取消尚未执行的延迟写盘', async () => {

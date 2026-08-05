@@ -478,10 +478,19 @@ export function hasUsageData(body) {
   const usage = body?.usage;
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return false;
   if (['input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'prompt_cache_hit_tokens', 'prompt_cache_miss_tokens']
-    .some((field) => Object.hasOwn(usage, field))) return true;
+    .some((field) => Object.hasOwn(usage, field) && parsedUsageCount(usage[field]) !== null)) return true;
   return [usage.input_tokens_details, usage.prompt_tokens_details, usage.output_tokens_details, usage.completion_tokens_details]
     .some((details) => details && typeof details === 'object' && !Array.isArray(details)
-      && ['cached_tokens', 'cache_write_tokens', 'cache_creation_tokens', 'reasoning_tokens'].some((field) => Object.hasOwn(details, field)));
+      && ['cached_tokens', 'cache_write_tokens', 'cache_creation_tokens', 'reasoning_tokens']
+        .some((field) => Object.hasOwn(details, field) && parsedUsageCount(details[field]) !== null));
+}
+
+export function normalizeUsageCount(...candidates) {
+  for (const value of candidates) {
+    const parsed = parsedUsageCount(value);
+    if (parsed !== null) return parsed;
+  }
+  return 0;
 }
 
 function applyCompatibilityOptions(body, protocol, options) {
@@ -499,9 +508,9 @@ export function normalizeResponse(body, protocol, fallbackModel = '', { rejectUn
   if (protocol === 'claude') return {
     id: body.id, model: body.model || fallbackModel,
     parts: normalizeParts(body.content, { includeReasoning: true, rejectUnknown }),
-    inputTokens: body.usage?.input_tokens || 0, outputTokens: body.usage?.output_tokens || 0,
-    cachedInputTokens: body.usage?.cache_read_input_tokens || 0,
-    cacheCreationInputTokens: body.usage?.cache_creation_input_tokens || 0,
+    inputTokens: normalizeUsageCount(body.usage?.input_tokens), outputTokens: normalizeUsageCount(body.usage?.output_tokens),
+    cachedInputTokens: normalizeUsageCount(body.usage?.cache_read_input_tokens),
+    cacheCreationInputTokens: normalizeUsageCount(body.usage?.cache_creation_input_tokens),
     reasoningTokens: 0,
     stopReason: body.stop_reason
   };
@@ -518,10 +527,10 @@ export function normalizeResponse(body, protocol, fallbackModel = '', { rejectUn
     }
     return {
       id: body.id, model: body.model || fallbackModel, parts,
-      inputTokens: body.usage?.input_tokens ?? body.usage?.prompt_tokens ?? 0, outputTokens: body.usage?.output_tokens ?? body.usage?.completion_tokens ?? 0,
-      cachedInputTokens: body.usage?.cache_read_input_tokens || body.usage?.prompt_cache_hit_tokens || body.usage?.input_tokens_details?.cached_tokens || body.usage?.prompt_tokens_details?.cached_tokens || 0,
-      cacheCreationInputTokens: body.usage?.cache_creation_input_tokens || body.usage?.input_tokens_details?.cache_write_tokens || body.usage?.input_tokens_details?.cache_creation_tokens || body.usage?.prompt_tokens_details?.cache_write_tokens || body.usage?.prompt_tokens_details?.cache_creation_tokens || 0,
-      reasoningTokens: body.usage?.output_tokens_details?.reasoning_tokens || body.usage?.completion_tokens_details?.reasoning_tokens || 0,
+      inputTokens: normalizeUsageCount(body.usage?.input_tokens, body.usage?.prompt_tokens), outputTokens: normalizeUsageCount(body.usage?.output_tokens, body.usage?.completion_tokens),
+      cachedInputTokens: normalizeUsageCount(body.usage?.cache_read_input_tokens, body.usage?.prompt_cache_hit_tokens, body.usage?.input_tokens_details?.cached_tokens, body.usage?.prompt_tokens_details?.cached_tokens),
+      cacheCreationInputTokens: normalizeUsageCount(body.usage?.cache_creation_input_tokens, body.usage?.input_tokens_details?.cache_write_tokens, body.usage?.input_tokens_details?.cache_creation_tokens, body.usage?.prompt_tokens_details?.cache_write_tokens, body.usage?.prompt_tokens_details?.cache_creation_tokens),
+      reasoningTokens: normalizeUsageCount(body.usage?.output_tokens_details?.reasoning_tokens, body.usage?.completion_tokens_details?.reasoning_tokens),
       stopReason: responsesStopReason(body)
     };
   }
@@ -535,15 +544,23 @@ export function normalizeResponse(body, protocol, fallbackModel = '', { rejectUn
   if (message.function_call) parts.push({ type: 'tool_call', id: message.function_call.id || `call_${randomUUID().replaceAll('-', '')}`, name: message.function_call.name, arguments: sanitizeToolArguments(message.function_call.name, parseArguments(message.function_call.arguments)) });
   return {
     id: body.id, model: body.model || fallbackModel, parts,
-    inputTokens: body.usage?.prompt_tokens ?? body.usage?.input_tokens ?? 0, outputTokens: body.usage?.completion_tokens ?? body.usage?.output_tokens ?? 0,
-    cachedInputTokens: body.usage?.cache_read_input_tokens || body.usage?.prompt_cache_hit_tokens || body.usage?.prompt_tokens_details?.cached_tokens || 0,
-    cacheCreationInputTokens: body.usage?.cache_creation_input_tokens || body.usage?.prompt_tokens_details?.cache_write_tokens || body.usage?.prompt_tokens_details?.cache_creation_tokens || 0,
-    reasoningTokens: body.usage?.completion_tokens_details?.reasoning_tokens || 0,
+    inputTokens: normalizeUsageCount(body.usage?.prompt_tokens, body.usage?.input_tokens), outputTokens: normalizeUsageCount(body.usage?.completion_tokens, body.usage?.output_tokens),
+    cachedInputTokens: normalizeUsageCount(body.usage?.cache_read_input_tokens, body.usage?.prompt_cache_hit_tokens, body.usage?.prompt_tokens_details?.cached_tokens),
+    cacheCreationInputTokens: normalizeUsageCount(body.usage?.cache_creation_input_tokens, body.usage?.prompt_tokens_details?.cache_write_tokens, body.usage?.prompt_tokens_details?.cache_creation_tokens),
+    reasoningTokens: normalizeUsageCount(body.usage?.completion_tokens_details?.reasoning_tokens),
     stopReason: choice.finish_reason
   };
 }
 
 export function formatResponse(response, protocol, responsesOptions = {}) {
+  response = {
+    ...response,
+    inputTokens: normalizeUsageCount(response.inputTokens),
+    outputTokens: normalizeUsageCount(response.outputTokens),
+    cachedInputTokens: normalizeUsageCount(response.cachedInputTokens),
+    cacheCreationInputTokens: normalizeUsageCount(response.cacheCreationInputTokens),
+    reasoningTokens: normalizeUsageCount(response.reasoningTokens)
+  };
   if (protocol === 'claude') return {
     id: response.id || `msg_${randomUUID().replaceAll('-', '')}`, type: 'message', role: 'assistant', model: response.model,
     content: claudeContent(response.parts, { includeReasoning: true }), stop_reason: response.parts.some((x) => x.type === 'tool_call') ? 'tool_use' : claudeStopReason(response.stopReason), stop_sequence: null,
@@ -568,7 +585,7 @@ export function formatResponse(response, protocol, responsesOptions = {}) {
       return [];
     }),
     usage: {
-      input_tokens: response.inputTokens, output_tokens: response.outputTokens, total_tokens: response.inputTokens + response.outputTokens,
+      input_tokens: response.inputTokens, output_tokens: response.outputTokens, total_tokens: normalizeUsageCount(response.inputTokens + response.outputTokens),
       input_tokens_details: { cached_tokens: response.cachedInputTokens || 0, cache_write_tokens: response.cacheCreationInputTokens || 0 },
       output_tokens_details: { reasoning_tokens: response.reasoningTokens || 0 }
     }
@@ -581,7 +598,7 @@ export function formatResponse(response, protocol, responsesOptions = {}) {
       ...(response.parts.some((x) => x.type === 'reasoning') ? { reasoning_content: response.parts.filter((x) => x.type === 'reasoning').map((x) => x.text).join('') } : {}),
       ...(response.parts.some((x) => x.type === 'tool_call') ? { tool_calls: response.parts.filter((x) => x.type === 'tool_call').map((x) => ({ id: x.id, type: 'function', function: { name: x.name, arguments: canonicalJsonString(x.arguments) } })) } : {}) }, finish_reason: chatStopReason(response.stopReason, response.parts) }],
     usage: {
-      prompt_tokens: response.inputTokens, completion_tokens: response.outputTokens, total_tokens: response.inputTokens + response.outputTokens,
+      prompt_tokens: response.inputTokens, completion_tokens: response.outputTokens, total_tokens: normalizeUsageCount(response.inputTokens + response.outputTokens),
       ...((response.cachedInputTokens || response.cacheCreationInputTokens) ? { prompt_tokens_details: {
         ...(response.cachedInputTokens ? { cached_tokens: response.cachedInputTokens } : {}),
         ...(response.cacheCreationInputTokens ? { cache_creation_tokens: response.cacheCreationInputTokens } : {})
@@ -594,6 +611,13 @@ export function formatResponse(response, protocol, responsesOptions = {}) {
 function assertOutputPartsSupported(parts, protocol, supported) {
   const unsupported = [...new Set(parts.filter((part) => !supported.has(part.type)).map((part) => part.type || 'unknown'))];
   if (unsupported.length) throw unsupportedFeature(`跨协议转换到 ${protocol} 时无法表达上游响应内容块：${unsupported.join(', ')}`);
+}
+
+function parsedUsageCount(value) {
+  if (!['number', 'string'].includes(typeof value) || (typeof value === 'string' && !value.trim())) return null;
+  const number = Number(value);
+  if (!Number.isFinite(number) || !Number.isInteger(number) || number < 0) return null;
+  return Math.min(Number.MAX_SAFE_INTEGER, number);
 }
 
 function responsesStopReason(body) {

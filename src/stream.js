@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { hasUsageData } from './adapters.js';
+import { hasUsageData, normalizeUsageCount } from './adapters.js';
 
 export const MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 
@@ -69,9 +69,9 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
       if (data.type === 'message_start') {
         started = true; id = data.message?.id; model = data.message?.model || model;
         usageObserved ||= hasUsageData(data.message);
-        inputTokens = data.message?.usage?.input_tokens || 0;
-        cachedInputTokens = data.message?.usage?.cache_read_input_tokens || 0;
-        cacheCreationInputTokens = data.message?.usage?.cache_creation_input_tokens || 0;
+        inputTokens = normalizeUsageCount(data.message?.usage?.input_tokens);
+        cachedInputTokens = normalizeUsageCount(data.message?.usage?.cache_read_input_tokens);
+        cacheCreationInputTokens = normalizeUsageCount(data.message?.usage?.cache_creation_input_tokens);
         yield { type: 'start', id, model, inputTokens, cachedInputTokens, cacheCreationInputTokens };
       } else if (data.type === 'content_block_start') {
         const block = data.content_block || {};
@@ -86,7 +86,7 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
       else if (data.type === 'message_delta') {
         usageObserved ||= hasUsageData(data);
         terminal = true;
-        yield { type: 'done', stopReason: data.delta?.stop_reason, outputTokens: data.usage?.output_tokens || 0, inputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens, hasUsage: usageObserved };
+        yield { type: 'done', stopReason: data.delta?.stop_reason, outputTokens: normalizeUsageCount(data.usage?.output_tokens), inputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens, hasUsage: usageObserved };
       }
       continue;
     }
@@ -95,9 +95,9 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
       if (data.type === 'response.created') {
         started = true; id = data.response?.id; model = data.response?.model || model;
         usageObserved ||= hasUsageData(data.response);
-        inputTokens = data.response?.usage?.input_tokens ?? data.response?.usage?.prompt_tokens ?? 0;
-        cachedInputTokens = data.response?.usage?.cache_read_input_tokens || data.response?.usage?.prompt_cache_hit_tokens || data.response?.usage?.input_tokens_details?.cached_tokens || data.response?.usage?.prompt_tokens_details?.cached_tokens || 0;
-        cacheCreationInputTokens = data.response?.usage?.cache_creation_input_tokens || data.response?.usage?.input_tokens_details?.cache_write_tokens || data.response?.usage?.input_tokens_details?.cache_creation_tokens || data.response?.usage?.prompt_tokens_details?.cache_write_tokens || data.response?.usage?.prompt_tokens_details?.cache_creation_tokens || 0;
+        inputTokens = normalizeUsageCount(data.response?.usage?.input_tokens, data.response?.usage?.prompt_tokens);
+        cachedInputTokens = normalizeUsageCount(data.response?.usage?.cache_read_input_tokens, data.response?.usage?.prompt_cache_hit_tokens, data.response?.usage?.input_tokens_details?.cached_tokens, data.response?.usage?.prompt_tokens_details?.cached_tokens);
+        cacheCreationInputTokens = normalizeUsageCount(data.response?.usage?.cache_creation_input_tokens, data.response?.usage?.input_tokens_details?.cache_write_tokens, data.response?.usage?.input_tokens_details?.cache_creation_tokens, data.response?.usage?.prompt_tokens_details?.cache_write_tokens, data.response?.usage?.prompt_tokens_details?.cache_creation_tokens);
         yield { type: 'start', id, model, inputTokens, cachedInputTokens, cacheCreationInputTokens };
       } else if (data.type === 'response.output_item.added') {
         const item = data.item || {};
@@ -147,15 +147,15 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
         usageObserved ||= hasUsageData(data.response);
         const usage = data.response?.usage;
         if (usage) {
-          inputTokens = usage.input_tokens ?? usage.prompt_tokens ?? inputTokens;
-          cachedInputTokens = usage.cache_read_input_tokens ?? usage.prompt_cache_hit_tokens ?? usage.input_tokens_details?.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? cachedInputTokens;
-          cacheCreationInputTokens = usage.cache_creation_input_tokens ?? usage.input_tokens_details?.cache_write_tokens ?? usage.input_tokens_details?.cache_creation_tokens ?? usage.prompt_tokens_details?.cache_write_tokens ?? usage.prompt_tokens_details?.cache_creation_tokens ?? cacheCreationInputTokens;
-          reasoningTokens = usage.output_tokens_details?.reasoning_tokens ?? usage.completion_tokens_details?.reasoning_tokens ?? reasoningTokens;
+          inputTokens = normalizeUsageCount(usage.input_tokens, usage.prompt_tokens, inputTokens);
+          cachedInputTokens = normalizeUsageCount(usage.cache_read_input_tokens, usage.prompt_cache_hit_tokens, usage.input_tokens_details?.cached_tokens, usage.prompt_tokens_details?.cached_tokens, cachedInputTokens);
+          cacheCreationInputTokens = normalizeUsageCount(usage.cache_creation_input_tokens, usage.input_tokens_details?.cache_write_tokens, usage.input_tokens_details?.cache_creation_tokens, usage.prompt_tokens_details?.cache_write_tokens, usage.prompt_tokens_details?.cache_creation_tokens, cacheCreationInputTokens);
+          reasoningTokens = normalizeUsageCount(usage.output_tokens_details?.reasoning_tokens, usage.completion_tokens_details?.reasoning_tokens, reasoningTokens);
         }
         terminal = true;
         yield {
           type: 'done', stopReason: data.type === 'response.completed' ? 'end_turn' : (data.response?.incomplete_details?.reason || 'incomplete'), inputTokens,
-          outputTokens: usage?.output_tokens ?? usage?.completion_tokens ?? 0,
+          outputTokens: normalizeUsageCount(usage?.output_tokens, usage?.completion_tokens),
           cachedInputTokens, cacheCreationInputTokens, reasoningTokens, hasUsage: usageObserved
         };
       }
@@ -170,17 +170,17 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
     const choice = data.choices?.[0];
     if (data.usage) {
       usageObserved ||= hasUsageData(data);
-      inputTokens = data.usage.prompt_tokens ?? data.usage.input_tokens ?? inputTokens;
-      chatOutputTokens = data.usage.completion_tokens ?? data.usage.output_tokens ?? chatOutputTokens;
-      cachedInputTokens = data.usage.cache_read_input_tokens || data.usage.prompt_cache_hit_tokens || data.usage.prompt_tokens_details?.cached_tokens || cachedInputTokens;
-      cacheCreationInputTokens = data.usage.cache_creation_input_tokens || data.usage.prompt_tokens_details?.cache_write_tokens || data.usage.prompt_tokens_details?.cache_creation_tokens || cacheCreationInputTokens;
-      reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens || reasoningTokens;
+      inputTokens = normalizeUsageCount(data.usage.prompt_tokens, data.usage.input_tokens, inputTokens);
+      chatOutputTokens = normalizeUsageCount(data.usage.completion_tokens, data.usage.output_tokens, chatOutputTokens);
+      cachedInputTokens = normalizeUsageCount(data.usage.cache_read_input_tokens, data.usage.prompt_cache_hit_tokens, data.usage.prompt_tokens_details?.cached_tokens, cachedInputTokens);
+      cacheCreationInputTokens = normalizeUsageCount(data.usage.cache_creation_input_tokens, data.usage.prompt_tokens_details?.cache_write_tokens, data.usage.prompt_tokens_details?.cache_creation_tokens, cacheCreationInputTokens);
+      reasoningTokens = normalizeUsageCount(data.usage.completion_tokens_details?.reasoning_tokens, reasoningTokens);
     }
     if (!started) {
       started = true; id = data.id; model = data.model || model;
-      inputTokens = data.usage?.prompt_tokens ?? data.usage?.input_tokens ?? inputTokens;
-      cachedInputTokens = data.usage?.cache_read_input_tokens || data.usage?.prompt_cache_hit_tokens || data.usage?.prompt_tokens_details?.cached_tokens || cachedInputTokens;
-      cacheCreationInputTokens = data.usage?.cache_creation_input_tokens || data.usage?.prompt_tokens_details?.cache_write_tokens || data.usage?.prompt_tokens_details?.cache_creation_tokens || cacheCreationInputTokens;
+      inputTokens = normalizeUsageCount(data.usage?.prompt_tokens, data.usage?.input_tokens, inputTokens);
+      cachedInputTokens = normalizeUsageCount(data.usage?.cache_read_input_tokens, data.usage?.prompt_cache_hit_tokens, data.usage?.prompt_tokens_details?.cached_tokens, cachedInputTokens);
+      cacheCreationInputTokens = normalizeUsageCount(data.usage?.cache_creation_input_tokens, data.usage?.prompt_tokens_details?.cache_write_tokens, data.usage?.prompt_tokens_details?.cache_creation_tokens, cacheCreationInputTokens);
       yield { type: 'start', id, model, inputTokens, cachedInputTokens, cacheCreationInputTokens };
     }
     const reasoningDelta = choice?.delta?.reasoning_content || choice?.delta?.reasoning;
@@ -420,48 +420,197 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       } else if (targetProtocol === 'responses') {
         const output = [...blocks.values()].map((block) => block.item).filter(Boolean);
         const incomplete = ['length', 'max_tokens', 'max_output_tokens'].includes(event.stopReason);
-        const final = { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), status: incomplete ? 'incomplete' : 'completed', ...(incomplete ? { incomplete_details: { reason: 'max_output_tokens' } } : {}), model, output, parallel_tool_calls: responseParallelToolCalls, tool_choice: responseToolChoice, tools: responseTools, usage: { input_tokens: inputTokens, input_tokens_details: { cached_tokens: cachedInputTokens, cache_write_tokens: cacheCreationInputTokens }, output_tokens: outputTokens, output_tokens_details: { reasoning_tokens: reasoningTokens }, total_tokens: inputTokens + outputTokens } };
+        const final = { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), status: incomplete ? 'incomplete' : 'completed', ...(incomplete ? { incomplete_details: { reason: 'max_output_tokens' } } : {}), model, output, parallel_tool_calls: responseParallelToolCalls, tool_choice: responseToolChoice, tools: responseTools, usage: { input_tokens: inputTokens, input_tokens_details: { cached_tokens: cachedInputTokens, cache_write_tokens: cacheCreationInputTokens }, output_tokens: outputTokens, output_tokens_details: { reasoning_tokens: reasoningTokens }, total_tokens: normalizeUsageCount(inputTokens + outputTokens) } };
         yield responseSse(incomplete ? 'response.incomplete' : 'response.completed', { type: incomplete ? 'response.incomplete' : 'response.completed', response: final });
       } else {
         const promptDetails = (cachedInputTokens || cacheCreationInputTokens) ? { ...(cachedInputTokens ? { cached_tokens: cachedInputTokens } : {}), ...(cacheCreationInputTokens ? { cache_creation_tokens: cacheCreationInputTokens } : {}) } : undefined;
-        yield chatSse({ id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: {}, finish_reason: hasTools ? 'tool_calls' : (['length', 'max_tokens', 'max_output_tokens'].includes(event.stopReason) ? 'length' : 'stop') }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: inputTokens + outputTokens, ...(promptDetails ? { prompt_tokens_details: promptDetails } : {}), ...(reasoningTokens ? { completion_tokens_details: { reasoning_tokens: reasoningTokens } } : {}) } });
+        yield chatSse({ id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: {}, finish_reason: hasTools ? 'tool_calls' : (['length', 'max_tokens', 'max_output_tokens'].includes(event.stopReason) ? 'length' : 'stop') }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: normalizeUsageCount(inputTokens + outputTokens), ...(promptDetails ? { prompt_tokens_details: promptDetails } : {}), ...(reasoningTokens ? { completion_tokens_details: { reasoning_tokens: reasoningTokens } } : {}) } });
         yield 'data: [DONE]\n\n';
       }
     }
   }
 }
 
-export async function observeSse(response, protocol, fallbackModel, options = {}) {
+export function createSseObserver(protocol, fallbackModel, options = {}) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let ended = false;
+  let result;
+  let started = false;
+  let terminal = false;
+  let usageObserved = false;
+  let usageEmitted = false;
+  let chatFinishReason = false;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedInputTokens = 0;
+  let cacheCreationInputTokens = 0;
+  let reasoningTokens = 0;
   let usage = {};
   let error;
+  let observationSkipped;
+  let streamFailed = false;
   let nextSequenceNumber = 0;
+
+  const emitUsage = () => {
+    if (usageEmitted || !usageObserved) return;
+    usageEmitted = true;
+    usage = {
+      inputTokens: normalizeUsageCount(inputTokens),
+      outputTokens: normalizeUsageCount(outputTokens),
+      cachedInputTokens: normalizeUsageCount(cachedInputTokens),
+      cacheCreationInputTokens: normalizeUsageCount(cacheCreationInputTokens),
+      reasoningTokens: normalizeUsageCount(reasoningTokens)
+    };
+    try { options.onUsage?.(usage); } catch { /* 观察回调不能破坏原始流 */ }
+  };
+  const emitError = (value) => {
+    error = value;
+    try { options.onError?.(error); } catch { /* 观察回调不能破坏原始流 */ }
+  };
   const observeSequenceNumber = (data) => {
     if (protocol !== 'responses') return;
     const sequenceNumber = data?.sequence_number;
     if (Number.isSafeInteger(sequenceNumber) && sequenceNumber >= nextSequenceNumber) nextSequenceNumber = sequenceNumber + 1;
   };
-  try {
-    for await (const event of canonicalEvents(response, protocol, fallbackModel, { onSseData: observeSequenceNumber })) {
-      if (event.type === 'done') {
-        if (event.hasUsage) {
-          usage = {
-            inputTokens: event.inputTokens || 0,
-            outputTokens: event.outputTokens || 0,
-            cachedInputTokens: event.cachedInputTokens || 0,
-            cacheCreationInputTokens: event.cacheCreationInputTokens || 0,
-            reasoningTokens: event.reasoningTokens || 0
-          };
-          options.onUsage?.(usage);
-        }
-      } else if (event.type === 'error') {
-        error = event.error;
-        options.onError?.(error);
-      }
+  const observeData = (data) => {
+    observeSequenceNumber(data);
+    if (data.error || data.type === 'error') {
+      terminal = true;
+      emitError(data.error || data);
+      return;
     }
+    if (protocol === 'claude') {
+      if (data.type === 'message_start') {
+        started = true;
+        usageObserved ||= hasUsageData(data.message);
+        inputTokens = normalizeUsageCount(data.message?.usage?.input_tokens);
+        cachedInputTokens = normalizeUsageCount(data.message?.usage?.cache_read_input_tokens);
+        cacheCreationInputTokens = normalizeUsageCount(data.message?.usage?.cache_creation_input_tokens);
+      } else if (data.type === 'message_delta') {
+        usageObserved ||= hasUsageData(data);
+        outputTokens = normalizeUsageCount(data.usage?.output_tokens);
+        terminal = true;
+        emitUsage();
+      }
+      return;
+    }
+    if (protocol === 'responses') {
+      if (data.type === 'response.created') {
+        started = true;
+        usageObserved ||= hasUsageData(data.response);
+        const initial = data.response?.usage;
+        inputTokens = normalizeUsageCount(initial?.input_tokens, initial?.prompt_tokens);
+        cachedInputTokens = normalizeUsageCount(initial?.cache_read_input_tokens, initial?.prompt_cache_hit_tokens, initial?.input_tokens_details?.cached_tokens, initial?.prompt_tokens_details?.cached_tokens);
+        cacheCreationInputTokens = normalizeUsageCount(initial?.cache_creation_input_tokens, initial?.input_tokens_details?.cache_write_tokens, initial?.input_tokens_details?.cache_creation_tokens, initial?.prompt_tokens_details?.cache_write_tokens, initial?.prompt_tokens_details?.cache_creation_tokens);
+      } else if (data.type === 'response.completed' || data.type === 'response.incomplete') {
+        terminal = true;
+        usageObserved ||= hasUsageData(data.response);
+        const final = data.response?.usage;
+        inputTokens = normalizeUsageCount(final?.input_tokens, final?.prompt_tokens, inputTokens);
+        outputTokens = normalizeUsageCount(final?.output_tokens, final?.completion_tokens);
+        cachedInputTokens = normalizeUsageCount(final?.cache_read_input_tokens, final?.prompt_cache_hit_tokens, final?.input_tokens_details?.cached_tokens, final?.prompt_tokens_details?.cached_tokens, cachedInputTokens);
+        cacheCreationInputTokens = normalizeUsageCount(final?.cache_creation_input_tokens, final?.input_tokens_details?.cache_write_tokens, final?.input_tokens_details?.cache_creation_tokens, final?.prompt_tokens_details?.cache_write_tokens, final?.prompt_tokens_details?.cache_creation_tokens, cacheCreationInputTokens);
+        reasoningTokens = normalizeUsageCount(final?.output_tokens_details?.reasoning_tokens, final?.completion_tokens_details?.reasoning_tokens, reasoningTokens);
+        emitUsage();
+      } else if (data.type === 'response.failed') {
+        terminal = true;
+        emitError(data.response?.error || { message: 'Responses 上游生成失败' });
+      }
+      return;
+    }
+
+    started = true;
+    if (data.usage) {
+      usageObserved ||= hasUsageData(data);
+      inputTokens = normalizeUsageCount(data.usage.prompt_tokens, data.usage.input_tokens, inputTokens);
+      outputTokens = normalizeUsageCount(data.usage.completion_tokens, data.usage.output_tokens, outputTokens);
+      cachedInputTokens = normalizeUsageCount(data.usage.cache_read_input_tokens, data.usage.prompt_cache_hit_tokens, data.usage.prompt_tokens_details?.cached_tokens, cachedInputTokens);
+      cacheCreationInputTokens = normalizeUsageCount(data.usage.cache_creation_input_tokens, data.usage.prompt_tokens_details?.cache_write_tokens, data.usage.prompt_tokens_details?.cache_creation_tokens, cacheCreationInputTokens);
+      reasoningTokens = normalizeUsageCount(data.usage.completion_tokens_details?.reasoning_tokens, reasoningTokens);
+    }
+    if (data.choices?.[0]?.finish_reason) chatFinishReason = true;
+    if (chatFinishReason && data.usage) {
+      terminal = true;
+      emitUsage();
+    }
+  };
+  const observeBlock = (block) => {
+    assertSseEventSize(block);
+    const parsed = parseSseBlock(block);
+    if (parsed) observeData(parsed.data);
+  };
+  const processBuffer = () => {
+    let boundary;
+    while ((boundary = buffer.search(/\r\n\r\n|\r\r|\n\n/)) !== -1) {
+      const block = buffer.slice(0, boundary);
+      const separator = buffer.slice(boundary).match(/^(?:\r\n\r\n|\r\r|\n\n)/)[0];
+      buffer = buffer.slice(boundary + separator.length);
+      observeBlock(block);
+    }
+    assertSseEventSize(buffer);
+  };
+  const skipObservation = (caught) => {
+    observationSkipped = caught.message;
+    error = undefined;
+    buffer = '';
+  };
+
+  return {
+    write(chunk) {
+      if (ended || observationSkipped) return;
+      try {
+        buffer += decoder.decode(chunk, { stream: true });
+        processBuffer();
+      } catch (caught) {
+        if (caught.code === 'UPSTREAM_SSE_EVENT_TOO_LARGE') skipObservation(caught);
+        else emitError({ type: 'upstream_error', message: caught.message });
+      }
+    },
+    fail(caught) {
+      if (ended || observationSkipped) return;
+      streamFailed = true;
+      buffer = '';
+      terminal = true;
+      emitError({ type: 'upstream_error', message: caught?.message || String(caught) });
+    },
+    end() {
+      if (ended) return result;
+      ended = true;
+      if (!observationSkipped && !streamFailed) {
+        try {
+          buffer += decoder.decode();
+          processBuffer();
+          if (buffer.trim()) observeBlock(buffer.trim());
+        } catch (caught) {
+          if (caught.code === 'UPSTREAM_SSE_EVENT_TOO_LARGE') skipObservation(caught);
+          else emitError({ type: 'upstream_error', message: caught.message });
+        }
+      }
+      if (!observationSkipped) {
+        if (protocol === 'chat' && chatFinishReason) {
+          terminal = true;
+          emitUsage();
+        }
+        if (started && !terminal && !error) emitError({ type: 'upstream_error', message: '上游 SSE 在完成事件前结束' });
+      }
+      result = {
+        usage,
+        error: observationSkipped ? undefined : error,
+        ...(observationSkipped ? { observationSkipped } : {}),
+        ...(protocol === 'responses' ? { nextSequenceNumber } : {})
+      };
+      return result;
+    }
+  };
+}
+
+export async function observeSse(response, protocol, fallbackModel, options = {}) {
+  const observer = createSseObserver(protocol, fallbackModel, options);
+  try {
+    for await (const chunk of response.body || []) observer.write(chunk);
   } catch (caught) {
-    if (caught.code === 'UPSTREAM_SSE_EVENT_TOO_LARGE') return { usage, error: undefined, observationSkipped: caught.message, ...(protocol === 'responses' ? { nextSequenceNumber } : {}) };
-    error = { type: 'upstream_error', message: caught.message };
-    options.onError?.(error);
+    observer.fail(caught);
   }
-  return { usage, error, ...(protocol === 'responses' ? { nextSequenceNumber } : {}) };
+  return observer.end();
 }

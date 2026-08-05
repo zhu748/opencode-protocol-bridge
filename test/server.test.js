@@ -2,17 +2,28 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer as createHttpServer } from 'node:http';
+import { createConnection } from 'node:net';
 import { once } from 'node:events';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { readFile, unlink, writeFile } from 'node:fs/promises';
+
+async function rawHttpRequest(port, request) {
+  const socket = createConnection({ host: '127.0.0.1', port });
+  socket.setTimeout(3000, () => socket.destroy(new Error('原始 HTTP 请求等待响应超时')));
+  await once(socket, 'connect');
+  socket.end(request);
+  const chunks = [];
+  for await (const chunk of socket) chunks.push(chunk);
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 }, async () => {
   const port = 20_000 + Math.floor(Math.random() * 10_000);
   const configFile = resolve(import.meta.dirname, `../data/smoke-${randomUUID()}.json`);
   const child = spawn(process.execPath, ['src/server.js'], {
     cwd: resolve(import.meta.dirname, '..'),
-    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile, CONFIG_ENCRYPTION_KEY: 'integration-test-master-key', OPENCODE_BRIDGE_ADMIN_PASSWORD: '', OPENCODE_BRIDGE_TRUST_PROXY: '' },
+    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile, CONFIG_ENCRYPTION_KEY: 'integration-test-master-key', OPENCODE_BRIDGE_ADMIN_PASSWORD: '', OPENCODE_BRIDGE_TRUST_PROXY: '', OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS: '' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   try {
@@ -24,23 +35,101 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
       }),
       once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
     ]);
-    const health = await fetch(`http://127.0.0.1:${port}/health`);
+    const health = await fetch(`http://127.0.0.1:${port}/health`, { headers: { 'x-request-id': 'client-controlled' } });
     assert.equal(health.status, 200);
+    assert.match(health.headers.get('x-request-id'), /^[a-f0-9]{32}$/);
+    assert.notEqual(health.headers.get('x-request-id'), 'client-controlled');
     const healthBody = await health.json();
     assert.equal(healthBody.ok, true);
     assert.equal(healthBody.ready, false);
     assert.equal(healthBody.configured, false);
+    const manyHeaders = Object.fromEntries(Array.from({ length: 140 }, (_, index) => [`x-test-${index}`, '1']));
+    const excessiveHeaders = await fetch(`http://127.0.0.1:${port}/health`, { headers: manyHeaders });
+    assert.equal(excessiveHeaders.status, 431);
+    assert.match(excessiveHeaders.headers.get('x-request-id'), /^[a-f0-9]{32}$/);
+    assert.match((await excessiveHeaders.json()).error, /128/);
+    const conflictingFraming = await rawHttpRequest(port,
+      'POST /api/setup HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n');
+    assert.match(conflictingFraming, /^HTTP\/1\.1 400 Bad Request\r\n/);
+    const missingHost = await rawHttpRequest(port, 'GET /health HTTP/1.1\r\nConnection: close\r\n\r\n');
+    assert.match(missingHost, /^HTTP\/1\.1 400 Bad Request\r\n/);
+    for (const target of ['http://attacker.invalid/health', '//attacker.invalid/health', '/\\attacker.invalid/health', '/health#fragment']) {
+      const malformedTarget = await rawHttpRequest(port, `GET ${target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`);
+      assert.match(malformedTarget, /^HTTP\/1\.1 400 Bad Request\r\n/);
+      assert.match(malformedTarget, /\r\nx-request-id: [a-f0-9]{32}\r\n/i);
+    }
+    const oversizedTarget = await rawHttpRequest(port, `GET /${'a'.repeat(9 * 1024)} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`);
+    assert.match(oversizedTarget, /^HTTP\/1\.1 414 URI Too Long\r\n/);
+    assert.match(oversizedTarget, /\r\nx-request-id: [a-f0-9]{32}\r\n/i);
+    const excessiveQuery = Array.from({ length: 65 }, (_, index) => `q${index}=1`).join('&');
+    const excessiveQueryResponse = await fetch(`http://127.0.0.1:${port}/health?${excessiveQuery}`);
+    assert.equal(excessiveQueryResponse.status, 400);
+    assert.match((await excessiveQueryResponse.json()).error, /64/);
+    const duplicateProvider = await fetch(`http://127.0.0.1:${port}/v1/models?provider=zen&provider=go`);
+    assert.equal(duplicateProvider.status, 400);
+    assert.match((await duplicateProvider.json()).error, /provider.*不能重复/);
     const page = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(page.status, 200);
+    assert.match(page.headers.get('x-request-id'), /^[a-f0-9]{32}$/);
+    assert.notEqual(page.headers.get('x-request-id'), health.headers.get('x-request-id'));
     assert.match(await page.text(), /OpenCode Bridge/);
     assert.match(page.headers.get('content-security-policy'), /default-src 'self'/);
+    assert.match(page.headers.get('content-security-policy'), /form-action 'self'/);
+    assert.equal(page.headers.get('cross-origin-opener-policy'), 'same-origin');
+    assert.equal(page.headers.get('x-permitted-cross-domain-policies'), 'none');
+    assert.equal(page.headers.get('x-xss-protection'), '0');
+    assert.equal(page.headers.get('strict-transport-security'), null);
+    assert.equal(page.headers.get('cache-control'), 'no-cache');
+    assert.match(page.headers.get('etag'), /^W\//);
+    const pageHead = await fetch(`http://127.0.0.1:${port}/`, { method: 'HEAD' });
+    assert.equal(pageHead.status, 200);
+    assert.equal(pageHead.headers.get('etag'), page.headers.get('etag'));
+    assert.ok(Number(pageHead.headers.get('content-length')) > 0);
+    assert.equal(await pageHead.text(), '');
+    const notModified = await fetch(`http://127.0.0.1:${port}/`, { headers: { 'if-none-match': page.headers.get('etag') } });
+    assert.equal(notModified.status, 304);
+    assert.equal(await notModified.text(), '');
+    const wrongStaticMethod = await fetch(`http://127.0.0.1:${port}/`, { method: 'POST' });
+    assert.equal(wrongStaticMethod.status, 405);
+    assert.equal(wrongStaticMethod.headers.get('allow'), 'GET, HEAD');
     const spec = await fetch(`http://127.0.0.1:${port}/openapi.json`);
     assert.match(spec.headers.get('content-type'), /application\/json/);
     assert.equal((await spec.json()).openapi, '3.1.0');
     const traversal = await fetch(`http://127.0.0.1:${port}/..%2Fsrc%2Fserver.js`);
     assert.ok([403, 404].includes(traversal.status));
+    assert.match(traversal.headers.get('x-request-id'), /^[a-f0-9]{32}$/);
     assert.doesNotMatch(await traversal.text(), /createServer/);
 
+    const wrongSetupMethod = await fetch(`http://127.0.0.1:${port}/api/setup`);
+    assert.equal(wrongSetupMethod.status, 405);
+    assert.equal(wrongSetupMethod.headers.get('allow'), 'POST');
+    assert.match(wrongSetupMethod.headers.get('x-request-id'), /^[a-f0-9]{32}$/);
+    const wrongSetupHead = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'HEAD' });
+    assert.equal(wrongSetupHead.status, 405);
+    assert.ok(Number(wrongSetupHead.headers.get('content-length')) > 0);
+    assert.equal(await wrongSetupHead.text(), '');
+
+    const wrongMediaType = await fetch(`http://127.0.0.1:${port}/api/setup`, {
+      method: 'POST', headers: { 'content-type': 'text/plain' }, body: JSON.stringify({ password: 'testpassword123' })
+    });
+    assert.equal(wrongMediaType.status, 415);
+    assert.match((await wrongMediaType.json()).error, /Content-Type/);
+    const compressedJson = await fetch(`http://127.0.0.1:${port}/api/setup`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' }, body: '{}'
+    });
+    assert.equal(compressedJson.status, 415);
+    assert.match((await compressedJson.json()).error, /Content-Encoding/);
+    const vendorJson = await fetch(`http://127.0.0.1:${port}/api/setup`, {
+      method: 'POST', headers: { 'content-type': 'application/vnd.bridge+json; charset=utf-8' }, body: JSON.stringify({ password: 'abc-12' })
+    });
+    assert.equal(vendorJson.status, 400);
+
+    const oversizedSetup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ padding: 'x'.repeat(64 * 1024) }) });
+    assert.equal(oversizedSetup.status, 413);
+    assert.match((await oversizedSetup.json()).error, /64 KiB/);
+    const invalidUtf8Setup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: Buffer.concat([Buffer.from('{"password":"'), Buffer.from([0xff]), Buffer.from('"}')]) });
+    assert.equal(invalidUtf8Setup.status, 400);
+    assert.deepEqual(await invalidUtf8Setup.json(), { error: 'JSON 格式无效' });
     const invalidSetup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'abc-12' }) });
     assert.equal(invalidSetup.status, 400);
     const setup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'testpassword123' }) });
@@ -52,6 +141,22 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.doesNotMatch(storedConfig, new RegExp(setupBody.clientToken));
     assert.match(storedConfig, /enc:v1:/);
     const cookie = setup.headers.get('set-cookie').split(';')[0];
+    const duplicatedApiKey = await rawHttpRequest(port,
+      'GET /v1/models HTTP/1.1\r\nHost: localhost\r\nx-api-key: first-token\r\nx-api-key: second-token\r\nConnection: close\r\n\r\n');
+    assert.match(duplicatedApiKey, /^HTTP\/1\.1 400 Bad Request\r\n/);
+    assert.match(duplicatedApiKey, /\r\nx-request-id: [a-f0-9]{32}\r\n/i);
+    assert.match(duplicatedApiKey, /x-api-key[^\r\n]*不能重复/);
+    const connectionStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+    assert.ok(connectionStatus.activeHttpConnections >= 1);
+    assert.equal(connectionStatus.maxHttpConnections, 256);
+    assert.equal(connectionStatus.streamWriteTimeoutMs, 30_000);
+    const wrongStatusMethod = await fetch(`http://127.0.0.1:${port}/api/status`, { method: 'POST', headers: { cookie } });
+    assert.equal(wrongStatusMethod.status, 405);
+    assert.equal(wrongStatusMethod.headers.get('allow'), 'GET');
+    assert.deepEqual(await wrongStatusMethod.json(), { error: '该接口仅支持 GET' });
+    const wrongConfigMethod = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PATCH', headers: { cookie } });
+    assert.equal(wrongConfigMethod.status, 405);
+    assert.equal(wrongConfigMethod.headers.get('allow'), 'GET, PUT');
     const unauthenticatedStats = await fetch(`http://127.0.0.1:${port}/api/stats`);
     assert.equal(unauthenticatedStats.status, 401);
     const emptyStats = await fetch(`http://127.0.0.1:${port}/api/stats?window=24h`, { headers: { cookie } }).then((result) => result.json());
@@ -60,7 +165,10 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.deepEqual(emptyStats.byProvider, []);
     const invalidStatsWindow = await fetch(`http://127.0.0.1:${port}/api/stats?window=month`, { headers: { cookie } });
     assert.equal(invalidStatsWindow.status, 400);
-    const redactedConfig = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } }).then((result) => result.json());
+    const redactedConfigResponse = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } });
+    const redactedConfig = await redactedConfigResponse.json();
+    assert.equal(typeof redactedConfig.singBoxRuntime?.available, 'boolean');
+    assert.doesNotMatch(JSON.stringify(redactedConfig.singBoxRuntime), /vendor|sing-box\.exe|[A-Z]:\\/i);
     assert.notEqual(redactedConfig.clientToken, setupBody.clientToken);
     assert.doesNotMatch(JSON.stringify(redactedConfig), new RegExp(setupBody.clientToken));
     assert.equal(redactedConfig.encryptionEnabled, true);
@@ -70,6 +178,30 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.equal(redactedConfig.zenProxyUrl, '');
     assert.equal(redactedConfig.goProxyUrl, '');
     assert.equal(redactedConfig.zenProxyConfigured, false);
+    assert.match(redactedConfig.revision, /^[a-f0-9]{32}$/);
+    assert.equal(redactedConfigResponse.headers.get('etag'), `"${redactedConfig.revision}"`);
+
+    const malformedRevision = await fetch(`http://127.0.0.1:${port}/api/config`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', cookie, 'if-match': 'not-an-etag' },
+      body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {} })
+    });
+    assert.equal(malformedRevision.status, 400);
+    assert.match((await malformedRevision.json()).error, /If-Match/);
+
+    const concurrentConfigWrites = await Promise.all([101, 102].map((requestLogLimit) => fetch(`http://127.0.0.1:${port}/api/config`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', cookie, 'if-match': `"${redactedConfig.revision}"` },
+      body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, requestLogLimit })
+    })));
+    assert.deepEqual(concurrentConfigWrites.map((response) => response.status).sort(), [200, 412]);
+    const configWriteBodies = await Promise.all(concurrentConfigWrites.map((response) => response.json()));
+    const acceptedConfig = configWriteBodies[concurrentConfigWrites.findIndex((response) => response.status === 200)];
+    const rejectedConfig = configWriteBodies[concurrentConfigWrites.findIndex((response) => response.status === 412)];
+    assert.notEqual(acceptedConfig.revision, redactedConfig.revision);
+    assert.equal(concurrentConfigWrites.find((response) => response.status === 200).headers.get('etag'), `"${acceptedConfig.revision}"`);
+    assert.match(rejectedConfig.error, /其他页面修改/);
+    const configAfterConflict = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(configAfterConflict.revision, acceptedConfig.revision);
+    assert.equal(configAfterConflict.requestLogLimit, acceptedConfig.requestLogLimit);
 
     const invalidCredential = await fetch(`http://127.0.0.1:${port}/api/provider-credentials`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ provider: 'zen', name: '错误代理', apiKey: 'panel-secret', proxyUrl: 'ftp://bad' }) });
     assert.equal(invalidCredential.status, 400);
@@ -133,6 +265,9 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     const invalidClient = await fetch(`http://127.0.0.1:${port}/api/clients`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ name: '错误客户端', maxConcurrentRequests: 1.5 }) });
     assert.equal(invalidClient.status, 400);
     const validClient = await fetch(`http://127.0.0.1:${port}/api/clients`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ name: '配置测试客户端', maxConcurrentRequests: 3 }) }).then((result) => result.json());
+    const wrongClientMethod = await fetch(`http://127.0.0.1:${port}/api/clients/${validClient.id}`, { headers: { cookie } });
+    assert.equal(wrongClientMethod.status, 405);
+    assert.equal(wrongClientMethod.headers.get('allow'), 'PUT, DELETE');
     const invalidEnabled = await fetch(`http://127.0.0.1:${port}/api/clients/${validClient.id}`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ enabled: 'false' }) });
     assert.equal(invalidEnabled.status, 400);
 
@@ -145,6 +280,12 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
 
     const crossOrigin = await fetch(`http://127.0.0.1:${port}/api/token/regenerate`, { method: 'POST', headers: { cookie, origin: 'https://malicious.example' } });
     assert.equal(crossOrigin.status, 403);
+    const wrongSchemeOrigin = await fetch(`http://127.0.0.1:${port}/api/prompt-rewrite/recent`, { method: 'DELETE', headers: { cookie, origin: `https://127.0.0.1:${port}` } });
+    assert.equal(wrongSchemeOrigin.status, 403);
+    const crossSiteMetadata = await fetch(`http://127.0.0.1:${port}/api/prompt-rewrite/recent`, { method: 'DELETE', headers: { cookie, 'sec-fetch-site': 'cross-site' } });
+    assert.equal(crossSiteMetadata.status, 403);
+    const sameOriginMutation = await fetch(`http://127.0.0.1:${port}/api/prompt-rewrite/recent`, { method: 'DELETE', headers: { cookie, origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' } });
+    assert.equal(sameOriginMutation.status, 200);
 
     const models = await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { authorization: `Bearer ${setupBody.clientToken}` } });
     assert.equal(models.status, 503);
@@ -176,6 +317,13 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.equal(unauthorizedClaude.status, 401);
     assert.deepEqual(await unauthorizedClaude.json(), { type: 'error', error: { type: 'authentication_error', message: '访问令牌无效' } });
 
+    const wrongClaudeMedia = await fetch(`http://127.0.0.1:${port}/zen/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'text/plain', 'x-api-key': setupBody.clientToken },
+      body: JSON.stringify({ model: 'x', messages: [] })
+    });
+    assert.equal(wrongClaudeMedia.status, 415);
+    assert.match((await wrongClaudeMedia.json()).error.message, /Content-Type/);
+
     const malformedClaude = await fetch(`http://127.0.0.1:${port}/go/v1/messages`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': setupBody.clientToken }, body: '{broken' });
     assert.equal(malformedClaude.status, 400);
     assert.deepEqual(await malformedClaude.json(), { type: 'error', error: { type: 'invalid_request_error', message: 'JSON 格式无效' } });
@@ -188,6 +336,30 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     const oversizedModelLookup = await fetch(`http://127.0.0.1:${port}/v1/models/${'x'.repeat(257)}`, { headers: { authorization: `Bearer ${setupBody.clientToken}` } });
     assert.equal(oversizedModelLookup.status, 400);
 
+    const beforeClientRotation = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } }).then((response) => response.json());
+    const clientRotations = await Promise.all([0, 1].map(() => fetch(`http://127.0.0.1:${port}/api/clients/${validClient.id}/regenerate`, {
+      method: 'POST', headers: { cookie, 'if-match': `"${beforeClientRotation.revision}"` }
+    })));
+    assert.deepEqual(clientRotations.map((response) => response.status).sort(), [200, 412]);
+    const clientRotationBodies = await Promise.all(clientRotations.map((response) => response.json()));
+    const successfulClientRotation = clientRotations.findIndex((response) => response.status === 200);
+    assert.match(clientRotationBodies[successfulClientRotation].token, /^ocb[a-f0-9]{64}$/);
+    assert.match(clientRotationBodies[successfulClientRotation].revision, /^[a-f0-9]{32}$/);
+    assert.equal(clientRotations[successfulClientRotation].headers.get('etag'), `"${clientRotationBodies[successfulClientRotation].revision}"`);
+    assert.match(clientRotationBodies[clientRotations.findIndex((response) => response.status === 412)].error, /其他页面修改/);
+
+    const beforeTokenRotation = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } }).then((response) => response.json());
+    const tokenRotations = await Promise.all([0, 1].map(() => fetch(`http://127.0.0.1:${port}/api/token/regenerate`, {
+      method: 'POST', headers: { cookie, 'if-match': `"${beforeTokenRotation.revision}"` }
+    })));
+    assert.deepEqual(tokenRotations.map((response) => response.status).sort(), [200, 412]);
+    const tokenRotationBodies = await Promise.all(tokenRotations.map((response) => response.json()));
+    const successfulTokenRotation = tokenRotations.findIndex((response) => response.status === 200);
+    assert.match(tokenRotationBodies[successfulTokenRotation].token, /^[A-Za-z0-9]{24,}$/);
+    assert.match(tokenRotationBodies[successfulTokenRotation].revision, /^[a-f0-9]{32}$/);
+    assert.equal(tokenRotations[successfulTokenRotation].headers.get('etag'), `"${tokenRotationBodies[successfulTokenRotation].revision}"`);
+    assert.match(tokenRotationBodies[tokenRotations.findIndex((response) => response.status === 412)].error, /其他页面修改/);
+
     const logout = await fetch(`http://127.0.0.1:${port}/api/logout`, { method: 'POST', headers: { cookie } });
     assert.equal(logout.status, 200);
     const wrongLogin = await fetch(`http://127.0.0.1:${port}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrongpassword' }) });
@@ -199,6 +371,51 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('HTTP 总连接上限会拒绝额外连接并在连接关闭后恢复', { timeout: 10_000 }, async () => {
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/http-connections-${randomUUID()}.json`);
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'),
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+      OPENCODE_BRIDGE_ADMIN_PASSWORD: '', OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP: '',
+      OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS: '1'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let reserved;
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    reserved = createConnection({ host: '127.0.0.1', port });
+    await once(reserved, 'connect');
+    reserved.write('GET /health HTTP/1.1\r\nHost: localhost\r\n');
+
+    const started = Date.now();
+    await assert.rejects(fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) }));
+    assert.ok(Date.now() - started < 1500, '超过连接上限时应快速关闭新连接');
+
+    reserved.destroy();
+    await once(reserved, 'close');
+    reserved = null;
+    const recovered = await fetch(`http://127.0.0.1:${port}/health`, { headers: { connection: 'close' } });
+    assert.equal(recovered.status, 200);
+    assert.match(recovered.headers.get('x-request-id'), /^[a-f0-9]{32}$/);
+  } finally {
+    reserved?.destroy();
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
     await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
   }
 });
@@ -277,6 +494,7 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
       body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, messages: [{ role: 'user', content: 'ping' }] })
     });
     assert.equal(direct.status, 200);
+    assert.equal(direct.headers.get('cache-control'), 'no-store, no-transform');
     const directText = await direct.text();
     assert.match(directText, /"type":"upstream_error"/);
     assert.match(directText, /data: \[DONE\]/);
@@ -286,6 +504,7 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
       body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] })
     });
     assert.equal(translated.status, 200);
+    assert.equal(translated.headers.get('cache-control'), 'no-store, no-transform');
     const translatedText = await translated.text();
     assert.match(translatedText, /event: error/);
     assert.match(translatedText, /"type":"upstream_error"/);
@@ -382,6 +601,139 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     assert.equal(canceledStats.summary.requests, 8);
     assert.equal(canceledStats.summary.errors, 7);
     assert.equal(canceledStats.credentialHealth[0].consecutiveFailures, 2);
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('非流式上游正文断开会累计 Key 网络失败并进入冷却', { timeout: 10_000 }, async () => {
+  let upstreamCalls = 0;
+  let markDelayedBodyStarted;
+  const delayedBodyStarted = new Promise((resolveStarted) => { markDelayedBodyStarted = resolveStarted; });
+  const upstream = createHttpServer((req, res) => {
+    upstreamCalls++;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (upstreamCalls <= 3) {
+      res.write('{"id":"chat_partial"');
+      return setTimeout(() => res.destroy(), 20);
+    }
+    if (upstreamCalls === 4) {
+      return res.end(JSON.stringify({
+        id: 'chat_recovered', model: 'deepseek-v4-flash',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'done' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 2, completion_tokens: 1 }
+      }));
+    }
+    if (upstreamCalls === 5) return res.end('{"broken":');
+    res.write('{"id":"chat_delayed"');
+    markDelayedBodyStarted();
+    const delayedResponse = setTimeout(() => {
+      if (!res.destroyed) res.end('}');
+    }, 1_000);
+    res.once('close', () => clearTimeout(delayedResponse));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/nonstream-body-failure-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'nonstream-body-failure-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_ZEN_KEY: 'zen-body-key',
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const response = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+        body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'ping' }] })
+      });
+      assert.equal(response.status, 502);
+      const error = await response.json();
+      assert.equal(error.error.code, 'upstream_connection_reset');
+    }
+
+    const stats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(stats.credentialHealth[0].state, 'cooldown');
+    assert.equal(stats.credentialHealth[0].consecutiveFailures, 3);
+    assert.equal(stats.credentialHealth[0].lastFailureKind, 'network');
+
+    const blocked = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'blocked' }] })
+    });
+    assert.equal(blocked.status, 503);
+    assert.equal(upstreamCalls, 3);
+
+    const reset = await fetch(`http://127.0.0.1:${port}/api/credential-health/reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'zen', credentialId: 'environment:1' })
+    });
+    assert.equal(reset.status, 200);
+    const recovered = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'recover' }] })
+    });
+    assert.equal(recovered.status, 200);
+    assert.equal((await recovered.json()).choices[0].message.content, 'done');
+    assert.equal(upstreamCalls, 4);
+
+    const malformed = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'malformed' }] })
+    });
+    assert.equal(malformed.status, 502);
+    assert.equal((await malformed.json()).error.code, 'upstream_invalid_json');
+    const malformedStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(malformedStats.credentialHealth[0].state, 'healthy');
+    assert.equal(malformedStats.credentialHealth[0].consecutiveFailures, 0);
+    assert.equal(upstreamCalls, 5);
+
+    const cancellation = new AbortController();
+    const canceledRequest = fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', signal: cancellation.signal,
+      headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'cancel body' }] })
+    });
+    await delayedBodyStarted;
+    cancellation.abort();
+    await assert.rejects(canceledRequest, (error) => error.name === 'AbortError');
+    let canceledLogs;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      canceledLogs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+      if (canceledLogs.some((item) => item.status === 499)) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    const canceledLog = canceledLogs.find((item) => item.status === 499);
+    assert.ok(canceledLog);
+    assert.match(canceledLog.error, /读取上游响应时断开/);
+    const canceledStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(canceledStats.credentialHealth[0].state, 'healthy');
+    assert.equal(canceledStats.credentialHealth[0].consecutiveFailures, 0);
+    assert.equal(upstreamCalls, 6);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});
@@ -515,7 +867,12 @@ test('可从 Render 环境变量引导完整配置且敏感值加密落盘', { t
     });
     assert.equal(login.status, 200);
     assert.match(login.headers.get('set-cookie'), /; Secure/);
+    assert.equal(login.headers.get('strict-transport-security'), 'max-age=31536000');
     const cookie = login.headers.get('set-cookie').split(';')[0];
+    const secureSameOriginMutation = await fetch(`http://127.0.0.1:${port}/api/prompt-rewrite/recent`, {
+      method: 'DELETE', headers: { cookie, origin: `https://127.0.0.1:${port}`, 'x-forwarded-proto': 'https' }
+    });
+    assert.equal(secureSameOriginMutation.status, 200);
     const runtimeConfig = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } }).then((response) => response.json());
     assert.equal(runtimeConfig.clientToken, '••••');
     const authenticated = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
@@ -702,6 +1059,383 @@ test('编号环境变量 Key 会按提供方轮询并在面板显示数量', { t
   }
 });
 
+test('模型发现共享全局和客户端并发上限且取消后释放名额', { timeout: 10_000 }, async () => {
+  let upstreamCalls = 0;
+  const requestResolvers = [];
+  const closeResolvers = [];
+  const upstreamRequests = Array.from({ length: 2 }, (_, index) => new Promise((resolveRequest) => { requestResolvers[index] = resolveRequest; }));
+  const upstreamClosed = Array.from({ length: 2 }, (_, index) => new Promise((resolveClosed) => { closeResolvers[index] = resolveClosed; }));
+  const upstream = createHttpServer((_req, res) => {
+    const index = upstreamCalls++;
+    if (index < 2) {
+      requestResolvers[index]();
+      res.once('close', closeResolvers[index]);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ object: 'list', data: [{ id: 'gpt-test', object: 'model' }] }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/model-abort-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'model-abort-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_ZEN_KEY: 'zen-model-key',
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const configured = await fetch(`http://127.0.0.1:${port}/api/config`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, maxConcurrentRequests: 2 })
+    });
+    assert.equal(configured.status, 200);
+    const namedClient = await fetch(`http://127.0.0.1:${port}/api/clients`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ name: '模型发现客户端', maxConcurrentRequests: 1 })
+    }).then((response) => response.json());
+
+    const namedController = new AbortController();
+    const namedModels = fetch(`http://127.0.0.1:${port}/zen/v1/models`, {
+      headers: { authorization: `Bearer ${namedClient.token}` }, signal: namedController.signal
+    });
+    await upstreamRequests[0];
+    const clientLimited = await fetch(`http://127.0.0.1:${port}/zen/v1/models`, {
+      headers: { authorization: `Bearer ${namedClient.token}` }
+    });
+    assert.equal(clientLimited.status, 429);
+    assert.equal(clientLimited.headers.get('retry-after'), '1');
+    assert.match((await clientLimited.json()).error.message, /模型发现客户端.*上限 1/);
+    assert.equal(upstreamCalls, 1);
+
+    const primaryController = new AbortController();
+    const primaryInference = fetch(`http://127.0.0.1:${port}/zen/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'gpt-test', input: 'hold the global slot' }),
+      signal: primaryController.signal
+    });
+    await upstreamRequests[1];
+    const globallyLimited = await fetch(`http://127.0.0.1:${port}/zen/v1/models`, {
+      headers: { authorization: 'Bearer Api123' }
+    });
+    assert.equal(globallyLimited.status, 429);
+    assert.match((await globallyLimited.json()).error.message, /并发请求已达到上限 2/);
+    assert.equal(upstreamCalls, 2);
+    const busyStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(busyStatus.activeRequests, 2);
+
+    namedController.abort();
+    primaryController.abort();
+    await Promise.all([
+      assert.rejects(namedModels, (error) => error?.name === 'AbortError'),
+      assert.rejects(primaryInference, (error) => error?.name === 'AbortError')
+    ]);
+    await Promise.all(upstreamClosed.map(async (closed, index) => {
+      let closeTimeout;
+      try {
+        await Promise.race([
+          closed,
+          new Promise((_, reject) => { closeTimeout = setTimeout(() => reject(new Error(`取消后第 ${index + 1} 条上游连接未及时关闭`)), 1000); })
+        ]);
+      } finally { clearTimeout(closeTimeout); }
+    }));
+
+    let idleStatus;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      idleStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+      if (idleStatus.activeRequests === 0) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    assert.equal(idleStatus.activeRequests, 0);
+    const recovered = await fetch(`http://127.0.0.1:${port}/zen/v1/models`, { headers: { authorization: 'Bearer Api123' } });
+    assert.equal(recovered.status, 200);
+    assert.deepEqual((await recovered.json()).data.map((model) => model.id), ['gpt-test']);
+    assert.equal(upstreamCalls, 3);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
+    upstream.closeAllConnections();
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('管理变更并发达到上限时快速拒绝并在完成后释放名额', { timeout: 10_000 }, async () => {
+  const heldResponses = [];
+  let resolveBothRequests;
+  const bothRequests = new Promise((resolveRequests) => { resolveBothRequests = resolveRequests; });
+  const upstream = createHttpServer((_req, res) => {
+    heldResponses.push(res);
+    if (heldResponses.length === 2) resolveBothRequests();
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/admin-limit-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'admin-limit-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_MAX_ADMIN_MUTATIONS: '2',
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const modelTest = () => fetch(`http://127.0.0.1:${port}/api/models/test`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'zen', apiKey: 'temporary-test-key' })
+    });
+    const pending = [modelTest(), modelTest()];
+    await bothRequests;
+
+    const busyStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(busyStatus.activeAdminMutations, 2);
+    assert.equal(busyStatus.maxAdminMutations, 2);
+    const limited = await fetch(`http://127.0.0.1:${port}/api/prompt-rewrite/recent`, { method: 'DELETE', headers: { cookie } });
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get('retry-after'), '1');
+    assert.match((await limited.json()).error, /管理操作并发已达到上限 2/);
+
+    for (const response of heldResponses) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ object: 'list', data: [{ id: 'test-model', object: 'model' }] }));
+    }
+    const completed = await Promise.all(pending);
+    assert.deepEqual(completed.map((response) => response.status), [200, 200]);
+    const idleStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(idleStatus.activeAdminMutations, 0);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
+    upstream.closeAllConnections();
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('管理端模型发现达到上限时拒绝新请求并在取消后释放名额', { timeout: 10_000 }, async () => {
+  let upstreamRequests = 0;
+  let firstResponse;
+  let resolveFirstRequest;
+  const firstRequest = new Promise((resolveRequest) => { resolveFirstRequest = resolveRequest; });
+  const upstream = createHttpServer((_req, res) => {
+    upstreamRequests++;
+    if (upstreamRequests === 1) {
+      firstResponse = res;
+      resolveFirstRequest();
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ object: 'list', data: [{ id: 'test-model', object: 'model' }] }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/admin-model-limit-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'admin-model-limit-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_ZEN_KEY: 'admin-model-key',
+    OPENCODE_BRIDGE_MAX_ADMIN_MODEL_DISCOVERIES: '1',
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const controller = new AbortController();
+    const pending = fetch(`http://127.0.0.1:${port}/api/models?provider=zen`, { headers: { cookie }, signal: controller.signal });
+    await firstRequest;
+
+    const busyStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(busyStatus.activeAdminModelDiscoveries, 1);
+    assert.equal(busyStatus.maxAdminModelDiscoveries, 1);
+    const limited = await fetch(`http://127.0.0.1:${port}/api/models?provider=zen`, { headers: { cookie } });
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get('retry-after'), '1');
+    assert.match((await limited.json()).error, /模型发现并发已达到上限 1/);
+    assert.equal(upstreamRequests, 1);
+
+    controller.abort();
+    await assert.rejects(pending, (error) => error?.name === 'AbortError');
+    let idleStatus;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      idleStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+      if (idleStatus.activeAdminModelDiscoveries === 0) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    assert.equal(idleStatus.activeAdminModelDiscoveries, 0);
+
+    const retry = await fetch(`http://127.0.0.1:${port}/api/models?provider=zen`, { headers: { cookie } });
+    assert.equal(retry.status, 200);
+    assert.equal(upstreamRequests, 2);
+  } finally {
+    firstResponse?.destroy();
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
+    upstream.closeAllConnections();
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('Key 池和客户端配置变更使用同一修订链并拒绝并发覆盖', { timeout: 10_000 }, async () => {
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/subresource-revision-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'subresource-revision-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123'
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const initial = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } }).then((response) => response.json());
+    const conditionalHeaders = (revision) => ({ 'content-type': 'application/json', cookie, 'if-match': `"${revision}"` });
+
+    const credentialCreates = await Promise.all(['主力', '备用'].map((name, index) => fetch(`http://127.0.0.1:${port}/api/provider-credentials`, {
+      method: 'POST', headers: conditionalHeaders(initial.revision),
+      body: JSON.stringify({ provider: 'zen', name, apiKey: `panel-key-${index + 1}` })
+    })));
+    assert.deepEqual(credentialCreates.map((response) => response.status).sort(), [201, 412]);
+    const credentialBodies = await Promise.all(credentialCreates.map((response) => response.json()));
+    const createdCredentialIndex = credentialCreates.findIndex((response) => response.status === 201);
+    const createdCredential = credentialBodies[createdCredentialIndex];
+    assert.match(createdCredential.revision, /^[a-f0-9]{32}$/);
+    assert.equal(credentialCreates[createdCredentialIndex].headers.get('etag'), `"${createdCredential.revision}"`);
+    assert.doesNotMatch(JSON.stringify(credentialBodies[1 - createdCredentialIndex]), /panel-key-/);
+    const credential = createdCredential.zenCredentials[0];
+
+    const updatedCredentialResponse = await fetch(`http://127.0.0.1:${port}/api/provider-credentials/zen/${credential.id}`, {
+      method: 'PUT', headers: conditionalHeaders(createdCredential.revision), body: JSON.stringify({ name: `${credential.name} 更新` })
+    });
+    assert.equal(updatedCredentialResponse.status, 200);
+    const updatedCredential = await updatedCredentialResponse.json();
+    assert.notEqual(updatedCredential.revision, createdCredential.revision);
+    assert.equal(updatedCredentialResponse.headers.get('etag'), `"${updatedCredential.revision}"`);
+
+    const clientCreates = await Promise.all(['桌面端', '移动端'].map((name) => fetch(`http://127.0.0.1:${port}/api/clients`, {
+      method: 'POST', headers: conditionalHeaders(updatedCredential.revision),
+      body: JSON.stringify({ name, maxConcurrentRequests: 2 })
+    })));
+    assert.deepEqual(clientCreates.map((response) => response.status).sort(), [201, 412]);
+    const clientBodies = await Promise.all(clientCreates.map((response) => response.json()));
+    const createdClientIndex = clientCreates.findIndex((response) => response.status === 201);
+    const client = clientBodies[createdClientIndex];
+    assert.match(client.token, /^ocb[a-f0-9]{64}$/);
+    assert.match(client.revision, /^[a-f0-9]{32}$/);
+    assert.equal(clientCreates[createdClientIndex].headers.get('etag'), `"${client.revision}"`);
+    assert.doesNotMatch(JSON.stringify(clientBodies[1 - createdClientIndex]), /ocb[a-f0-9]{64}/);
+
+    const toggledResponse = await fetch(`http://127.0.0.1:${port}/api/clients/${client.id}`, {
+      method: 'PUT', headers: conditionalHeaders(client.revision), body: JSON.stringify({ enabled: false })
+    });
+    assert.equal(toggledResponse.status, 200);
+    const toggled = await toggledResponse.json();
+    assert.equal(toggled.enabled, false);
+    assert.notEqual(toggled.revision, client.revision);
+    assert.equal(toggledResponse.headers.get('etag'), `"${toggled.revision}"`);
+
+    const deletedClientResponse = await fetch(`http://127.0.0.1:${port}/api/clients/${client.id}`, {
+      method: 'DELETE', headers: conditionalHeaders(toggled.revision)
+    });
+    assert.equal(deletedClientResponse.status, 200);
+    const deletedClient = await deletedClientResponse.json();
+    assert.equal(deletedClient.ok, true);
+    assert.notEqual(deletedClient.revision, toggled.revision);
+    assert.equal(deletedClientResponse.headers.get('etag'), `"${deletedClient.revision}"`);
+
+    const staleDelete = await fetch(`http://127.0.0.1:${port}/api/provider-credentials/zen/${credential.id}`, {
+      method: 'DELETE', headers: conditionalHeaders(updatedCredential.revision)
+    });
+    assert.equal(staleDelete.status, 412);
+    const deletedCredentialResponse = await fetch(`http://127.0.0.1:${port}/api/provider-credentials/zen/${credential.id}`, {
+      method: 'DELETE', headers: conditionalHeaders(deletedClient.revision)
+    });
+    assert.equal(deletedCredentialResponse.status, 200);
+    const finalConfig = await deletedCredentialResponse.json();
+    assert.deepEqual(finalConfig.zenCredentials, []);
+    assert.notEqual(finalConfig.revision, deletedClient.revision);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
 test('面板多 Key 会安全加密、轮询并按名称统计', { timeout: 10_000 }, async () => {
   const authorizations = [];
   const upstream = createHttpServer((req, res) => {
@@ -847,6 +1581,126 @@ test('鉴权失败的环境 Key 会在当前请求内切换并进入冷却', { t
     assert.equal((await reset.json()).credential.state, 'unknown');
     const resetStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
     assert.equal(resetStats.credentialHealth.find((item) => item.credentialId === 'environment:1').state, 'unknown');
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('模型发现会在 200 正文断开后切换 Key 并保持取消中性', { timeout: 10_000 }, async () => {
+  const authorizations = [];
+  let firstKeyCalls = 0;
+  let markDelayedBodyStarted;
+  let markDelayedBodyClosed;
+  const delayedBodyStarted = new Promise((resolveStarted) => { markDelayedBodyStarted = resolveStarted; });
+  const delayedBodyClosed = new Promise((resolveClosed) => { markDelayedBodyClosed = resolveClosed; });
+  const upstream = createHttpServer((req, res) => {
+    const authorization = req.headers.authorization;
+    authorizations.push(authorization);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (authorization === 'Bearer first-model-key') {
+      firstKeyCalls++;
+      res.write('{"object":"list","data":[');
+      if (firstKeyCalls <= 2) return setTimeout(() => res.destroy(), 20);
+      markDelayedBodyStarted();
+      const delayedResponse = setTimeout(() => {
+        if (!res.destroyed) res.end(']}');
+      }, 1_000);
+      res.once('close', () => {
+        clearTimeout(delayedResponse);
+        markDelayedBodyClosed();
+      });
+      return;
+    }
+    if (authorization === 'Bearer malformed-model-key') return res.end('{"broken":');
+    return res.end(JSON.stringify({ object: 'list', data: [{ id: 'gpt-model', object: 'model' }] }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/model-body-failover-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'model-body-failover-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_GO_KEY_1: 'first-model-key',
+    OPENCODE_GO_KEY_2: 'second-model-key',
+    OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+
+    const models = await fetch(`http://127.0.0.1:${port}/go/v1/models`, { headers: { authorization: 'Bearer Api123' } });
+    assert.equal(models.status, 200);
+    assert.equal(models.headers.get('x-opencode-key-attempts'), '2');
+    assert.deepEqual((await models.json()).data.map((model) => model.id), ['gpt-model']);
+    assert.deepEqual(authorizations, ['Bearer first-model-key', 'Bearer second-model-key']);
+    const failoverStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    const failed = failoverStats.credentialHealth.find((item) => item.credentialId === 'environment:1');
+    const healthy = failoverStats.credentialHealth.find((item) => item.credentialId === 'environment:2');
+    assert.equal(failed.state, 'degraded');
+    assert.equal(failed.consecutiveFailures, 1);
+    assert.equal(failed.lastFailureKind, 'network');
+    assert.equal(healthy.state, 'healthy');
+
+    const resetFirst = () => fetch(`http://127.0.0.1:${port}/api/credential-health/reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'go', credentialId: 'environment:1' })
+    });
+    assert.equal((await resetFirst()).status, 200);
+    const tested = await fetch(`http://127.0.0.1:${port}/api/models/test`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'go', credentialId: 'environment:1' })
+    });
+    assert.equal(tested.status, 502);
+    assert.equal((await tested.json()).code, 'upstream_connection_reset');
+    const testedStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(testedStats.credentialHealth.find((item) => item.credentialId === 'environment:1').consecutiveFailures, 1);
+
+    assert.equal((await resetFirst()).status, 200);
+    const cancellation = new AbortController();
+    const canceled = fetch(`http://127.0.0.1:${port}/api/models/test`, {
+      method: 'POST', signal: cancellation.signal,
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'go', credentialId: 'environment:1' })
+    });
+    await delayedBodyStarted;
+    cancellation.abort();
+    await assert.rejects(canceled, (error) => error.name === 'AbortError');
+    await Promise.race([
+      delayedBodyClosed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('取消后模型正文连接未及时关闭')), 1_000))
+    ]);
+    const canceledStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    const canceledCredential = canceledStats.credentialHealth.find((item) => item.credentialId === 'environment:1');
+    assert.equal(canceledCredential.state, 'unknown');
+    assert.equal(canceledCredential.consecutiveFailures, 0);
+
+    const malformed = await fetch(`http://127.0.0.1:${port}/api/models/test`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'go', apiKey: 'malformed-model-key' })
+    });
+    assert.equal(malformed.status, 502);
+    assert.equal((await malformed.json()).code, 'upstream_invalid_json');
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});

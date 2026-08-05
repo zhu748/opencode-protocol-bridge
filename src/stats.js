@@ -140,7 +140,7 @@ function timingSummary(items, field) {
 function timingValue(item, field) {
   if (!Object.hasOwn(item, field)) return null;
   const value = Number(item[field]);
-  return Number.isFinite(value) && value >= 0 ? value : null;
+  return Number.isFinite(value) && value >= 0 ? Math.min(Number.MAX_SAFE_INTEGER, value) : null;
 }
 
 function tokenUsage(item) {
@@ -174,7 +174,7 @@ function group(items, keyFor) {
 
 function count(value) {
   const number = Number(value);
-  return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+  return Number.isFinite(number) && number > 0 ? Math.min(Number.MAX_SAFE_INTEGER, Math.floor(number)) : 0;
 }
 
 function round(value, digits) {

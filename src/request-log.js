@@ -1,5 +1,8 @@
-import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { atomicWriteFile, cleanupAtomicTemporary, readUtf8FileLimited } from './file-io.js';
+
+const MAX_LOG_FILE_BYTES = 10 * 1024 * 1024;
 
 export class RequestLogStore {
   constructor(file) {
@@ -22,18 +25,23 @@ export class RequestLogStore {
   }
 
   async #loadPersistent() {
+    const diagnostics = [];
     try {
-      const information = await stat(this.file);
-      if (information.size > 10 * 1024 * 1024) throw new Error('日志文件超过 10 MiB 安全上限');
-      const parsed = JSON.parse(await readFile(this.file, 'utf8'));
+      await cleanupAtomicTemporary(this.file);
+    } catch (error) {
+      diagnostics.push(`无法清理日志临时文件：${error.message}`);
+    }
+    try {
+      const parsed = JSON.parse(await readUtf8FileLimited(this.file, MAX_LOG_FILE_BYTES, '日志文件'));
       if (!Array.isArray(parsed)) throw new Error('日志文件根节点不是数组');
       const merged = [...this.items, ...parsed.map(sanitizeEntry)];
       this.items = [...new Map(merged.map((item) => [item.requestId || `${item.time}:${Math.random()}`, item])).values()]
         .sort((left, right) => String(right.time).localeCompare(String(left.time)))
         .slice(0, 1000);
     } catch (error) {
-      if (error.code !== 'ENOENT') this.lastError = `无法读取持久化日志：${error.message}`;
+      if (error.code !== 'ENOENT') diagnostics.push(`无法读取持久化日志：${error.message}`);
     } finally {
+      this.lastError = diagnostics.join('；');
       this.loaded = true;
       this.loadPromise = null;
     }
@@ -106,9 +114,7 @@ export class RequestLogStore {
     const snapshot = structuredClone(this.items);
     this.writeQueue = this.writeQueue.catch(() => {}).then(async () => {
       await mkdir(dirname(this.file), { recursive: true });
-      const temporary = `${this.file}.${process.pid}.${Date.now()}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-      await rename(temporary, this.file);
+      await atomicWriteFile(this.file, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     });
     try { await this.writeQueue; this.lastError = ''; }
     catch (error) {
@@ -124,7 +130,12 @@ function normalizeLimit(value) {
 
 function sanitizeEntry(entry) {
   const text = (value, limit) => String(value ?? '').slice(0, limit);
-  const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const number = (value, maximum = Number.MAX_SAFE_INTEGER) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return 0;
+    return Math.max(-maximum, Math.min(maximum, Math.trunc(parsed)));
+  };
+  const nonNegative = (value, maximum) => Math.max(0, number(value, maximum));
   return {
     time: text(entry.time, 64),
     requestId: text(entry.requestId, 64),
@@ -135,21 +146,21 @@ function sanitizeEntry(entry) {
     provider: text(entry.provider, 16),
     credentialId: text(entry.credentialId, 64),
     credentialLabel: text(entry.credentialLabel, 64),
-    credentialAttempts: Math.max(1, number(entry.credentialAttempts) || 1),
+    credentialAttempts: Math.max(1, nonNegative(entry.credentialAttempts, 1000) || 1),
     upstreamRequestId: text(entry.upstreamRequestId, 256),
     retryAfter: text(entry.retryAfter, 128),
     protocol: text(entry.protocol, 64),
-    status: number(entry.status),
-    duration: number(entry.duration),
-    ...(entry.upstreamWaitMs !== undefined ? { upstreamWaitMs: Math.max(0, number(entry.upstreamWaitMs)) } : {}),
-    ...(entry.upstreamBodyMs !== undefined ? { upstreamBodyMs: Math.max(0, number(entry.upstreamBodyMs)) } : {}),
+    status: nonNegative(entry.status, 999),
+    duration: nonNegative(entry.duration),
+    ...(entry.upstreamWaitMs !== undefined ? { upstreamWaitMs: nonNegative(entry.upstreamWaitMs) } : {}),
+    ...(entry.upstreamBodyMs !== undefined ? { upstreamBodyMs: nonNegative(entry.upstreamBodyMs) } : {}),
     stream: Boolean(entry.stream),
-    ...(entry.inputTokens !== undefined ? { inputTokens: number(entry.inputTokens) } : {}),
-    ...(entry.outputTokens !== undefined ? { outputTokens: number(entry.outputTokens) } : {}),
+    ...(entry.inputTokens !== undefined ? { inputTokens: nonNegative(entry.inputTokens) } : {}),
+    ...(entry.outputTokens !== undefined ? { outputTokens: nonNegative(entry.outputTokens) } : {}),
     ...(typeof entry.inputTokensIncludeCache === 'boolean' ? { inputTokensIncludeCache: entry.inputTokensIncludeCache } : {}),
-    ...(entry.cachedInputTokens ? { cachedInputTokens: number(entry.cachedInputTokens) } : {}),
-    ...(entry.cacheCreationInputTokens ? { cacheCreationInputTokens: number(entry.cacheCreationInputTokens) } : {}),
-    ...(entry.reasoningTokens ? { reasoningTokens: number(entry.reasoningTokens) } : {}),
+    ...(entry.cachedInputTokens ? { cachedInputTokens: nonNegative(entry.cachedInputTokens) } : {}),
+    ...(entry.cacheCreationInputTokens ? { cacheCreationInputTokens: nonNegative(entry.cacheCreationInputTokens) } : {}),
+    ...(entry.reasoningTokens ? { reasoningTokens: nonNegative(entry.reasoningTokens) } : {}),
     ...(entry.errorCode ? { errorCode: text(entry.errorCode, 64) } : {}),
     ...(entry.error ? { error: text(entry.error, 500) } : {})
   };

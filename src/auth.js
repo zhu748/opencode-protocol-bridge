@@ -30,14 +30,19 @@ export function createSession(secret) {
 }
 
 export function verifySession(token, secret) {
-  if (!token || !secret) return false;
-  const [payload, signature] = token.split('.');
-  if (!payload || !signature) return false;
+  if (typeof token !== 'string' || !token || token.length > 1024 || typeof secret !== 'string' || !secret) return false;
+  const parts = token.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return false;
+  const [payload, signature] = parts;
   const expected = createHmac('sha256', secret).update(payload).digest('base64url');
   const a = Buffer.from(signature);
   const b = Buffer.from(expected);
   if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
-  try { return JSON.parse(Buffer.from(payload, 'base64url')).exp > Date.now(); } catch { return false; }
+  try {
+    const session = JSON.parse(Buffer.from(payload, 'base64url'));
+    return session && typeof session === 'object' && !Array.isArray(session)
+      && Number.isFinite(session.exp) && session.exp > Date.now();
+  } catch { return false; }
 }
 
 export function loginAllowed(ip) {
