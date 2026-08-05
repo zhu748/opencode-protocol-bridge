@@ -87,12 +87,12 @@ Test-AlphaNumericSecret -Name 'OPENCODE_BRIDGE_CLIENT_TOKEN'
 
 $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeCommand) {
-  Write-Error "Node.js was not found. Install Node.js 20.18.1-24.x and try again."
+  Write-Error "Node.js was not found. Install Node.js 22.20+ or 24.11+ and try again."
 }
 
 $npmCommand = Get-Command npm -ErrorAction SilentlyContinue
 if (-not $npmCommand) {
-  Write-Error "npm was not found. Reinstall Node.js 20.18.1-24.x or fix PATH."
+  Write-Error "npm was not found. Reinstall Node.js 22.20+ or 24.11+, or fix PATH."
 }
 
 $nodeVersionText = (& node -p "process.versions.node").Trim()

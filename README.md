@@ -379,6 +379,6 @@ npm test
 npm run check
 ```
 
-默认测试不调用真实 OpenCode 接口，因此不会产生费用。
+`npm run check` 会自动发现并语法检查 `src`、`public`、`scripts` 与 `test-fixtures` 下的全部 JavaScript 文件，再运行完整测试；新增源码文件无需手工维护检查名单。默认测试不调用真实 OpenCode 接口，因此不会产生费用。
 
 如需用临时 Go Key 对官方 `deepseek-v4-flash` 做小额度在线冒烟测试，可在当前 PowerShell 会话设置 `OPENCODE_GO_KEY` 后运行 `npm run test:live:go`。默认 `full` 档会通过本地 `/go/v1` 验证模型发现、Responses 非流式正文与标准流事件、Claude 工具名与参数、Claude 工具结果回送后的续答、Chat SSE 正文与 usage，并登录临时管理会话核对五次请求的统计守恒及时间趋势阶段耗时覆盖；只输出状态和 usage，Key 不写入项目配置或日志，临时加密配置会在结束时删除。只需验证 Go 上游与基础 Responses 转换时，可设置 `OPENCODE_LIVE_PROFILE=quick`，它仍会先验证模型权限，然后只发送一次小型 Responses 请求并核对一条统计记录。测试失败时输出会列出已完成阶段和安全错误码，便于区分 Key/模型问题与连接故障。默认单请求超时为 60 秒；若上游临时拥塞，可在当前会话设置 `OPENCODE_LIVE_TIMEOUT_MS`（10000–600000）后重试。仅在模型列表端点拥塞、且已知模型名正确时，可临时设置 `OPENCODE_LIVE_SKIP_MODEL_DISCOVERY=1` 继续验证实际生成协议；该模式会在输出中明确标记跳过了模型发现。测试后可执行 `Remove-Item Env:OPENCODE_GO_KEY` 清除当前会话变量。

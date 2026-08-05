@@ -88,14 +88,16 @@ test('Render Blueprint 暴露批量 Key、逐项代理、远程图片交接和 s
 });
 
 test('部署构建固定受支持的 Node 版本并排除本地密钥与运行数据', async () => {
-  const [dockerignore, dockerfile, nodeVersion, workflow, dependabot, manifestText, lockText] = await Promise.all([
+  const [dockerignore, dockerfile, nodeVersion, workflow, dependabot, manifestText, lockText, syntaxChecker, localLauncher] = await Promise.all([
     readFile(resolve(projectDir, '.dockerignore'), 'utf8'),
     readFile(resolve(projectDir, 'Dockerfile'), 'utf8'),
     readFile(resolve(projectDir, '.node-version'), 'utf8'),
     readFile(resolve(projectDir, '.github/workflows/ci.yml'), 'utf8'),
     readFile(resolve(projectDir, '.github/dependabot.yml'), 'utf8'),
     readFile(resolve(projectDir, 'package.json'), 'utf8'),
-    readFile(resolve(projectDir, 'package-lock.json'), 'utf8')
+    readFile(resolve(projectDir, 'package-lock.json'), 'utf8'),
+    readFile(resolve(projectDir, 'scripts/check-syntax.mjs'), 'utf8'),
+    readFile(resolve(projectDir, 'start-local.ps1'), 'utf8')
   ]);
   const manifest = JSON.parse(manifestText);
   const lock = JSON.parse(lockText);
@@ -103,6 +105,11 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
   assert.equal(nodeVersion.trim(), '24.18.0');
   assert.equal(manifest.engines.node, '^22.20.0 || ^24.11.0');
   assert.equal(lock.packages[''].engines.node, manifest.engines.node);
+  assert.equal(manifest.scripts.check, 'node scripts/check-syntax.mjs && node --test');
+  for (const directory of ['src', 'public', 'scripts', 'test-fixtures']) assert.match(syntaxChecker, new RegExp(`['"]${directory}['"]`));
+  assert.match(syntaxChecker, /spawnSync\(process\.execPath, \['--check', file\]/);
+  assert.doesNotMatch(localLauncher, /Node\.js 20/);
+  assert.match(localLauncher, /Node\.js 22\.20\+ or 24\.11\+/);
   assert.match(dockerfile, /^FROM node:24\.18\.0-alpine3\.24$/m);
   assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
