@@ -32,7 +32,9 @@ function timeline(items, window, now) {
   const start = end - (bucketCount - 1) * bucketMs;
   const buckets = Array.from({ length: bucketCount }, (_, index) => ({
     start: new Date(start + index * bucketMs).toISOString(),
-    requests: 0, errors: 0, totalTokens: 0, cachedInputTokens: 0
+    requests: 0, errors: 0, totalTokens: 0, cachedInputTokens: 0,
+    upstreamWaitRequests: 0, upstreamWaitTotalMs: 0,
+    upstreamBodyRequests: 0, upstreamBodyTotalMs: 0
   }));
   for (const item of items) {
     const timestamp = Date.parse(item.time);
@@ -43,8 +45,25 @@ function timeline(items, window, now) {
     if (!(item.status >= 200 && item.status < 400)) buckets[index].errors++;
     buckets[index].totalTokens += usage.inputTokens + count(item.outputTokens);
     buckets[index].cachedInputTokens += usage.cachedInputTokens;
+    const upstreamWaitMs = timingValue(item, 'upstreamWaitMs');
+    if (upstreamWaitMs !== null) {
+      buckets[index].upstreamWaitRequests++;
+      buckets[index].upstreamWaitTotalMs += upstreamWaitMs;
+    }
+    const upstreamBodyMs = timingValue(item, 'upstreamBodyMs');
+    if (upstreamBodyMs !== null) {
+      buckets[index].upstreamBodyRequests++;
+      buckets[index].upstreamBodyTotalMs += upstreamBodyMs;
+    }
   }
-  return { bucket: window === '24h' ? 'hour' : 'day', range: window === 'all' ? '14d' : window, buckets };
+  return {
+    bucket: window === '24h' ? 'hour' : 'day', range: window === 'all' ? '14d' : window,
+    buckets: buckets.map(({ upstreamWaitTotalMs, upstreamBodyTotalMs, ...bucket }) => ({
+      ...bucket,
+      averageUpstreamWaitMs: bucket.upstreamWaitRequests ? Math.round(upstreamWaitTotalMs / bucket.upstreamWaitRequests) : 0,
+      averageUpstreamBodyMs: bucket.upstreamBodyRequests ? Math.round(upstreamBodyTotalMs / bucket.upstreamBodyRequests) : 0
+    }))
+  };
 }
 
 function credentialName(item) {
@@ -109,13 +128,19 @@ function summarize(items) {
 }
 
 function timingSummary(items, field) {
-  const values = items.filter((item) => Object.hasOwn(item, field)).map((item) => Number(item[field]))
-    .filter((value) => Number.isFinite(value) && value >= 0).sort((left, right) => left - right);
+  const values = items.map((item) => timingValue(item, field))
+    .filter((value) => value !== null).sort((left, right) => left - right);
   return {
     requests: values.length,
     average: values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0,
     p95: values.length ? Math.round(values[Math.max(0, Math.ceil(values.length * 0.95) - 1)]) : 0
   };
+}
+
+function timingValue(item, field) {
+  if (!Object.hasOwn(item, field)) return null;
+  const value = Number(item[field]);
+  return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function tokenUsage(item) {

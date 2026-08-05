@@ -146,6 +146,12 @@ try {
   if (stats.summary.upstreamWaitRequests !== expectedRequests || stats.summary.upstreamBodyRequests !== expectedRequests) {
     throw new Error(`管理面板阶段耗时未覆盖 ${expectedRequests} 次在线协议请求`);
   }
+  const timingBuckets = (Array.isArray(stats.timeline?.buckets) ? stats.timeline.buckets : []).filter((item) => item.requests > 0);
+  const timelineWaitRequests = timingBuckets.reduce((total, item) => total + Number(item.upstreamWaitRequests || 0), 0);
+  const timelineBodyRequests = timingBuckets.reduce((total, item) => total + Number(item.upstreamBodyRequests || 0), 0);
+  if (timelineWaitRequests !== expectedRequests || timelineBodyRequests !== expectedRequests) {
+    throw new Error(`管理面板时间趋势的阶段耗时未覆盖 ${expectedRequests} 次在线协议请求`);
+  }
   if (stats.summary.inputTokens !== stats.summary.uncachedInputTokens + stats.summary.cachedInputTokens) throw new Error('缓存统计的输入 Token 口径不守恒');
   completedChecks.push('stats');
 
@@ -165,6 +171,7 @@ try {
       } : {}),
       stats: {
         requests: stats.summary.requests, usageCoverageRate: stats.summary.usageCoverageRate,
+        timingBuckets: timingBuckets.length,
         totalTokens: stats.summary.totalTokens, cachedInputTokens: stats.summary.cachedInputTokens, cacheReadRate: stats.summary.cacheReadRate,
         averageUpstreamWaitMs: stats.summary.averageUpstreamWaitMs, p95UpstreamWaitMs: stats.summary.p95UpstreamWaitMs,
         averageUpstreamBodyMs: stats.summary.averageUpstreamBodyMs, p95UpstreamBodyMs: stats.summary.p95UpstreamBodyMs

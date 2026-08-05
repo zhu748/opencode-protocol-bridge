@@ -787,7 +787,28 @@
 }
 
 .credential-table {
-  min-width: 940px;
+  min-width: 1080px;
+}
+
+.stats-latency {
+  min-width: 155px;
+  line-height: 1.35;
+}
+
+.stats-latency strong,
+.stats-latency small {
+  display: block;
+}
+
+.stats-latency strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.stats-latency small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .credential-table td:nth-child(2) small,

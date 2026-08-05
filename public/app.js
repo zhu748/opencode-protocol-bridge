@@ -285,6 +285,17 @@ function formatDuration(value) {
   return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(milliseconds >= 10_000 ? 1 : 2)} s` : `${formatNumber(milliseconds)} ms`;
 }
 
+function renderLatency(item) {
+  if (!item.requests) return '<div class="stats-latency" title="尚无请求数据"><strong>暂无请求</strong><small>等待 —</small><small>响应体 —</small></div>';
+  const averageAndP95 = (average, p95) => `${formatDuration(average)} / ${formatDuration(p95)}`;
+  const wait = item.upstreamWaitRequests ? averageAndP95(item.averageUpstreamWaitMs, item.p95UpstreamWaitMs) : '—';
+  const body = item.upstreamBodyRequests ? averageAndP95(item.averageUpstreamBodyMs, item.p95UpstreamBodyMs) : '—';
+  const phaseCoverage = item.upstreamWaitRequests || item.upstreamBodyRequests
+    ? `阶段覆盖：等待 ${formatPercentage(item.upstreamWaitCoverageRate)}，响应体 ${formatPercentage(item.upstreamBodyCoverageRate)}`
+    : '旧日志暂无阶段耗时';
+  return `<div class="stats-latency" title="${escapeHtml(`格式为平均 / P95；${phaseCoverage}`)}"><strong>总计 ${averageAndP95(item.averageDurationMs, item.p95DurationMs)}</strong><small>等待 ${wait}</small><small>响应体 ${body}</small></div>`;
+}
+
 function updateCooldownCountdowns() {
   $$('.cooldown-countdown').forEach((node) => {
     node.textContent = formatCooldownRemaining(node.dataset.cooldownUntil);
@@ -292,7 +303,7 @@ function updateCooldownCountdowns() {
 }
 
 function renderStatsRows(selector, items) {
-  $(selector).innerHTML = items.length ? items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${formatNumber(item.requests)}</td><td>${formatPercentage(item.successRate)}</td><td>${formatNumber(item.totalTokens)}</td><td>${formatPercentage(item.cacheReadRate)}</td><td>${formatDuration(item.averageDurationMs)}</td></tr>`).join('') : '<tr><td colspan="6" class="stats-empty">暂无数据</td></tr>';
+  $(selector).innerHTML = items.length ? items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${formatNumber(item.requests)}</td><td>${formatPercentage(item.successRate)}</td><td>${formatNumber(item.totalTokens)}</td><td>${formatPercentage(item.cacheReadRate)}</td><td>${renderLatency(item)}</td></tr>`).join('') : '<tr><td colspan="6" class="stats-empty">暂无数据</td></tr>';
 }
 
 function renderCredentialRows(history, health) {
@@ -320,7 +331,7 @@ function renderCredentialRows(history, health) {
     const reset = current && !['healthy', 'unknown'].includes(state)
       ? `<button class="mini-btn reset-credential-health" data-provider="${escapeHtml(current.provider)}" data-credential-id="${escapeHtml(current.credentialId)}" type="button">重置</button>`
       : '';
-    return `<tr><td>${escapeHtml(name)}</td><td><div class="credential-health-state"><span class="credential-state ${stateClass}">${stateLabel}</span>${reset}</div>${cooldown}</td><td>${formatNumber(current?.consecutiveFailures || 0)}</td><td>${formatNumber(usage.requests)}</td><td>${formatPercentage(usage.successRate)}</td><td>${formatNumber(usage.totalTokens)}</td><td>${formatPercentage(usage.cacheReadRate)}</td><td>${formatDuration(usage.averageDurationMs)}</td><td class="credential-event">${recent}</td></tr>`;
+    return `<tr><td>${escapeHtml(name)}</td><td><div class="credential-health-state"><span class="credential-state ${stateClass}">${stateLabel}</span>${reset}</div>${cooldown}</td><td>${formatNumber(current?.consecutiveFailures || 0)}</td><td>${formatNumber(usage.requests)}</td><td>${formatPercentage(usage.successRate)}</td><td>${formatNumber(usage.totalTokens)}</td><td>${formatPercentage(usage.cacheReadRate)}</td><td>${renderLatency(usage)}</td><td class="credential-event">${recent}</td></tr>`;
   }).join('') : '<tr><td colspan="9" class="stats-empty">暂无已配置或历史 Key</td></tr>';
 }
 
@@ -338,7 +349,11 @@ function renderTimeline(timeline) {
   $('#stats-trend-range').textContent = timeline?.range === '24h' ? '最近 24 小时 · 每小时' : timeline?.range === '7d' ? '最近 7 天 · 每日' : '最近 14 天 · 每日';
   $('#stats-trend').innerHTML = buckets.map((item) => {
     const label = formatter.format(new Date(item.start));
-    const title = `${label}：${formatNumber(item.requests)} 个请求，${formatNumber(item.errors)} 个失败，${formatNumber(item.totalTokens)} Token`;
+    const phaseDetail = [
+      item.upstreamWaitRequests ? `平均上游等待 ${formatDuration(item.averageUpstreamWaitMs)}` : '',
+      item.upstreamBodyRequests ? `平均响应体阶段 ${formatDuration(item.averageUpstreamBodyMs)}` : ''
+    ].filter(Boolean).join('，');
+    const title = `${label}：${formatNumber(item.requests)} 个请求，${formatNumber(item.errors)} 个失败，${formatNumber(item.totalTokens)} Token${phaseDetail ? `，${phaseDetail}` : ''}`;
     return `<div class="trend-column" title="${escapeHtml(title)}"><div class="trend-bars"><span class="trend-bar token-bar ${portionClass(item.totalTokens, maximumTokens)}"></span><span class="trend-bar request-bar ${portionClass(item.requests, maximumRequests)}">${item.errors ? `<i class="error-mark" title="${item.errors} 个失败"></i>` : ''}</span></div><time>${escapeHtml(label)}</time></div>`;
   }).join('');
   const totalRequests = buckets.reduce((sum, item) => sum + item.requests, 0);

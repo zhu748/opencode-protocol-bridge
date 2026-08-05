@@ -172,11 +172,11 @@
         </article>
         <p id="stats-scope" class="stats-note">统计范围：当前内存保留记录</p>
         <div class="breakdown-grid">
-          <article class="panel table-wrap"><div class="breakdown-title"><h3>按上游</h3></div><table><thead><tr><th>上游</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>平均耗时</th></tr></thead><tbody id="stats-provider-rows"></tbody></table></article>
-          <article class="panel table-wrap"><div class="breakdown-title"><h3>按模型</h3></div><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>平均耗时</th></tr></thead><tbody id="stats-model-rows"></tbody></table></article>
-          <article class="panel table-wrap"><div class="breakdown-title"><h3>按协议转换</h3></div><table><thead><tr><th>协议</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>平均耗时</th></tr></thead><tbody id="stats-protocol-rows"></tbody></table></article>
-          <article class="panel table-wrap"><div class="breakdown-title"><h3>按客户端</h3></div><table><thead><tr><th>客户端</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>平均耗时</th></tr></thead><tbody id="stats-client-rows"></tbody></table></article>
-          <article class="panel table-wrap credential-breakdown"><div class="breakdown-title"><h3>Key 健康与用量</h3><p>失效、限流或连续网络故障的 Key 会临时冷却；确认上游恢复后可手动重置。仅显示来源和编号，不保存或展示密钥内容</p></div><table class="credential-table"><thead><tr><th>Key 槽位</th><th>运行状态</th><th>连续失败</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>平均耗时</th><th>最近事件</th></tr></thead><tbody id="stats-credential-rows"></tbody></table></article>
+          <article class="panel table-wrap"><div class="breakdown-title"><h3>按上游</h3></div><table><thead><tr><th>上游</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th></tr></thead><tbody id="stats-provider-rows"></tbody></table></article>
+          <article class="panel table-wrap"><div class="breakdown-title"><h3>按模型</h3></div><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th></tr></thead><tbody id="stats-model-rows"></tbody></table></article>
+          <article class="panel table-wrap"><div class="breakdown-title"><h3>按协议转换</h3></div><table><thead><tr><th>协议</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th></tr></thead><tbody id="stats-protocol-rows"></tbody></table></article>
+          <article class="panel table-wrap"><div class="breakdown-title"><h3>按客户端</h3></div><table><thead><tr><th>客户端</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th></tr></thead><tbody id="stats-client-rows"></tbody></table></article>
+          <article class="panel table-wrap credential-breakdown"><div class="breakdown-title"><h3>Key 健康与用量</h3><p>失效、限流或连续网络故障的 Key 会临时冷却；确认上游恢复后可手动重置。仅显示来源和编号，不保存或展示密钥内容</p></div><table class="credential-table"><thead><tr><th>Key 槽位</th><th>运行状态</th><th>连续失败</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th><th>最近事件</th></tr></thead><tbody id="stats-credential-rows"></tbody></table></article>
         </div>
       </section>
 

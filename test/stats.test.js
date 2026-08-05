@@ -27,6 +27,9 @@ test('统计汇总不会重复计算缓存和推理 token', () => {
   assert.equal(result.byProvider[0].name, 'zen');
   assert.equal(result.byProvider[0].totalTokens, 20);
   assert.equal(result.byModel[0].name, 'deepseek-v4-flash-free');
+  assert.equal(result.byModel[0].averageUpstreamWaitMs, 70);
+  assert.equal(result.byModel[0].p95UpstreamWaitMs, 70);
+  assert.equal(result.byModel[0].averageUpstreamBodyMs, 20);
   assert.equal(result.byCredential[0].name, 'ZEN 环境 #2');
   assert.equal(result.byClient.find((item) => item.name === '主令牌').requests, 1);
 });
@@ -55,6 +58,11 @@ test('时间趋势按范围生成固定桶并统计错误与 token', () => {
   assert.equal(hourly.buckets.reduce((sum, item) => sum + item.requests, 0), 2);
   assert.equal(hourly.buckets.reduce((sum, item) => sum + item.errors, 0), 1);
   assert.equal(hourly.buckets.reduce((sum, item) => sum + item.totalTokens, 0), 14);
+  const failedBucket = hourly.buckets.find((item) => item.errors === 1);
+  assert.equal(failedBucket.upstreamWaitRequests, 1);
+  assert.equal(failedBucket.averageUpstreamWaitMs, 800);
+  assert.equal(failedBucket.upstreamBodyRequests, 0);
+  assert.equal(failedBucket.averageUpstreamBodyMs, 0);
 
   const all = aggregateRequestStats(logs, 'all', now).timeline;
   assert.equal(all.bucket, 'day');
