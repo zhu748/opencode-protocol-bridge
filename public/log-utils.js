@@ -23,7 +23,8 @@ export function requestLogsToCsv(items) {
     ['请求模型', 'model'], ['上游模型', 'upstreamModel'], ['上游', 'provider'], ['Key ID', 'credentialId'], ['Key 名称', 'credentialLabel'],
     ['协议转换', 'protocol'], ['状态', 'status'], ['输入 Token', 'inputTokens'], ['输出 Token', 'outputTokens'],
     ['缓存读取 Token', 'cachedInputTokens'], ['缓存写入 Token', 'cacheCreationInputTokens'], ['推理 Token', 'reasoningTokens'],
-    ['耗时 ms', 'duration'], ['Key 尝试次数', 'credentialAttempts'], ['Retry-After', 'retryAfter'], ['错误代码', 'errorCode'], ['错误', 'error']
+    ['总耗时 ms', 'duration'], ['上游等待 ms', 'upstreamWaitMs'], ['响应体阶段 ms', 'upstreamBodyMs'],
+    ['Key 尝试次数', 'credentialAttempts'], ['Retry-After', 'retryAfter'], ['错误代码', 'errorCode'], ['错误', 'error']
   ];
   const rows = [columns.map(([label]) => csvCell(label))];
   for (const item of Array.isArray(items) ? items : []) rows.push(columns.map(([, field]) => csvCell(item?.[field] ?? '')));

@@ -138,8 +138,8 @@
         <div class="metric-grid">
           <article class="metric-card"><span>请求总数</span><strong id="stats-requests">0</strong><small id="stats-usage-coverage">0 条含用量</small></article>
           <article class="metric-card"><span>成功率</span><strong id="stats-success-rate">100%</strong><small id="stats-success-detail">0 成功 · 0 失败</small></article>
-          <article class="metric-card"><span>平均耗时</span><strong id="stats-avg-duration">0 ms</strong><small>全部请求</small></article>
-          <article class="metric-card"><span>P95 耗时</span><strong id="stats-p95-duration">0 ms</strong><small>95% 请求不超过此值</small></article>
+          <article class="metric-card"><span>平均耗时</span><strong id="stats-avg-duration">0 ms</strong><small id="stats-avg-phases">暂无阶段耗时</small></article>
+          <article class="metric-card"><span>P95 耗时</span><strong id="stats-p95-duration">0 ms</strong><small id="stats-p95-phases">暂无阶段耗时</small></article>
         </div>
         <div class="metric-grid token-metrics">
           <article class="metric-card accent"><span>总 Token</span><strong id="stats-total-tokens">0</strong><small>总输入 + 输出</small></article>
@@ -191,7 +191,7 @@
           <button id="export-logs" class="ghost" type="button" disabled>导出筛选结果</button>
           <button id="clear-logs" class="ghost danger" type="button">清空记录</button>
         </div>
-        <div class="panel table-wrap"><table><thead><tr><th>时间</th><th>请求 ID</th><th>客户端</th><th>模型</th><th>上游</th><th>协议转换</th><th>状态</th><th>令牌</th><th>耗时</th></tr></thead><tbody id="log-rows"></tbody></table><div id="empty-logs" class="empty">还没有请求记录</div></div>
+        <div class="panel table-wrap"><table><thead><tr><th>时间</th><th>请求 ID</th><th>客户端</th><th>模型</th><th>上游</th><th>协议转换</th><th>状态</th><th>令牌</th><th>总耗时 / 阶段</th></tr></thead><tbody id="log-rows"></tbody></table><div id="empty-logs" class="empty">还没有请求记录</div></div>
       </section>
 
       <section id="guide" class="view">

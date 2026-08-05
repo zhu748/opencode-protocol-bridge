@@ -141,6 +141,8 @@ function sanitizeEntry(entry) {
     protocol: text(entry.protocol, 64),
     status: number(entry.status),
     duration: number(entry.duration),
+    ...(entry.upstreamWaitMs !== undefined ? { upstreamWaitMs: Math.max(0, number(entry.upstreamWaitMs)) } : {}),
+    ...(entry.upstreamBodyMs !== undefined ? { upstreamBodyMs: Math.max(0, number(entry.upstreamBodyMs)) } : {}),
     stream: Boolean(entry.stream),
     ...(entry.inputTokens !== undefined ? { inputTokens: number(entry.inputTokens) } : {}),
     ...(entry.outputTokens !== undefined ? { outputTokens: number(entry.outputTokens) } : {}),

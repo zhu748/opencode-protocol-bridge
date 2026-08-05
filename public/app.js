@@ -52,7 +52,11 @@ function renderRuntimeSummary() {
   const logsStale = dataSourceFailures.has('请求日志');
   if (serviceStatus) {
     const successSummary = serviceStatus.requests ? `${formatPercentage(serviceStatus.successRate)} 成功` : '暂无请求';
-    $('#request-summary').textContent = `${successSummary} · 活跃 ${serviceStatus.activeRequests} · 平均 ${serviceStatus.averageDuration} ms · ${serviceStatus.memoryMb} MiB${serviceStatus.logPersistenceError ? ' · 日志异常' : ''}${statusStale ? ' · 状态未更新' : ''}${logsStale ? ' · 日志未更新' : ''}`;
+    const averageUpstreamBody = serviceStatus.upstreamBodyTimingCoverageRate > 0 ? formatDuration(serviceStatus.averageUpstreamBody) : '—';
+    const upstreamTiming = serviceStatus.upstreamTimingCoverageRate > 0
+      ? ` · 上游等待 ${formatDuration(serviceStatus.averageUpstreamWait)} · 响应体 ${averageUpstreamBody}`
+      : '';
+    $('#request-summary').textContent = `${successSummary} · 活跃 ${serviceStatus.activeRequests} · 平均 ${formatDuration(serviceStatus.averageDuration)}${upstreamTiming} · ${serviceStatus.memoryMb} MiB${serviceStatus.logPersistenceError ? ' · 日志异常' : ''}${statusStale ? ' · 状态未更新' : ''}${logsStale ? ' · 日志未更新' : ''}`;
     $('#request-summary').title = serviceStatus.logPersistenceError || '';
   } else {
     $('#request-summary').textContent = `运行状态暂不可用${logsStale ? ' · 日志未更新' : ''}`;
@@ -263,7 +267,12 @@ function renderLogs() {
       ? `<small class="log-upstream-id">上游 ${requestIdButton(item.upstreamRequestId, '上游请求 ID')}</small>`
       : '';
     const retryAfter = item.retryAfter ? `<small class="log-retry-after">等待 ${escapeHtml(item.retryAfter)}</small>` : '';
-    return `<tr><td>${new Date(item.time).toLocaleString()}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.protocol)}</td><td class="${statusClass}">${item.status}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${formatDuration(item.duration)}</td></tr>`;
+    const phases = [
+      Object.hasOwn(item, 'upstreamWaitMs') ? `等待 ${formatDuration(item.upstreamWaitMs)}` : '',
+      Object.hasOwn(item, 'upstreamBodyMs') ? `响应体 ${formatDuration(item.upstreamBodyMs)}` : ''
+    ].filter(Boolean).join(' · ');
+    const timing = `${formatDuration(item.duration)}${phases ? `<small class="log-timing">${phases}</small>` : ''}`;
+    return `<tr><td>${new Date(item.time).toLocaleString()}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.protocol)}</td><td class="${statusClass}">${item.status}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
   }).join('');
 }
 
@@ -345,6 +354,12 @@ function renderStats(stats) {
   $('#stats-success-detail').textContent = `${formatNumber(summary.success)} 成功 · ${formatNumber(summary.errors)} 失败 · ${formatNumber(summary.failoverRequests)} 次自动切换`;
   $('#stats-avg-duration').textContent = formatDuration(summary.averageDurationMs);
   $('#stats-p95-duration').textContent = formatDuration(summary.p95DurationMs);
+  $('#stats-avg-phases').textContent = summary.upstreamWaitRequests
+    ? `等待 ${formatDuration(summary.averageUpstreamWaitMs)} · 响应体 ${summary.upstreamBodyRequests ? formatDuration(summary.averageUpstreamBodyMs) : '—'} · 覆盖 ${formatPercentage(summary.upstreamWaitCoverageRate)}/${formatPercentage(summary.upstreamBodyCoverageRate)}`
+    : '暂无阶段耗时';
+  $('#stats-p95-phases').textContent = summary.upstreamWaitRequests
+    ? `等待 ${formatDuration(summary.p95UpstreamWaitMs)} · 响应体 ${summary.upstreamBodyRequests ? formatDuration(summary.p95UpstreamBodyMs) : '—'}`
+    : '暂无阶段耗时';
   $('#stats-total-tokens').textContent = formatNumber(summary.totalTokens);
   $('#stats-input-tokens').textContent = formatNumber(summary.inputTokens);
   $('#stats-output-tokens').textContent = formatNumber(summary.outputTokens);

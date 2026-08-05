@@ -143,6 +143,9 @@ try {
   if (stats.summary?.requests !== expectedRequests || stats.summary?.usageRequests !== expectedRequests || goStats?.requests !== expectedRequests) {
     throw new Error(`管理面板统计未覆盖 ${expectedRequests} 次在线协议请求`);
   }
+  if (stats.summary.upstreamWaitRequests !== expectedRequests || stats.summary.upstreamBodyRequests !== expectedRequests) {
+    throw new Error(`管理面板阶段耗时未覆盖 ${expectedRequests} 次在线协议请求`);
+  }
   if (stats.summary.inputTokens !== stats.summary.uncachedInputTokens + stats.summary.cachedInputTokens) throw new Error('缓存统计的输入 Token 口径不守恒');
   completedChecks.push('stats');
 
@@ -160,7 +163,12 @@ try {
         claudeToolResult: { stopReason: claudeToolResult.stop_reason, semanticMarker: true },
         chatStream: { contentType: streamResponse.headers.get('content-type'), semanticMarker: true, done: parsedStream.done, usage: parsedStream.usage }
       } : {}),
-      stats: { requests: stats.summary.requests, usageCoverageRate: stats.summary.usageCoverageRate, totalTokens: stats.summary.totalTokens, cachedInputTokens: stats.summary.cachedInputTokens, cacheReadRate: stats.summary.cacheReadRate }
+      stats: {
+        requests: stats.summary.requests, usageCoverageRate: stats.summary.usageCoverageRate,
+        totalTokens: stats.summary.totalTokens, cachedInputTokens: stats.summary.cachedInputTokens, cacheReadRate: stats.summary.cacheReadRate,
+        averageUpstreamWaitMs: stats.summary.averageUpstreamWaitMs, p95UpstreamWaitMs: stats.summary.p95UpstreamWaitMs,
+        averageUpstreamBodyMs: stats.summary.averageUpstreamBodyMs, p95UpstreamBodyMs: stats.summary.p95UpstreamBodyMs
+      }
     }
   }, null, 2));
 } catch (error) {

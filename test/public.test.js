@@ -23,6 +23,10 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /function filteredLogs\(\)/);
   assert.match(script, /navigator\.clipboard\.writeText\(button\.dataset\.copyValue\)/);
   assert.match(script, /requestLogsToCsv\(items\)/);
+  assert.match(html, /id="stats-avg-phases"/);
+  assert.match(html, /id="stats-p95-phases"/);
+  assert.match(script, /upstreamWaitMs/);
+  assert.match(script, /upstreamBodyMs/);
   assert.match(html, /id="data-source-warning"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
   assert.match(script, /loadDataSource\('请求日志'/);
   assert.match(script, /loadDataSource\('运行状态'/);

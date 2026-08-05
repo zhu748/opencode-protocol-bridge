@@ -34,7 +34,7 @@ test('日志时间筛选不会把未来时间记录混入当前窗口', () => {
 test('CSV 导出限定元数据字段并防止公式注入', () => {
   const csv = requestLogsToCsv([{
     time: '2026-08-04T12:00:00Z', requestId: '=HYPERLINK("bad")', upstreamRequestId: '+cmd',
-    clientName: '@evil', model: '-1+1', provider: 'go', status: 429, errorCode: 'upstream_connect_timeout', error: '含有,逗号和"引号"',
+    clientName: '@evil', model: '-1+1', provider: 'go', status: 429, duration: 900, upstreamWaitMs: 850, upstreamBodyMs: 25, errorCode: 'upstream_connect_timeout', error: '含有,逗号和"引号"',
     apiKey: 'must-not-export', prompt: 'must-not-export-either'
   }]);
   assert.match(csv, /"'=HYPERLINK\(""bad""\)"/);
@@ -42,6 +42,9 @@ test('CSV 导出限定元数据字段并防止公式注入', () => {
   assert.match(csv, /"'@evil"/);
   assert.match(csv, /"'-1\+1"/);
   assert.match(csv, /upstream_connect_timeout/);
+  assert.match(csv, /"上游等待 ms"/);
+  assert.match(csv, /"850"/);
+  assert.match(csv, /"响应体阶段 ms"/);
   assert.match(csv, /"含有,逗号和""引号"""/);
   assert.doesNotMatch(csv, /must-not-export/);
   assert.equal(csv.split('\r\n').length, 2);

@@ -157,15 +157,25 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(logs[0].credentialId, 'config:legacy-zen');
     assert.equal(logs[0].credentialLabel, '默认 Key');
     assert.equal(logs[0].inputTokens, 7);
+    assert.ok(Number.isFinite(logs[0].upstreamWaitMs) && logs[0].upstreamWaitMs >= 0);
+    assert.ok(Number.isFinite(logs[0].upstreamBodyMs) && logs[0].upstreamBodyMs >= 0);
     const stats = await fetch(`http://127.0.0.1:${bridgePort}/api/stats`, { headers: { cookie } }).then((result) => result.json());
     assert.equal(stats.summary.requests, 1);
     assert.equal(stats.summary.totalTokens, 10);
     assert.equal(stats.summary.inputTokens, 7);
     assert.equal(stats.summary.outputTokens, 3);
     assert.equal(stats.summary.usageRequests, 1);
+    assert.equal(stats.summary.upstreamWaitRequests, 1);
+    assert.equal(stats.summary.upstreamBodyRequests, 1);
+    assert.equal(stats.summary.upstreamWaitCoverageRate, 100);
     assert.equal(stats.byProvider[0].name, 'zen');
     assert.equal(stats.byClient[0].name, '测试客户端');
     assert.equal(stats.byCredential[0].name, 'ZEN · 默认 Key');
+    const runtimeStatus = await fetch(`http://127.0.0.1:${bridgePort}/api/status`, { headers: { cookie } }).then((result) => result.json());
+    assert.equal(runtimeStatus.upstreamTimingCoverageRate, 100);
+    assert.equal(runtimeStatus.upstreamBodyTimingCoverageRate, 100);
+    assert.ok(runtimeStatus.averageUpstreamWait >= 0);
+    assert.ok(runtimeStatus.averageUpstreamBody >= 0);
     const noUsage = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
       body: JSON.stringify({ model: 'missing-usage', input: '不返回 usage' })
@@ -209,6 +219,8 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(timeoutBody.error.code, 'upstream_response_timeout');
     const timeoutLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
     assert.equal(timeoutLog.errorCode, 'upstream_response_timeout');
+    assert.ok(timeoutLog.upstreamWaitMs >= 900);
+    assert.equal(Object.hasOwn(timeoutLog, 'upstreamBodyMs'), false);
 
     const sameClaude = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
       method: 'POST',

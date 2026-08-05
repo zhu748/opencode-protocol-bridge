@@ -418,7 +418,8 @@
 
 .log-error,
 .log-upstream-id,
-.log-retry-after {
+.log-retry-after,
+.log-timing {
   display: block;
   overflow: hidden;
   max-width: 180px;
@@ -437,6 +438,12 @@
 
 .log-retry-after {
   color: var(--orange);
+}
+
+.log-timing {
+  max-width: 240px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .log-toolbar {

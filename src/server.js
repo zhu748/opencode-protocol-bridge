@@ -654,6 +654,10 @@ async function adminApi(req, res, url, config) {
       activeRequests: activeProxyRequests,
       successRate: summary.successRate,
       averageDuration: summary.averageDurationMs,
+      averageUpstreamWait: summary.averageUpstreamWaitMs,
+      averageUpstreamBody: summary.averageUpstreamBodyMs,
+      upstreamTimingCoverageRate: summary.upstreamWaitCoverageRate,
+      upstreamBodyTimingCoverageRate: summary.upstreamBodyCoverageRate,
       memoryMb: Math.round(memory.rss / 1024 / 1024),
       logPersistenceError: requestLogs.lastError || null
     });
@@ -796,21 +800,27 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
   }
   const protocolLabel = `${incomingProtocol} → ${route.protocol}${route.toolChoiceFallback ? ` (${route.toolChoiceFallback} tool choice)` : ''}`;
   let upstreamMetadata = {};
+  let credentialAttempts = 0;
+  let upstreamWaitMs = 0;
+  let upstreamBodyStartedAt = 0;
   const writeLog = (entry) => addLog({
     requestId, clientId: client?.id, clientName: client?.name,
     model: body.model, upstreamModel: route.upstreamModel, provider: route.provider, credentialId: credential.credentialId, credentialLabel: credential.credentialLabel, protocol: protocolLabel,
-    credentialAttempts, duration: Date.now() - started, ...upstreamMetadata, ...entry
+    credentialAttempts, duration: Date.now() - started, ...upstreamMetadata, ...entry,
+    ...(credentialAttempts ? { upstreamWaitMs } : {}),
+    ...(upstreamBodyStartedAt ? { upstreamBodyMs: Math.max(0, Date.now() - upstreamBodyStartedAt) } : {})
   }, config);
   const abort = new AbortController();
   res.on('close', () => { if (!res.writableEnded) abort.abort(); });
   let upstream;
-  let credentialAttempts = 0;
   const maximumCredentialAttempts = providerCredentials(config, route.provider).length;
   while (credential && credentialAttempts < maximumCredentialAttempts) {
     credentialAttempts++;
+    const upstreamAttemptStartedAt = Date.now();
     try {
       upstream = await callUpstream({ provider: route.provider, protocol: route.protocol, ...credential, body: upstreamBody, signal: abort.signal, timeoutMs: config.upstreamTimeoutMs, forwardHeaders: compatibilityHeaders(req, incomingProtocol, route.protocol) });
     } catch (error) {
+      upstreamWaitMs += Math.max(0, Date.now() - upstreamAttemptStartedAt);
       if (abort.signal.aborted) {
         credentialHealth.releaseProbe(route.provider, credential);
         await writeLog({ status: 499, error: '客户端在收到上游响应前断开' });
@@ -822,6 +832,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
       if (credentialAttempts > 1) res.setHeader('x-opencode-key-attempts', String(credentialAttempts));
       return protocolError(res, failure.status, incomingProtocol, failure.message, 'upstream_error', {}, failure.code);
     }
+    upstreamWaitMs += Math.max(0, Date.now() - upstreamAttemptStartedAt);
     if (!body.stream || !upstream.ok) recordCredentialResponse(route.provider, credential, upstream);
     if (![401, 403, 429].includes(upstream.status) || credentialAttempts >= maximumCredentialAttempts) break;
     const replacement = selectProviderCredential(config, route.provider).credential;
@@ -830,6 +841,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider) {
     credential = replacement;
   }
   if (credentialAttempts > 1) res.setHeader('x-opencode-key-attempts', String(credentialAttempts));
+  upstreamBodyStartedAt = Date.now();
   upstreamMetadata = applyUpstreamResponseHeaders(res, upstream);
   if (!upstream.ok) {
     let text;

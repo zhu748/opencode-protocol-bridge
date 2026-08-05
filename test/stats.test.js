@@ -4,9 +4,9 @@ import { aggregateRequestStats } from '../src/stats.js';
 
 const now = Date.parse('2026-08-04T12:00:00.000Z');
 const logs = [
-  { time: '2026-08-04T11:00:00.000Z', status: 200, duration: 100, provider: 'zen', credentialId: 'environment:2', model: 'deepseek-free', upstreamModel: 'deepseek-v4-flash-free', protocol: 'claude → chat', clientName: '工作机', inputTokens: 10, outputTokens: 4, cachedInputTokens: 3, reasoningTokens: 2 },
-  { time: '2026-08-04T10:00:00.000Z', status: 502, duration: 900, provider: 'go', model: 'deepseek', protocol: 'responses → chat', clientName: '', stream: true },
-  { time: '2026-08-01T10:00:00.000Z', status: 200, duration: 200, provider: 'zen', model: 'deepseek-free', protocol: 'chat → chat', clientName: '工作机', inputTokens: 5, outputTokens: 1, cacheCreationInputTokens: 2 }
+  { time: '2026-08-04T11:00:00.000Z', status: 200, duration: 100, upstreamWaitMs: 70, upstreamBodyMs: 20, provider: 'zen', credentialId: 'environment:2', model: 'deepseek-free', upstreamModel: 'deepseek-v4-flash-free', protocol: 'claude → chat', clientName: '工作机', inputTokens: 10, outputTokens: 4, cachedInputTokens: 3, reasoningTokens: 2 },
+  { time: '2026-08-04T10:00:00.000Z', status: 502, duration: 900, upstreamWaitMs: 800, provider: 'go', model: 'deepseek', protocol: 'responses → chat', clientName: '', stream: true },
+  { time: '2026-08-01T10:00:00.000Z', status: 200, duration: 200, upstreamWaitMs: 150, upstreamBodyMs: 40, provider: 'zen', model: 'deepseek-free', protocol: 'chat → chat', clientName: '工作机', inputTokens: 5, outputTokens: 1, cacheCreationInputTokens: 2 }
 ];
 
 test('统计汇总不会重复计算缓存和推理 token', () => {
@@ -15,6 +15,8 @@ test('统计汇总不会重复计算缓存和推理 token', () => {
   assert.deepEqual(result.summary, {
     requests: 3, success: 2, errors: 1, successRate: 66.7,
     averageDurationMs: 400, p95DurationMs: 900, streamRequests: 1,
+    upstreamWaitRequests: 3, upstreamWaitCoverageRate: 100, averageUpstreamWaitMs: 340, p95UpstreamWaitMs: 800,
+    upstreamBodyRequests: 2, upstreamBodyCoverageRate: 66.7, averageUpstreamBodyMs: 30, p95UpstreamBodyMs: 40,
     usageRequests: 2, missingUsageRequests: 1,
     usageCoverageRate: 66.7, cacheHitRequests: 1, cacheWriteRequests: 1, cacheHitRequestRate: 50,
     credentialAttempts: 3, failoverRequests: 0, failoverAttempts: 0,

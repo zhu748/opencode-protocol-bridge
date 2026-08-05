@@ -58,6 +58,8 @@ function credentialName(item) {
 function summarize(items) {
   const success = items.filter((item) => item.status >= 200 && item.status < 400).length;
   const durations = items.map((item) => count(item.duration)).sort((left, right) => left - right);
+  const upstreamWait = timingSummary(items, 'upstreamWaitMs');
+  const upstreamBody = timingSummary(items, 'upstreamBodyMs');
   const tokens = items.reduce((total, item) => {
     const usage = tokenUsage(item);
     return {
@@ -81,6 +83,14 @@ function summarize(items) {
     successRate: items.length ? round(success / items.length * 100, 1) : null,
     averageDurationMs: durations.length ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length) : 0,
     p95DurationMs: durations.length ? durations[Math.max(0, Math.ceil(durations.length * 0.95) - 1)] : 0,
+    upstreamWaitRequests: upstreamWait.requests,
+    upstreamWaitCoverageRate: items.length ? round(upstreamWait.requests / items.length * 100, 1) : null,
+    averageUpstreamWaitMs: upstreamWait.average,
+    p95UpstreamWaitMs: upstreamWait.p95,
+    upstreamBodyRequests: upstreamBody.requests,
+    upstreamBodyCoverageRate: items.length ? round(upstreamBody.requests / items.length * 100, 1) : null,
+    averageUpstreamBodyMs: upstreamBody.average,
+    p95UpstreamBodyMs: upstreamBody.p95,
     streamRequests: items.filter((item) => item.stream).length,
     usageRequests,
     missingUsageRequests: items.length - usageRequests,
@@ -95,6 +105,16 @@ function summarize(items) {
     cacheReadRate: tokens.inputTokens ? round(tokens.cachedInputTokens / tokens.inputTokens * 100, 1) : 0,
     totalTokens: tokens.inputTokens + tokens.outputTokens,
     averageTokensPerUsageRequest: usageRequests ? Math.round((tokens.inputTokens + tokens.outputTokens) / usageRequests) : 0
+  };
+}
+
+function timingSummary(items, field) {
+  const values = items.filter((item) => Object.hasOwn(item, field)).map((item) => Number(item[field]))
+    .filter((value) => Number.isFinite(value) && value >= 0).sort((left, right) => left - right);
+  return {
+    requests: values.length,
+    average: values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0,
+    p95: values.length ? Math.round(values[Math.max(0, Math.ceil(values.length * 0.95) - 1)]) : 0
   };
 }
 

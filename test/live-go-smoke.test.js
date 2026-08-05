@@ -53,6 +53,8 @@ test('Go quick 冒烟先验证模型，再完成 Responses 与统计闭环', { t
     assert.equal(result.checks.models, true);
     assert.equal(result.checks.responses.semanticMarker, true);
     assert.equal(result.checks.stats.requests, 1);
+    assert.ok(result.checks.stats.averageUpstreamWaitMs >= 0);
+    assert.ok(result.checks.stats.averageUpstreamBodyMs >= 0);
     assert.deepEqual(requests.map((item) => item.path), ['/models', '/chat/completions']);
     assert.ok(requests.every((item) => item.authorization === 'Bearer unit-test-go-key'));
     assert.equal(requests[1].body.model, 'deepseek-v4-flash');
