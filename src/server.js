@@ -3,7 +3,6 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
-import { pipeline } from 'node:stream/promises';
 import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from './auth.js';
 import { loadConfig, saveConfig, updateConfig, publicConfig, configRevision, normalizeImageHandoffModels, normalizeModelRoutes, ROOT } from './config.js';
 import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, hasUsageData } from './adapters.js';
@@ -17,7 +16,7 @@ import { aggregateRequestStats } from './stats.js';
 import { applyPromptRules, MAX_PROMPT_BYTES, normalizePromptRules, promptSnapshotText, rewriteClaudeSystem } from './prompt-rewrite.js';
 import { ImageHandoffStore, imageHandoffStorageOptions, localImageHandoffEnabled } from './image-handoff.js';
 import { canonicalStaticRoot, ifNoneMatchMatches, resolveStaticFile } from './static-files.js';
-import { writeResponseChunk } from './response-write.js';
+import { writeResponseChunk, writeResponseStream } from './response-write.js';
 import { parseRequestTarget } from './request-target.js';
 
 const HOST = process.env.HOST || '127.0.0.1';
@@ -889,6 +888,7 @@ async function adminApiOperation(req, res, url, config) {
       ready: serviceReady(config),
       activeRequests: activePublicRequests,
       activeHttpConnections,
+      activeHttpRequests,
       maxHttpConnections: MAX_HTTP_CONNECTIONS,
       streamWriteTimeoutMs: STREAM_WRITE_TIMEOUT_MS,
       activeAdminMutations,
@@ -1308,7 +1308,7 @@ async function staticFile(req, res, url) {
   res.writeHead(200, { ...headers, 'content-length': entry.size });
   if (req.method === 'HEAD') return res.end();
   try {
-    await pipeline(createReadStream(entry.filePath), res);
+    await writeResponseStream(res, createReadStream(entry.filePath), STREAM_WRITE_TIMEOUT_MS);
   } catch (error) {
     if (!req.destroyed && !res.destroyed && error.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw error;
   }
@@ -1373,7 +1373,7 @@ const server = createServer({
           'cache-control': 'no-store'
         });
         if (req.method === 'HEAD') return res.end();
-        try { await pipeline(createReadStream(image.filePath), res); }
+        try { await writeResponseStream(res, createReadStream(image.filePath), STREAM_WRITE_TIMEOUT_MS); }
         catch (error) {
           if (!req.destroyed && !res.destroyed && error.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw error;
         }

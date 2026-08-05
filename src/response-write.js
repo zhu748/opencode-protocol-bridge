@@ -19,7 +19,7 @@ export async function writeResponseChunk(res, chunk, timeoutMs = 30_000) {
     };
     const onTimeout = () => {
       cleanup();
-      const error = clientWriteError('客户端读取流式响应超时', 'CLIENT_WRITE_TIMEOUT');
+      const error = clientWriteError('客户端读取响应超时', 'CLIENT_WRITE_TIMEOUT');
       if (!res.destroyed) res.destroy();
       rejectWrite(error);
     };
@@ -29,6 +29,17 @@ export async function writeResponseChunk(res, chunk, timeoutMs = 30_000) {
     timeout = setTimeout(onTimeout, timeoutMs);
     if (res.destroyed || res.writableEnded) onClose();
   });
+}
+
+export async function writeResponseStream(res, readable, timeoutMs = 30_000) {
+  if (!readable || typeof readable[Symbol.asyncIterator] !== 'function') throw new TypeError('响应来源必须是可异步迭代的可读流');
+  try {
+    for await (const chunk of readable) await writeResponseChunk(res, chunk, timeoutMs);
+    if (!res.destroyed && !res.writableEnded) res.end();
+  } catch (error) {
+    readable.destroy?.();
+    throw error;
+  }
 }
 
 function clientWriteError(message, code, cause) {

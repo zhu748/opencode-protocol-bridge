@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { writeResponseChunk } from '../src/response-write.js';
+import { Readable } from 'node:stream';
+import { writeResponseChunk, writeResponseStream } from '../src/response-write.js';
 
 class FakeResponse extends EventEmitter {
   constructor(writeResult = false) {
@@ -21,6 +22,11 @@ class FakeResponse extends EventEmitter {
     if (this.destroyed) return;
     this.destroyed = true;
     this.emit('close');
+  }
+
+  end() {
+    this.writableEnded = true;
+    this.emit('finish');
   }
 }
 
@@ -46,13 +52,33 @@ test('慢客户端超过写入超时后被断开且不会遗留监听器', async
   const response = new FakeResponse(false);
   await assert.rejects(writeResponseChunk(response, 'data', 20), (error) => {
     assert.equal(error.code, 'CLIENT_WRITE_TIMEOUT');
-    assert.match(error.message, /读取流式响应超时/);
+    assert.match(error.message, /读取响应超时/);
     return true;
   });
   assert.equal(response.destroyed, true);
   assert.equal(response.listenerCount('drain'), 0);
   assert.equal(response.listenerCount('close'), 0);
   assert.equal(response.listenerCount('error'), 0);
+});
+
+test('可读流按背压顺序写入并正常结束响应', async () => {
+  const response = new FakeResponse(true);
+  await writeResponseStream(response, Readable.from([Buffer.from('one'), Buffer.from('two')]), 20);
+  assert.equal(Buffer.concat(response.chunks).toString('utf8'), 'onetwo');
+  assert.equal(response.writableEnded, true);
+});
+
+test('文件式响应超时会同时销毁响应和来源流', async () => {
+  const response = new FakeResponse(false);
+  const source = Readable.from([Buffer.alloc(1024), Buffer.alloc(1024)]);
+  await assert.rejects(writeResponseStream(response, source, 20), (error) => error.code === 'CLIENT_WRITE_TIMEOUT');
+  assert.equal(response.destroyed, true);
+  assert.equal(source.destroyed, true);
+});
+
+test('文件式响应拒绝不可迭代来源', async () => {
+  const response = new FakeResponse(true);
+  await assert.rejects(writeResponseStream(response, {}, 20), /可异步迭代/);
 });
 
 test('客户端在等待 drain 时关闭会返回中性关闭错误', async () => {

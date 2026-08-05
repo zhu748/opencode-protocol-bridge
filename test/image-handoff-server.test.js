@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer as createHttpServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { createConnection } from 'node:net';
 import { rm, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -19,7 +20,7 @@ async function waitForHealth(port, child) {
   throw new Error('等待测试服务启动超时');
 }
 
-test('远程桥接会提供短时图片 URL 并把下载指令发送给 DeepSeek', { timeout: 10_000 }, async () => {
+test('远程桥接会提供短时图片 URL 并限制慢速附件下载', { timeout: 20_000 }, async () => {
   const upstreamBodies = [];
   const upstream = createHttpServer(async (req, res) => {
     const chunks = [];
@@ -49,7 +50,8 @@ test('远程桥接会提供短时图片 URL 并把下载指令发送给 DeepSeek
     OPENCODE_GO_KEY: 'go-test-key',
     OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`,
     OPENCODE_BRIDGE_IMAGE_HANDOFF_DIR: imageDirectory,
-    OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL: `http://127.0.0.1:${port}`
+    OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL: `http://127.0.0.1:${port}`,
+    OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS: '250'
   });
   const child = spawn(process.execPath, ['src/server.js'], { cwd: resolve(import.meta.dirname, '..'), env, stdio: 'ignore' });
   try {
@@ -87,6 +89,45 @@ test('远程桥接会提供短时图片 URL 并把下载指令发送给 DeepSeek
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
     });
     const cookie = login.headers.get('set-cookie').split(';')[0];
+
+    const largeResponse = await fetch(`http://127.0.0.1:${port}/go/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'Api123' },
+      body: JSON.stringify({
+        model: 'deepseek-v4-flash', max_tokens: 32,
+        messages: [{ role: 'user', content: [{
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: Buffer.alloc(7 * 1024 * 1024, 0x61).toString('base64') }
+        }] }]
+      })
+    });
+    assert.equal(largeResponse.status, 200);
+    await largeResponse.json();
+    const largeImageUrl = JSON.stringify(upstreamBodies.at(-1)).match(/http:\/\/127\.0\.0\.1:\d+\/_bridge\/images\/[a-f0-9]{64}/)?.[0];
+    assert.ok(largeImageUrl);
+    const largeImagePath = new URL(largeImageUrl).pathname;
+    const slowSocket = createConnection({ host: '127.0.0.1', port });
+    try {
+      await once(slowSocket, 'connect');
+      slowSocket.pause();
+      slowSocket.write(`GET ${largeImagePath} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`);
+      const status = () => fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((result) => result.json());
+      let stalledObserved = false;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        if ((await status()).activeHttpRequests >= 2) { stalledObserved = true; break; }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+      }
+      assert.equal(stalledObserved, true);
+      let released = false;
+      for (let attempt = 0; attempt < 80; attempt++) {
+        if ((await status()).activeHttpRequests <= 1) { released = true; break; }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      assert.equal(released, true);
+    } finally {
+      slowSocket.destroy();
+    }
+
     const configured = await fetch(`http://127.0.0.1:${port}/api/config`, {
       method: 'PUT', headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({ defaultProvider: 'go', modelRoutes: {}, imageHandoffModels: [] })

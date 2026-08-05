@@ -148,6 +148,7 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.match(duplicatedApiKey, /x-api-key[^\r\n]*不能重复/);
     const connectionStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
     assert.ok(connectionStatus.activeHttpConnections >= 1);
+    assert.ok(connectionStatus.activeHttpRequests >= 1);
     assert.equal(connectionStatus.maxHttpConnections, 256);
     assert.equal(connectionStatus.streamWriteTimeoutMs, 30_000);
     const wrongStatusMethod = await fetch(`http://127.0.0.1:${port}/api/status`, { method: 'POST', headers: { cookie } });

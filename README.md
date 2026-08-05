@@ -30,7 +30,7 @@
 - 管理端变更请求具有独立并发上限；设置、Key 池、命名客户端、主令牌和密码等持久化变更均使用配置修订号防止多页面覆盖
 - 管理面板的上游模型发现具有独立并发上限并在运行状态中可观测，避免多标签页同时刷新占满连接
 - HTTP 层限制总连接数、请求头体积/数量和单连接复用次数，并以 1 秒粒度检查慢头部与慢请求；已建立的 SSE 长响应不设置总时长上限
-- 流式响应遵守下游背压；客户端持续停止读取时会在可配置超时后断开并释放上游连接和并发槽，不会惩罚对应 Key
+- 流式推理、远程图片附件和静态文件响应均遵守下游背压；客户端持续停止读取时会在可配置超时后断开并释放上游连接、文件读取租约和并发槽，不会惩罚对应 Key
 - 仅记录请求元数据的日志
 - 可选的有界请求日志持久化
 
@@ -100,7 +100,7 @@ npm start
 | `OPENCODE_BRIDGE_MAX_ADMIN_MUTATIONS` | `16` | 同时执行的管理端 POST/PUT/PATCH/DELETE 上限，范围 1–128；超限返回 429，避免模型测试或密码哈希占满进程 |
 | `OPENCODE_BRIDGE_MAX_ADMIN_MODEL_DISCOVERIES` | `4` | 管理面板同时拉取上游模型列表的请求上限，范围 1–32；超限返回 429，客户端取消后立即释放名额 |
 | `OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS` | `256` | Node HTTP 服务同时接受的连接数上限，范围 1–10000；包含空闲 Keep-Alive、慢请求和 SSE 连接 |
-| `OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS` | `30000` | 流式响应遇到下游背压后等待 `drain` 的最长时间，范围 100–300000 毫秒；超时按客户端断开处理并释放上游连接 |
+| `OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS` | `30000` | 流式推理、图片附件或静态文件遇到下游背压后等待 `drain` 的最长时间，范围 100–300000 毫秒；超时按客户端断开处理并释放上游连接或文件读取流 |
 | `OPENCODE_ZEN_KEY` / `OPENCODE_GO_KEY` | 空 | 单 Key 兼容变量 |
 | `OPENCODE_ZEN_KEY_1...32` / `OPENCODE_GO_KEY_1...32` | 空 | 多 Key 编号变量；按编号轮询使用 |
 | `OPENCODE_ZEN_KEYS` / `OPENCODE_GO_KEYS` | 空 | 多 Key 合并变量，支持 JSON 数组、逗号或换行分隔；优先于编号变量 |
