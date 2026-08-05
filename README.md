@@ -45,6 +45,30 @@ npm start
 
 浏览器打开 `http://127.0.0.1:8787`，首次访问会要求设置管理密码。初始化成功后，请立即保存自动生成的客户端访问令牌，再到“连接设置”的 Key 池添加一把或多把 Zen / Go 密钥；每把 Key 可以命名并设置独立代理。
 
+Windows 本地也可以使用一键启动脚本，不需要编译：
+
+```powershell
+.\start-local.ps1
+```
+
+或直接双击 `start-local.cmd`。脚本会自动加载 `.env.local`；如果 `.env.local` 不存在，会先从 `.env.example` 复制生成一份再加载。缺少 `node_modules` 时会先执行一次 `npm install`，然后启动管理面板。
+
+推荐把本机环境变量写到 `.env.local`：
+
+```powershell
+notepad .env.local
+.\start-local.ps1
+```
+
+`.env.local` 已被 `.gitignore` 排除，不会提交到仓库。也可以只在当前 PowerShell 会话临时设置变量：
+
+```powershell
+$env:OPENCODE_BRIDGE_ADMIN_PASSWORD = "abc123"
+$env:OPENCODE_BRIDGE_CLIENT_TOKEN = "client123"
+$env:OPENCODE_GO_KEYS = '["your-go-key-1","your-go-key-2"]'
+npm start
+```
+
 可用环境变量：
 
 | 变量 | 默认值 | 说明 |
