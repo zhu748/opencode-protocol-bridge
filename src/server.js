@@ -581,9 +581,12 @@ async function adminApiOperation(req, res, url, config) {
     if (config.password || setupInProgress) return json(res, 409, { error: '管理密码已经初始化或正在初始化' });
     const body = await bodyJson(req);
     if (!validAlphaNumericSecret(body.password)) return json(res, 400, { error: '密码必须是 6–256 位英文字母或数字' });
+    if (setupInProgress) return json(res, 409, { error: '管理密码已经初始化或正在初始化' });
     setupInProgress = true;
     try {
-      const updated = { ...config, password: await hashPassword(body.password), sessionSecret: randomBytes(32).toString('hex'), clientToken: randomClientToken() };
+      const latest = await loadConfig();
+      if (latest.password) return json(res, 409, { error: '管理密码已经初始化或正在初始化' });
+      const updated = { ...latest, password: await hashPassword(body.password), sessionSecret: randomBytes(32).toString('hex'), clientToken: randomClientToken() };
       await saveConfig(updated);
       const token = createSession(updated.sessionSecret);
       return json(res, 200, { ok: true, clientToken: updated.clientToken }, { 'set-cookie': sessionCookie(req, token) });

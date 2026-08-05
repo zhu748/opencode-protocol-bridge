@@ -375,6 +375,77 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
   }
 });
 
+test('并发首次初始化只有一个请求可以写入配置', { timeout: 10_000 }, async () => {
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/setup-race-${randomUUID()}.json`);
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'),
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1',
+      PORT: String(port),
+      CONFIG_FILE: configFile,
+      CONFIG_ENCRYPTION_KEY: 'setup-race-integration-key',
+      OPENCODE_BRIDGE_ADMIN_PASSWORD: '',
+      OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP: ''
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => {
+        child.stdout.on('data', (chunk) => {
+          if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+        });
+      }),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+
+    const openSetupRequest = async (password) => {
+      const socket = createConnection({ host: '127.0.0.1', port });
+      socket.setTimeout(3000, () => socket.destroy(new Error('并发初始化等待响应超时')));
+      await once(socket, 'connect');
+      const body = JSON.stringify({ password });
+      socket.write(
+        `POST /api/setup HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n`
+      );
+      return { socket, body, password };
+    };
+    const attempts = await Promise.all([openSetupRequest('racepass001'), openSetupRequest('racepass002')]);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    const responses = attempts.map(({ socket, password }) => new Promise((resolveResponse, rejectResponse) => {
+      const chunks = [];
+      socket.on('data', (chunk) => chunks.push(chunk));
+      socket.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        const status = Number(/^HTTP\/1\.1 (\d+)/.exec(raw)?.[1]);
+        resolveResponse({ status, password });
+      });
+      socket.on('error', rejectResponse);
+    }));
+    for (const attempt of attempts) attempt.socket.write(attempt.body);
+
+    const settled = await Promise.all(responses);
+    assert.deepEqual(settled.map(({ status }) => status).sort((left, right) => left - right), [200, 409]);
+    const winner = settled.find(({ status }) => status === 200);
+    const loser = settled.find(({ status }) => status === 409);
+    const login = (password) => fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+    assert.equal((await login(winner.password)).status, 200);
+    assert.equal((await login(loser.password)).status, 401);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
+    await unlink(configFile).catch(() => {});
+    await unlink(`${configFile}.tmp`).catch(() => {});
+  }
+});
+
 test('HTTP 总连接上限会拒绝额外连接并在连接关闭后恢复', { timeout: 10_000 }, async () => {
   const port = 20_000 + Math.floor(Math.random() * 10_000);
   const configFile = resolve(import.meta.dirname, `../data/http-connections-${randomUUID()}.json`);
