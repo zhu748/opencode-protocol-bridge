@@ -1845,7 +1845,15 @@ test('推理 5xx 不会重放，但模型发现会安全切换 Key', { timeout: 
       return res.end(JSON.stringify({ object: 'list', data: [{ id: 'gpt-test', object: 'model' }] }));
     }
     res.writeHead(500, { 'content-type': 'application/json' });
-    return res.end(JSON.stringify({ error: { message: 'temporary upstream failure' } }));
+    return res.end(JSON.stringify({
+      error: {
+        message: 'temporary upstream failure for first-key',
+        type: 'server_error',
+        code: 'upstream_busy'
+      },
+      debug: { authorization: req.headers.authorization },
+      privateMarker: 'UPSTREAM_PRIVATE_MARKER'
+    }));
   });
   upstream.listen(0, '127.0.0.1');
   await once(upstream, 'listening');
@@ -1880,6 +1888,13 @@ test('推理 5xx 不会重放，但模型发现会安全切换 Key', { timeout: 
     });
     assert.equal(response.status, 500);
     assert.equal(response.headers.get('x-opencode-key-attempts'), null);
+    assert.deepEqual(await response.json(), {
+      error: {
+        message: 'temporary upstream failure for [REDACTED]',
+        type: 'server_error',
+        code: 'upstream_busy'
+      }
+    });
     assert.deepEqual(authorizations, ['Bearer first-key']);
 
     const models = await fetch(`http://127.0.0.1:${port}/go/v1/models`, {
@@ -1897,6 +1912,105 @@ test('推理 5xx 不会重放，但模型发现会安全切换 Key', { timeout: 
     assert.equal(combined.headers.get('x-opencode-key-attempts'), '2');
     assert.deepEqual((await combined.json()).data.map((item) => item.id), ['opencode-go/gpt-test']);
     assert.deepEqual(authorizations, ['Bearer first-key', 'Bearer second-key', 'Bearer first-key', 'Bearer second-key', 'Bearer first-key']);
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('三种推理协议会规范化上游 HTTP 错误并安全记录日志', { timeout: 10_000 }, async () => {
+  const upstream = createHttpServer((req, res) => {
+    res.writeHead(503, { 'content-type': 'application/json' });
+    if (req.url.endsWith('/chat/completions')) {
+      return res.end('{broken UPSTREAM_PRIVATE_MARKER first-key');
+    }
+    return res.end(JSON.stringify({
+      error: {
+        message: `failure for first-key on ${req.url}`,
+        type: req.url.endsWith('/messages') ? 'overloaded_error' : 'server_error',
+        code: 'upstream_busy'
+      },
+      debug: { authorization: req.headers.authorization },
+      privateMarker: 'UPSTREAM_PRIVATE_MARKER'
+    }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/normalized-errors-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'normalized-errors-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_GO_KEY: 'first-key',
+    OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+
+    const responses = await fetch(`http://127.0.0.1:${port}/go/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'gpt-test', input: 'ping' })
+    });
+    assert.equal(responses.status, 503);
+    assert.deepEqual(await responses.json(), {
+      error: {
+        message: 'failure for [REDACTED] on /responses',
+        type: 'server_error',
+        code: 'upstream_busy'
+      }
+    });
+
+    const chat = await fetch(`http://127.0.0.1:${port}/go/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-test', messages: [{ role: 'user', content: 'ping' }] })
+    });
+    assert.equal(chat.status, 503);
+    assert.deepEqual(await chat.json(), {
+      error: {
+        message: 'OpenCode 上游返回 HTTP 503',
+        type: 'upstream_error',
+        code: 'upstream_http_error'
+      }
+    });
+
+    const claude = await fetch(`http://127.0.0.1:${port}/go/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'Api123' },
+      body: JSON.stringify({ model: 'claude-test', max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] })
+    });
+    assert.equal(claude.status, 503);
+    assert.deepEqual(await claude.json(), {
+      type: 'error',
+      error: {
+        message: 'failure for [REDACTED] on /messages',
+        type: 'overloaded_error'
+      }
+    });
+
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const logs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(logs.length, 3, JSON.stringify(logs, null, 2));
+    assert.deepEqual(logs.map((item) => item.errorCode), ['upstream_busy', 'upstream_http_error', 'upstream_busy']);
+    assert.doesNotMatch(JSON.stringify(logs), /first-key|UPSTREAM_PRIVATE_MARKER|Bearer/);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});

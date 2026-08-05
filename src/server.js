@@ -18,6 +18,7 @@ import { ImageHandoffStore, imageHandoffStorageOptions, localImageHandoffEnabled
 import { canonicalStaticRoot, ifNoneMatchMatches, resolveStaticFile } from './static-files.js';
 import { writeResponseChunk, writeResponseStream } from './response-write.js';
 import { parseRequestTarget } from './request-target.js';
+import { normalizeUpstreamHttpError } from './upstream-error.js';
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
@@ -1118,20 +1119,15 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     let text;
     try { text = await readResponseText(upstream, MAX_UPSTREAM_ERROR_BYTES, '上游错误响应'); }
     catch (error) {
-      await writeLog({ status: 502, stream: Boolean(body.stream), error: error.message });
-      return protocolError(res, 502, incomingProtocol, error.message, 'upstream_error');
+      const failure = upstreamOperationFailure(error);
+      await writeLog({ status: failure.status, stream: Boolean(body.stream), error: failure.message, errorCode: failure.code });
+      return protocolError(res, failure.status, incomingProtocol, failure.message, 'upstream_error', {}, failure.code);
     }
-    await writeLog({ status: upstream.status, stream: Boolean(body.stream) });
-    if (incomingProtocol === route.protocol && upstream.headers.get('content-type')?.includes('application/json')) {
-      res.writeHead(upstream.status, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(text);
-    }
-    let message = `OpenCode 上游返回 HTTP ${upstream.status}`;
-    try {
-      const parsed = JSON.parse(text);
-      message = parsed.error?.message || parsed.message || message;
-    } catch { /* 上游可能返回纯文本 */ }
-    return protocolError(res, upstream.status, incomingProtocol, message, 'upstream_error');
+    const failure = normalizeUpstreamHttpError(text, upstream.status, {
+      secrets: [credential.apiKey, credential.proxyUrl]
+    });
+    await writeLog({ status: failure.status, stream: Boolean(body.stream), error: failure.message, errorCode: failure.code });
+    return protocolError(res, failure.status, incomingProtocol, failure.message, failure.type, {}, failure.code);
   }
   const upstreamContentType = upstream.headers.get('content-type') || '';
   if (body.stream && !/^text\/event-stream(?:\s*;|$)/i.test(upstreamContentType)) {
