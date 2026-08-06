@@ -11,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { listModels } from '../src/upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, proxyDispatcher, proxyDispatcherForUrl, singBoxRuntimeStatus } from '../src/proxy.js';
+import { buildManagedTunnelConfig } from '../src/tunnel-proxy.js';
 
 const TEST_UUID = 'bf000d23-0752-40b4-affe-68f7707a9661';
 
@@ -49,6 +50,26 @@ test('每个 Key 优先使用独立代理并回退到默认代理', () => {
   assert.equal(providerProxyUrl(config, 'zen'), 'socks5://zen:1080');
   assert.equal(providerProxyUrl(config, 'go'), 'http://default:7890');
   assert.equal(proxyDispatcher('socks5://127.0.0.1:1080'), proxyDispatcher('socks5://127.0.0.1:1080'));
+});
+
+test('VMess JSON 会将 WebSocket 路径中的 Xray early data 转为 sing-box 字段', () => {
+  const payload = (overrides = {}) => `vmess://${Buffer.from(JSON.stringify({
+    add: 'example.com', port: 443, id: TEST_UUID, aid: 0, scy: 'auto', net: 'ws',
+    host: 'cdn.example.com', path: '/vmess-argo?ed=2560&token=one', tls: 'tls', sni: 'cdn.example.com',
+    ...overrides
+  })).toString('base64url')}`;
+  const outbound = buildManagedTunnelConfig(payload(), 29080).outbounds[0];
+  assert.equal(outbound.transport.path, '/vmess-argo?token=one');
+  assert.equal(outbound.transport.max_early_data, 2560);
+  assert.equal(outbound.transport.early_data_header_name, 'Sec-WebSocket-Protocol');
+
+  const explicit = buildManagedTunnelConfig(payload({ path: '/vmess-argo', ed: 2048, eh: 'X-Early-Data' }), 29080).outbounds[0];
+  assert.equal(explicit.transport.path, '/vmess-argo');
+  assert.equal(explicit.transport.max_early_data, 2048);
+  assert.equal(explicit.transport.early_data_header_name, 'X-Early-Data');
+
+  assert.throws(() => normalizeProxyUrl(payload({ ed: 2048 })), /early data.*冲突/);
+  assert.throws(() => normalizeProxyUrl(payload({ path: '/vmess-argo?ed=1&ed=2' })), /ed 参数不能重复/);
 });
 
 test('普通代理 dispatcher 缓存按最近使用顺序淘汰', async () => {

@@ -132,7 +132,9 @@ function parseVmessJson(rawPayload) {
     headerType: data.type,
     host: data.host,
     path: data.path,
-    serviceName: data.serviceName || (data.net === 'grpc' ? data.path : '')
+    serviceName: data.serviceName || (data.net === 'grpc' ? data.path : ''),
+    earlyData: data.ed ?? data.max_early_data,
+    earlyDataHeader: data.eh ?? data.early_data_header_name
   }, 'VMess');
   if (transport) outbound.transport = transport;
   return { outbound };
@@ -346,17 +348,27 @@ function transportFromFields(fields, label) {
   if ((!type || type === 'tcp') && headerType === 'http') type = 'http';
   if (!type || type === 'tcp' || type === 'none') return null;
   if (!SUPPORTED_V2RAY_TRANSPORTS.has(type)) throw new Error(`${label} 暂不支持 ${type} 传输，请先转换为本地 HTTP/SOCKS 端口`);
-  const path = cleanString(fields.path);
+  let path = cleanString(fields.path);
   const host = cleanString(fields.host);
   const transport = { type };
   if (type === 'ws') {
+    const pathOptions = websocketPathOptions(path, label);
+    path = pathOptions.path;
     addString(transport, 'path', path);
     const headers = {};
     addString(headers, 'Host', firstListItem(host));
     if (Object.keys(headers).length) transport.headers = headers;
-    const earlyData = cleanString(fields.earlyData);
-    if (earlyData) transport.max_early_data = parseNonNegativeInteger(earlyData, `${label} ws early data`);
-    addString(transport, 'early_data_header_name', cleanString(fields.earlyDataHeader));
+    const explicitEarlyData = cleanString(fields.earlyData);
+    const explicitValue = explicitEarlyData ? parseWebsocketEarlyData(explicitEarlyData, label) : null;
+    const pathValue = pathOptions.earlyData === null ? null : parseWebsocketEarlyData(pathOptions.earlyData, label);
+    if (explicitValue !== null && pathValue !== null && explicitValue !== pathValue) {
+      throw new Error(`${label} ws early data 与路径中的 ed 参数冲突`);
+    }
+    const earlyData = explicitValue ?? pathValue;
+    if (earlyData !== null) transport.max_early_data = earlyData;
+    const earlyDataHeader = cleanString(fields.earlyDataHeader)
+      || (earlyData !== null && earlyData > 0 ? 'Sec-WebSocket-Protocol' : '');
+    addString(transport, 'early_data_header_name', earlyDataHeader);
     return transport;
   }
   if (type === 'grpc') {
@@ -376,6 +388,30 @@ function transportFromFields(fields, label) {
     return transport;
   }
   return transport;
+}
+
+function websocketPathOptions(value, label) {
+  const path = cleanString(value);
+  const queryOffset = path.indexOf('?');
+  if (queryOffset < 0) return { path, earlyData: null };
+  const fragmentOffset = path.indexOf('#', queryOffset);
+  const queryEnd = fragmentOffset < 0 ? path.length : fragmentOffset;
+  const parameters = new URLSearchParams(path.slice(queryOffset + 1, queryEnd));
+  const earlyDataValues = parameters.getAll('ed');
+  if (!earlyDataValues.length) return { path, earlyData: null };
+  if (earlyDataValues.length > 1) throw new Error(`${label} ws 路径中的 ed 参数不能重复`);
+  parameters.delete('ed');
+  const remainingQuery = parameters.toString();
+  return {
+    path: `${path.slice(0, queryOffset)}${remainingQuery ? `?${remainingQuery}` : ''}${fragmentOffset < 0 ? '' : path.slice(fragmentOffset)}`,
+    earlyData: earlyDataValues[0]
+  };
+}
+
+function parseWebsocketEarlyData(value, label) {
+  const earlyData = parseNonNegativeInteger(value, `${label} ws early data`);
+  if (earlyData > 0xffffffff) throw new Error(`${label} ws early data 不能超过 4294967295`);
+  return earlyData;
 }
 
 function parsedUrl(input, label) {

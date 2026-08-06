@@ -210,7 +210,7 @@ trojan://password@example.com:443?sni=example.com&type=ws&path=%2Fws
 ss://YWVzLTI1Ni1nY206cGFzcw@example.com:8388
 ```
 
-托管配置当前覆盖常见 TCP / WebSocket / gRPC / HTTP / HTTPUpgrade / QUIC 传输以及 VLESS Reality/uTLS 常用参数；遇到 sing-box 无法表达的传输（例如部分私有或过新的 V2Ray 传输）会返回明确错误。ShadowsocksR (`ssr://`) 暂不托管，仍需先由本地客户端转换为 HTTP/SOCKS 端口。
+托管配置当前覆盖常见 TCP / WebSocket / gRPC / HTTP / HTTPUpgrade / QUIC 传输以及 VLESS Reality/uTLS 常用参数；VMess/VLESS 等 WebSocket 分享链接中的 Xray `?ed=` 约定会自动转换为 sing-box early data 字段，并使用 `Sec-WebSocket-Protocol` 保持兼容。遇到 sing-box 无法表达的传输（例如部分私有或过新的 V2Ray 传输）会返回明确错误。ShadowsocksR (`ssr://`) 暂不托管，仍需先由本地客户端转换为 HTTP/SOCKS 端口。
 
 ### 在 OpenCode 中使用
 

@@ -15,7 +15,7 @@ test('生成的常见托管隧道配置可通过项目内 sing-box 校验', {
 }, async () => {
   const vmessPayload = Buffer.from(JSON.stringify({
     add: 'example.com', port: 443, id: uuid, aid: 0, scy: 'auto', net: 'ws',
-    host: 'cdn.example.com', path: '/ws', tls: 'tls', sni: 'example.com'
+    host: 'cdn.example.com', path: '/ws?ed=2560', tls: 'tls', sni: 'example.com'
   })).toString('base64url');
   const cases = new Map([
     ['hysteria2', 'hy2://password@example.com:443?sni=example.com&obfs=salamander&obfs-password=secret'],
