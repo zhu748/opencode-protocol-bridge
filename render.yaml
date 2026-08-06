@@ -26,6 +26,10 @@ services:
         value: 256
       - key: OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS
         value: 30000
+      - key: OPENCODE_BRIDGE_KEEP_ALIVE_URL
+        sync: false
+      - key: OPENCODE_BRIDGE_KEEP_ALIVE_INTERVAL_SECONDS
+        value: 60
       - key: CONFIG_ENCRYPTION_KEY
         generateValue: true
       - key: OPENCODE_BRIDGE_ADMIN_PASSWORD

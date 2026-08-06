@@ -58,6 +58,8 @@ test('旧版部分配置会补齐默认字段并规范化模型路由和 Key 池
   assert.equal(config.maxConcurrentRequests, 20);
   assert.equal(config.upstreamTimeoutMs, 120000);
   assert.equal(config.persistLogs, false);
+  assert.equal(config.keepAliveUrl, '');
+  assert.equal(config.keepAliveIntervalSeconds, 60);
   assert.deepEqual(config.imageHandoffModels, DEFAULT_IMAGE_HANDOFF_MODELS);
   assert.notStrictEqual(config.imageHandoffModels, DEFAULT_IMAGE_HANDOFF_MODELS);
 });
@@ -74,6 +76,8 @@ test('持久化配置拒绝错误类型、越界值和未知版本', () => {
   assert.throws(() => normalizeStoredConfig({ maxConcurrentRequests: '20' }), /最大并发请求必须是 1–1000 的整数/);
   assert.throws(() => normalizeStoredConfig({ upstreamTimeoutMs: 0 }), /上游超时必须是 1000–600000 的整数/);
   assert.throws(() => normalizeStoredConfig({ persistLogs: 'false' }), /日志持久化开关必须是布尔值/);
+  assert.throws(() => normalizeStoredConfig({ keepAliveUrl: 'file:///tmp/test' }), /仅支持 HTTP 或 HTTPS/);
+  assert.throws(() => normalizeStoredConfig({ keepAliveIntervalSeconds: 4 }), /保活间隔必须是 5–86400 的整数/);
   assert.throws(() => normalizeStoredConfig({ modelRoutes: null }), /模型路由必须是 JSON 对象/);
   assert.throws(() => normalizeStoredConfig({ zenCredentials: [{ apiKey: 'a' }, { apiKey: 'b', id: 'slot-1' }] }), /Key ID 重复/);
 });

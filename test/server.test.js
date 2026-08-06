@@ -279,6 +279,20 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     const invalidNumericSetting = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, requestLogLimit: 10.5 }) });
     assert.equal(invalidNumericSetting.status, 400);
     assert.match((await invalidNumericSetting.json()).error, /整数/);
+    const invalidKeepAlive = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, keepAliveUrl: 'file:///tmp/healthz' }) });
+    assert.equal(invalidKeepAlive.status, 400);
+    const enabledKeepAlive = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, keepAliveUrl: `http://127.0.0.1:${port}/healthz`, keepAliveIntervalSeconds: 5 }) });
+    assert.equal(enabledKeepAlive.status, 200);
+    let keepAliveStatus;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      keepAliveStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+      if (keepAliveStatus.keepAlive?.lastStatus === 200) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    assert.equal(keepAliveStatus.keepAlive?.lastStatus, 200);
+    assert.equal(keepAliveStatus.keepAlive?.enabled, true);
+    const disabledKeepAlive = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, keepAliveUrl: '', keepAliveIntervalSeconds: 60 }) }).then((response) => response.json());
+    assert.equal(disabledKeepAlive.keepAliveStatus.enabled, false);
     const invalidBooleanSetting = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, persistLogs: 'false' }) });
     assert.equal(invalidBooleanSetting.status, 400);
     const invalidSecretType = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, zenKey: { value: 'secret' } }) });

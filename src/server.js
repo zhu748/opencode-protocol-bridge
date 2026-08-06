@@ -8,6 +8,7 @@ import { loadConfig, saveConfig, updateConfig, publicConfig, configRevision, nor
 import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, hasUsageData } from './adapters.js';
 import { callUpstream, closeDirectUpstreamDispatcher, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJson, readResponseText, upstreamConnectionFailure } from './upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, singBoxRuntimeStatus } from './proxy.js';
+import { KeepAliveService, normalizeKeepAliveUrl, resolveKeepAliveConfig } from './keep-alive.js';
 import { configuredProviderCredentials, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
 import { CredentialHealthTracker } from './credential-health.js';
 import { createSseObserver, translateSse } from './stream.js';
@@ -52,6 +53,7 @@ const JSON_DECODER = new TextDecoder('utf-8', { fatal: true });
 const PUBLIC = join(ROOT, 'public');
 const PUBLIC_ROOT = await canonicalStaticRoot(PUBLIC);
 const requestLogs = new RequestLogStore(process.env.LOG_FILE || resolve(ROOT, 'data', 'request-logs.json'));
+const keepAlive = new KeepAliveService();
 const imageHandoffPublicUrl = process.env.OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL || '';
 const imageHandoff = new ImageHandoffStore({
   enabled: localImageHandoffEnabled(HOST, process.env.OPENCODE_BRIDGE_IMAGE_HANDOFF),
@@ -499,6 +501,7 @@ function configPrecondition(req, snapshot) {
 async function runtimePublicConfig(config) {
   const base = publicConfig(config);
   const singBoxRuntime = await singBoxRuntimeStatus();
+  const effectiveKeepAlive = resolveKeepAliveConfig(config);
   const environmentCredentials = (provider) => environmentCredentialPools[provider].map((credential) => ({
     id: credential.credentialId.split(':')[1],
     name: `${provider.toUpperCase()} 环境 #${credential.credentialId.split(':')[1]}`,
@@ -506,12 +509,14 @@ async function runtimePublicConfig(config) {
   }));
   return {
     ...base,
+    ...effectiveKeepAlive,
     zenEnvironmentKeyCount: environmentCredentialPools.zen.length,
     goEnvironmentKeyCount: environmentCredentialPools.go.length,
     zenEnvironmentCredentials: environmentCredentials('zen'),
     goEnvironmentCredentials: environmentCredentials('go'),
     imageHandoffTransport: imageHandoff.publicBaseUrl ? 'remote' : imageHandoff.enabled ? 'local' : 'disabled',
     singBoxRuntime,
+    keepAliveStatus: keepAlive.status(),
     zenProxyConfigured: environmentCredentialPools.zen.some((credential) => credential.proxyUrl) || base.zenProxyConfigured,
     goProxyConfigured: environmentCredentialPools.go.some((credential) => credential.proxyUrl) || base.goProxyConfigured
   };
@@ -791,6 +796,10 @@ async function adminApiOperation(req, res, url, config) {
     updated.requestLogLimit = boundedInteger(next.requestLogLimit, '日志保留条数', 10, 1000, config.requestLogLimit);
     updated.upstreamTimeoutMs = boundedInteger(next.upstreamTimeoutMs, '上游超时', 1000, 600000, config.upstreamTimeoutMs);
     updated.maxConcurrentRequests = boundedInteger(next.maxConcurrentRequests, '最大并发请求', 1, 1000, config.maxConcurrentRequests);
+    if (Object.hasOwn(next, 'keepAliveUrl') && typeof next.keepAliveUrl !== 'string') return json(res, 400, { error: '保活 URL 必须是字符串' });
+    try { updated.keepAliveUrl = Object.hasOwn(next, 'keepAliveUrl') ? normalizeKeepAliveUrl(next.keepAliveUrl) : config.keepAliveUrl; }
+    catch (error) { return json(res, 400, { error: error.message }); }
+    updated.keepAliveIntervalSeconds = boundedInteger(next.keepAliveIntervalSeconds, '保活间隔', 5, 86400, config.keepAliveIntervalSeconds);
     if (next.persistLogs !== undefined && typeof next.persistLogs !== 'boolean') return json(res, 400, { error: 'persistLogs 必须是布尔值' });
     updated.persistLogs = next.persistLogs ?? config.persistLogs;
     const saved = await updateConfig((current) => ({
@@ -805,6 +814,7 @@ async function adminApiOperation(req, res, url, config) {
       goCredentials: next.clearGoKey || replaceGoKey ? updated.goCredentials : current.goCredentials
     }), { expectedRevision });
     await requestLogs.configure({ limit: saved.requestLogLimit, persist: saved.persistLogs }).catch((error) => console.error(`更新日志持久化设置失败：${error.message}`));
+    keepAlive.configure(resolveKeepAliveConfig(saved));
     return runtimeConfigResponse(res, 200, saved);
   }
   if (url.pathname === '/api/password' && req.method === 'PUT') {
@@ -925,7 +935,8 @@ async function adminApiOperation(req, res, url, config) {
       upstreamTimingCoverageRate: summary.upstreamWaitCoverageRate,
       upstreamBodyTimingCoverageRate: summary.upstreamBodyCoverageRate,
       memoryMb: Math.round(memory.rss / 1024 / 1024),
-      logPersistenceError: requestLogs.lastError || null
+      logPersistenceError: requestLogs.lastError || null,
+      keepAlive: keepAlive.status()
     });
   }
   if (url.pathname === '/api/models' && req.method === 'GET') {
@@ -1344,6 +1355,7 @@ async function staticFile(req, res, url) {
 }
 
 await bootstrapConfigFromEnvironment();
+keepAlive.configure(resolveKeepAliveConfig(await loadConfig()));
 
 const server = createServer({
   maxHeaderSize: MAX_HTTP_HEADER_BYTES,
@@ -1574,6 +1586,7 @@ async function finalizeShutdown(exitCode, forceExit) {
 function shutdown(signal) {
   if (shutdownStarted) return;
   shutdownStarted = true;
+  keepAlive.close();
   console.log(`收到 ${signal}，正在等待活动请求结束`);
   const forceExit = setTimeout(() => {
     server.closeAllConnections();

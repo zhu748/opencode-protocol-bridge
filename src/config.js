@@ -7,6 +7,7 @@ import { DEFAULT_PROMPT_REWRITE_RULES, migratePromptRules, normalizePromptRules 
 import { storedProviderCredentialEntries } from './provider-credentials.js';
 import { maskProxyUrl, normalizeProxyUrl } from './proxy.js';
 import { atomicWriteFile, cleanupAtomicTemporary, readUtf8FileLimited } from './file-io.js';
+import { normalizeKeepAliveUrl } from './keep-alive.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CONFIG_FILE = process.env.CONFIG_FILE || resolve(ROOT, 'data', 'config.json');
@@ -48,6 +49,8 @@ const defaults = {
   proxyUrl: '',
   zenProxyUrl: '',
   goProxyUrl: '',
+  keepAliveUrl: '',
+  keepAliveIntervalSeconds: 60,
   defaultProvider: 'zen',
   modelRoutes: {},
   imageHandoffModels: DEFAULT_IMAGE_HANDOFF_MODELS,
@@ -111,6 +114,8 @@ export function normalizeStoredConfig(value = {}) {
     proxyUrl: normalizeConfigProxy(source.proxyUrl, '默认代理'),
     zenProxyUrl: normalizeConfigProxy(source.zenProxyUrl, 'Zen 代理'),
     goProxyUrl: normalizeConfigProxy(source.goProxyUrl, 'Go 代理'),
+    keepAliveUrl: normalizeWithConfigError(() => normalizeKeepAliveUrl(source.keepAliveUrl)),
+    keepAliveIntervalSeconds: configInteger(source.keepAliveIntervalSeconds, '保活间隔', 5, 86400),
     defaultProvider: configEnum(source.defaultProvider, '默认提供方', ['zen', 'go']),
     modelRoutes: normalizeModelRoutes(source.modelRoutes),
     imageHandoffModels: normalizeWithConfigError(() => normalizeImageHandoffModels(source.imageHandoffModels)),
@@ -213,6 +218,8 @@ export function publicConfig(config) {
     proxyConfigured: Boolean(config.proxyUrl),
     zenProxyConfigured: Boolean(config.zenProxyUrl) || zenCredentials.some((entry) => entry.proxyUrl),
     goProxyConfigured: Boolean(config.goProxyUrl) || goCredentials.some((entry) => entry.proxyUrl),
+    keepAliveUrl: config.keepAliveUrl,
+    keepAliveIntervalSeconds: config.keepAliveIntervalSeconds,
     defaultProvider: config.defaultProvider,
     modelRoutes: config.modelRoutes,
     imageHandoffModels: normalizeImageHandoffModels(config.imageHandoffModels),

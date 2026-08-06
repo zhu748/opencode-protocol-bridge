@@ -69,6 +69,17 @@
             <label class="proxy-url-field">默认代理地址<input id="proxyUrl" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="vless://、vmess://、hy2:// 或 http://127.0.0.1:7890"><small>支持 HTTP(S)、SOCKS4/4a/5/5h、mixed://、hy2/TUIC/VLESS/VMess/Trojan/SS/Hysteria；分享链接由服务端 sing-box 按需启动。</small><span class="field-tools proxy-presets"><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="http://127.0.0.1:7890">HTTP 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:7890">SOCKS5h 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:1080">SOCKS5h 1080</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="mixed://127.0.0.1:7890">mixed://7890</button><button type="button" class="link-btn clear-proxy" data-provider="default">清除默认代理</button></span></label>
             <div class="proxy-test-row"><small>检测时使用上方“默认上游”的一个可用 Key 拉取模型；可以先检测输入框中的新地址，再决定是否保存。</small><button id="test-default-proxy" class="ghost" type="button">检测代理</button></div>
           </section>
+          <section class="proxy-config-card keep-alive-card" aria-labelledby="keep-alive-title">
+            <div class="proxy-config-head">
+              <div><span class="tag green">KEEP ALIVE</span><h4 id="keep-alive-title">Render 保活</h4><p>定期向指定地址发送 GET 请求；留空即禁用，保存后立即热更新。</p></div>
+              <span id="keep-alive-state" class="security-state">当前禁用</span>
+            </div>
+            <label class="proxy-url-field">保活 URL<input id="keepAliveUrl" type="url" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="https://your-service.onrender.com/healthz"><small id="keep-alive-url-help">建议使用当前服务的 <code>/healthz</code>；不跟随重定向，也不会读取响应正文。</small></label>
+            <div class="keep-alive-controls">
+              <label>保活间隔（秒）<input id="keepAliveIntervalSeconds" type="number" min="5" max="86400" value="60" required><small>范围 5–86400 秒，默认 60 秒</small></label>
+              <span class="field-tools"><button id="set-current-keep-alive" class="ghost" type="button">一键设置当前站点</button><button id="disable-keep-alive" class="ghost danger" type="button">禁用保活</button></span>
+            </div>
+          </section>
           <label>日志保留条数<input id="requestLogLimit" type="number" min="10" max="1000"></label>
           <label class="check-field"><input id="persistLogs" type="checkbox"><span>持久化请求日志<small>仅保存请求元数据，不保存提示词和响应正文</small></span></label>
           <label>上游超时（毫秒）<input id="upstreamTimeoutMs" type="number" min="1000" max="600000" step="1000"></label>

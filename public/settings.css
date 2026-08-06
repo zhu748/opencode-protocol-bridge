@@ -15,6 +15,21 @@
   background: linear-gradient(135deg, rgba(200, 255, 100, .055), rgba(12, 15, 20, .8));
 }
 
+.keep-alive-controls {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.keep-alive-controls > label {
+  width: min(320px, 100%);
+}
+
+.keep-alive-controls .field-tools {
+  justify-content: flex-end;
+}
+
 .proxy-config-head,
 .proxy-test-row,
 .proxy-runtime {
@@ -356,6 +371,15 @@
   }
 
   .proxy-runtime {
+    justify-content: flex-start;
+  }
+
+  .keep-alive-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .keep-alive-controls .field-tools {
     justify-content: flex-start;
   }
 }

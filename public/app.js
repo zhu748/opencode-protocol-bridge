@@ -262,6 +262,15 @@ async function refresh() {
     $('#persistLogs').checked = Boolean(config.persistLogs);
     $('#upstreamTimeoutMs').value = config.upstreamTimeoutMs;
     $('#maxConcurrentRequests').value = config.maxConcurrentRequests;
+    $('#keepAliveUrl').value = config.keepAliveUrl || '';
+    $('#keepAliveIntervalSeconds').value = config.keepAliveIntervalSeconds || 60;
+    $('#keepAliveUrl').disabled = Boolean(config.urlManagedByEnvironment);
+    $('#keepAliveIntervalSeconds').disabled = Boolean(config.intervalManagedByEnvironment);
+    $('#set-current-keep-alive').disabled = Boolean(config.urlManagedByEnvironment);
+    $('#disable-keep-alive').disabled = Boolean(config.urlManagedByEnvironment);
+    $('#keep-alive-url-help').textContent = config.urlManagedByEnvironment
+      ? '当前 URL 由 OPENCODE_BRIDGE_KEEP_ALIVE_URL 管理；修改环境变量并重新部署后生效。'
+      : '建议使用当前服务的 /healthz；不跟随重定向，也不会读取响应正文。';
     $('#clientToken').placeholder = config.clientToken ? `当前：${config.clientToken}` : '填写客户端访问令牌';
   }
   renderDefaultProxyStatus();
@@ -277,6 +286,7 @@ async function refresh() {
     : 'hy2/TUIC/VLESS/VMess 等分享链接需要安装 sing-box';
   $('#sing-box-state').classList.toggle('enabled', Boolean(singBox.available));
   $('#sing-box-state').classList.toggle('unavailable', !singBox.available);
+  renderKeepAliveStatus();
   if (!dirtyConfigSections.has('routes')) {
     $('#modelRoutes').value = JSON.stringify(config.modelRoutes || {}, null, 2);
     renderRouteList(config.modelRoutes || {});
@@ -806,13 +816,40 @@ $$('nav button').forEach((button) => button.addEventListener('click', async () =
 
 $('#settings-form').addEventListener('input', () => markConfigDirty('settings'));
 $('#proxyUrl').addEventListener('input', renderDefaultProxyStatus);
+function renderKeepAliveStatus() {
+  const status = config.keepAliveStatus || serviceStatus.keepAlive || {};
+  const state = $('#keep-alive-state');
+  const source = config.urlManagedByEnvironment || config.intervalManagedByEnvironment ? ' · 环境变量' : '';
+  if (!config.keepAliveUrl) state.textContent = `当前禁用${source}`;
+  else if (status.lastError) state.textContent = `最近失败：${status.lastError}`;
+  else if (status.lastSuccessAt) state.textContent = `运行中 · ${new Date(status.lastSuccessAt).toLocaleTimeString()}${source}`;
+  else state.textContent = `已启用 · 等待首次请求${source}`;
+  state.classList.toggle('enabled', Boolean(config.keepAliveUrl) && !status.lastError);
+  state.classList.toggle('unavailable', Boolean(status.lastError));
+}
+
+$('#set-current-keep-alive').addEventListener('click', () => {
+  $('#keepAliveUrl').value = `${location.origin}/healthz`;
+  markConfigDirty('settings');
+  toast('已填入当前站点 /healthz，保存设置后生效');
+});
+$('#disable-keep-alive').addEventListener('click', () => {
+  $('#keepAliveUrl').value = '';
+  markConfigDirty('settings');
+  toast('保存设置后将禁用保活');
+});
 $('#settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   try {
+    const keepAliveOverrides = {
+      ...(!config.urlManagedByEnvironment ? { keepAliveUrl: $('#keepAliveUrl').value.trim() } : {}),
+      ...(!config.intervalManagedByEnvironment ? { keepAliveIntervalSeconds: Number($('#keepAliveIntervalSeconds').value) } : {})
+    };
     const payload = configPayload({
       defaultProvider: $('#defaultProvider').value,
       clientToken: $('#clientToken').value,
-      requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes
+      requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes,
+      ...keepAliveOverrides
     });
     if ($('#proxyUrl').value.trim()) payload.proxyUrl = $('#proxyUrl').value.trim();
     await saveConfig(payload, 'settings');
@@ -829,6 +866,8 @@ function configPayload(overrides = {}) {
     persistLogs: Boolean(config.persistLogs),
     upstreamTimeoutMs: config.upstreamTimeoutMs,
     maxConcurrentRequests: config.maxConcurrentRequests,
+    ...(!config.urlManagedByEnvironment ? { keepAliveUrl: config.keepAliveUrl || '' } : {}),
+    ...(!config.intervalManagedByEnvironment ? { keepAliveIntervalSeconds: config.keepAliveIntervalSeconds || 60 } : {}),
     ...overrides
   };
 }
