@@ -142,7 +142,9 @@ function createSocksDispatcher(url) {
 
 function createProxyDispatcher(proxyUrl) {
   const parsed = new URL(proxyUrl);
-  return parsed.protocol.startsWith('socks') ? createSocksDispatcher(parsed) : new ProxyAgent(proxyUrl);
+  return parsed.protocol.startsWith('socks')
+    ? createSocksDispatcher(parsed)
+    : new ProxyAgent({ uri: proxyUrl, proxyTunnel: true });
 }
 
 function defaultPort(protocol) {

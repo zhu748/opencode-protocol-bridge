@@ -102,7 +102,7 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
   const manifest = JSON.parse(manifestText);
   const lock = JSON.parse(lockText);
 
-  assert.equal(nodeVersion.trim(), '24.18.0');
+  assert.equal(nodeVersion.trim(), '24.18.1');
   assert.equal(manifest.engines.node, '^22.20.0 || ^24.11.0');
   assert.equal(lock.packages[''].engines.node, manifest.engines.node);
   assert.equal(manifest.scripts.check, 'node scripts/check-syntax.mjs && node --test');
@@ -110,10 +110,10 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
   assert.match(syntaxChecker, /spawnSync\(process\.execPath, \['--check', file\]/);
   assert.doesNotMatch(localLauncher, /Node\.js 20/);
   assert.match(localLauncher, /Node\.js 22\.20\+ or 24\.11\+/);
-  assert.match(dockerfile, /^FROM node:24\.18\.0-alpine3\.24$/m);
+  assert.match(dockerfile, /^FROM node:24\.18\.1-alpine3\.24$/m);
   assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
-  assert.match(workflow, /node-version: \[22\.23\.2, 24\.18\.0\]/);
+  assert.match(workflow, /node-version: \[22\.23\.2, 24\.18\.1\]/);
   const actionReferences = [...workflow.matchAll(/\buses:\s+([^\s#]+)/g)].map((match) => match[1]);
   assert.ok(actionReferences.length > 0);
   for (const reference of actionReferences) {
