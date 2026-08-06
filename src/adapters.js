@@ -113,6 +113,7 @@ export function detectProtocol(path) {
   if (path.endsWith('/messages')) return 'claude';
   if (path.endsWith('/responses')) return 'responses';
   if (path.endsWith('/chat/completions')) return 'chat';
+  if (/\/models\/.+:(?:generateContent|streamGenerateContent)$/.test(path)) return 'gemini';
   return null;
 }
 
@@ -145,6 +146,43 @@ export function normalizeRequest(body, protocol) {
     reasoningEffort: resolveReasoningEffort(body, protocol),
     metadata: body.metadata
   };
+
+  if (protocol === 'gemini') {
+    if (!Array.isArray(body.contents) || body.contents.length === 0) throw unsupportedFeature('Gemini contents 必须是非空数组');
+    const generation = body.generationConfig || {};
+    if (generation.candidateCount != null && generation.candidateCount !== 1) throw unsupportedFeature('跨协议转换仅支持 Gemini candidateCount=1');
+    if (generation.responseMimeType && generation.responseMimeType !== 'text/plain') throw unsupportedFeature(`跨协议转换暂不支持 Gemini responseMimeType=${generation.responseMimeType}`);
+    if (Array.isArray(generation.responseModalities) && (generation.responseModalities.length !== 1 || generation.responseModalities[0] !== 'TEXT')) {
+      throw unsupportedFeature('跨协议转换仅支持 Gemini TEXT 响应模态');
+    }
+    if (body.safetySettings?.length) throw unsupportedFeature('跨协议转换暂不支持 Gemini safetySettings');
+    normalized.maxTokens = generation.maxOutputTokens;
+    normalized.temperature = generation.temperature;
+    normalized.topP = generation.topP;
+    normalized.stop = generation.stopSequences;
+    const systemParts = normalizeGeminiParts(body.systemInstruction?.parts, { rejectUnknown: true });
+    if (systemParts.some((part) => part.type !== 'text')) throw unsupportedFeature('Gemini systemInstruction 仅支持文本 Part');
+    normalized.systemMessages = systemParts.map((part) => ({ text: part.text }));
+    normalized.system = normalized.systemMessages.map((item) => item.text).join('\n');
+    normalized.messages = asArray(body.contents).map((content, index) => {
+      if (!content || typeof content !== 'object' || Array.isArray(content)) throw unsupportedFeature(`Gemini contents[${index}] 必须是对象`);
+      if (content?.role && !['user', 'model'].includes(content.role)) throw unsupportedFeature(`不支持 Gemini Content role：${content.role}`);
+      const parts = normalizeGeminiParts(content.parts, { rejectUnknown: true });
+      if (!parts.length) throw unsupportedFeature(`Gemini contents[${index}].parts 必须是非空数组`);
+      return { role: content.role === 'model' ? 'assistant' : 'user', parts };
+    });
+    normalized.tools = asArray(body.tools).flatMap((tool) => asArray(tool?.functionDeclarations)).map((tool, index) => {
+      if (!tool || typeof tool !== 'object' || Array.isArray(tool) || typeof tool.name !== 'string' || !tool.name) {
+        throw unsupportedFeature(`Gemini functionDeclarations[${index}] 缺少有效 name`);
+      }
+      return { name: tool.name, description: tool.description, schema: tool.parametersJsonSchema || tool.parameters || {} };
+    });
+    const unsupportedTools = asArray(body.tools).filter((tool) => Object.keys(tool || {}).some((key) => key !== 'functionDeclarations'));
+    if (unsupportedTools.length) throw unsupportedFeature('跨协议转换暂不支持 Gemini 内置工具；请只使用 functionDeclarations');
+    normalized.toolChoice = normalizeGeminiToolChoice(body.toolConfig?.functionCallingConfig);
+    if (body.cachedContent) throw unsupportedFeature('跨协议转换暂不支持 Gemini cachedContent');
+    return normalized;
+  }
 
   if (protocol === 'claude') {
     normalized.systemMessages = asArray(body.system).map((item) => ({
@@ -215,6 +253,58 @@ export function normalizeRequest(body, protocol) {
     normalized.tools = asArray(body.tools).map((tool) => ({ name: tool.function?.name, description: tool.function?.description, schema: tool.function?.parameters || {}, strict: tool.function?.strict }));
   }
   return normalized;
+}
+
+function normalizeGeminiParts(parts, { rejectUnknown = false } = {}) {
+  return asArray(parts).flatMap((part) => {
+    if (!part || typeof part !== 'object' || Array.isArray(part)) {
+      if (rejectUnknown) throw unsupportedFeature('Gemini parts 必须是对象');
+      return [];
+    }
+    const inline = part.inlineData || part.inline_data;
+    const file = part.fileData || part.file_data;
+    const call = part.functionCall || part.function_call;
+    const result = part.functionResponse || part.function_response;
+    const variants = [typeof part.text === 'string', Boolean(inline), Boolean(file), Boolean(call), Boolean(result)].filter(Boolean).length;
+    if (variants !== 1) {
+      if (rejectUnknown) throw unsupportedFeature(variants > 1 ? 'Gemini Part 只能包含一种内容类型' : `跨协议转换暂不支持 Gemini Part：${Object.keys(part)[0] || 'unknown'}`);
+      return [];
+    }
+    if (typeof part.text === 'string') return [{ type: part.thought ? 'reasoning' : 'text', text: part.text, ...(part.thoughtSignature ? { signature: part.thoughtSignature } : {}) }];
+    if (inline) {
+      const mediaType = inline.mimeType || inline.mime_type || 'application/octet-stream';
+      if (typeof inline.data !== 'string' || !inline.data) throw unsupportedFeature('Gemini inlineData 缺少 base64 data');
+      const source = { type: 'base64', media_type: mediaType, data: inline.data || '' };
+      return [mediaType.startsWith('image/') ? { type: 'image', source } : { type: 'file', source }];
+    }
+    if (file) {
+      const mediaType = file.mimeType || file.mime_type || 'application/octet-stream';
+      const url = file.fileUri || file.file_uri;
+      if (typeof url !== 'string' || !url) throw unsupportedFeature('Gemini fileData 缺少 fileUri');
+      const source = { type: 'url', url, media_type: mediaType };
+      return [mediaType.startsWith('image/') ? { type: 'image', source } : { type: 'file', source }];
+    }
+    if (call) {
+      if (typeof call.name !== 'string' || !call.name) throw unsupportedFeature('Gemini functionCall 缺少有效 name');
+      if (call.args != null && (!call.args || typeof call.args !== 'object' || Array.isArray(call.args))) throw unsupportedFeature('Gemini functionCall.args 必须是对象');
+      return [{ type: 'tool_call', id: call.id || call.name || `call_${randomUUID().replaceAll('-', '')}`, name: call.name, arguments: call.args || {} }];
+    }
+    if (typeof result.name !== 'string' || !result.name) throw unsupportedFeature('Gemini functionResponse 缺少有效 name');
+    if (result.response != null && (!result.response || typeof result.response !== 'object' || Array.isArray(result.response))) throw unsupportedFeature('Gemini functionResponse.response 必须是对象');
+    return [{ type: 'tool_result', id: result.id || result.name, content: result.response ?? {} }];
+  });
+}
+
+function normalizeGeminiToolChoice(config) {
+  if (!config) return undefined;
+  const mode = String(config.mode || 'AUTO').toUpperCase();
+  const names = asArray(config.allowedFunctionNames).filter((name) => typeof name === 'string' && name);
+  if (!['AUTO', 'ANY', 'NONE', 'VALIDATED'].includes(mode)) throw unsupportedFeature(`不支持 Gemini functionCallingConfig.mode：${mode}`);
+  if (names.length > 1) throw unsupportedFeature('跨协议转换无法保留多个 allowedFunctionNames；请只指定一个函数名或移除该限制');
+  if (mode === 'NONE') return { type: 'none' };
+  if (mode === 'ANY') return names.length === 1 ? { type: 'tool', name: names[0] } : { type: 'any' };
+  if (names.length) throw unsupportedFeature('allowedFunctionNames 仅能与 Gemini ANY 模式一起跨协议转换');
+  return { type: 'auto' };
 }
 
 function parseArguments(value) {
@@ -505,6 +595,22 @@ export function normalizeResponse(body, protocol, fallbackModel = '', { rejectUn
   if (protocol === 'chat' && (!Array.isArray(body.choices) || !body.choices[0]?.message || typeof body.choices[0].message !== 'object')) {
     throw new Error('上游 Chat 响应缺少 choices[0].message');
   }
+  if (protocol === 'gemini') {
+    if (!Array.isArray(body.candidates) || !body.candidates[0]?.content || !Array.isArray(body.candidates[0].content.parts)) {
+      throw new Error('上游 Gemini 响应缺少 candidates[0].content.parts');
+    }
+    const candidate = body.candidates[0];
+    return {
+      id: body.responseId, model: body.modelVersion || fallbackModel,
+      parts: normalizeGeminiParts(candidate.content.parts, { rejectUnknown }),
+      inputTokens: normalizeUsageCount(body.usageMetadata?.promptTokenCount),
+      outputTokens: normalizeUsageCount(body.usageMetadata?.candidatesTokenCount),
+      cachedInputTokens: normalizeUsageCount(body.usageMetadata?.cachedContentTokenCount),
+      cacheCreationInputTokens: 0,
+      reasoningTokens: normalizeUsageCount(body.usageMetadata?.thoughtsTokenCount),
+      stopReason: candidate.finishReason
+    };
+  }
   if (protocol === 'claude') return {
     id: body.id, model: body.model || fallbackModel,
     parts: normalizeParts(body.content, { includeReasoning: true, rejectUnknown }),
@@ -561,6 +667,22 @@ export function formatResponse(response, protocol, responsesOptions = {}) {
     cacheCreationInputTokens: normalizeUsageCount(response.cacheCreationInputTokens),
     reasoningTokens: normalizeUsageCount(response.reasoningTokens)
   };
+  if (protocol === 'gemini') {
+    assertOutputPartsSupported(response.parts, protocol, new Set(['text', 'reasoning', 'tool_call', 'image', 'file']));
+    const parts = response.parts.map(geminiResponsePart);
+    return {
+      candidates: [{ content: { role: 'model', parts }, finishReason: geminiFinishReason(response.stopReason), index: 0 }],
+      usageMetadata: {
+        promptTokenCount: response.inputTokens,
+        candidatesTokenCount: response.outputTokens,
+        totalTokenCount: normalizeUsageCount(response.inputTokens + response.outputTokens),
+        ...(response.cachedInputTokens ? { cachedContentTokenCount: response.cachedInputTokens } : {}),
+        ...(response.reasoningTokens ? { thoughtsTokenCount: response.reasoningTokens } : {})
+      },
+      ...(response.model ? { modelVersion: response.model } : {}),
+      ...(response.id ? { responseId: response.id } : {})
+    };
+  }
   if (protocol === 'claude') return {
     id: response.id || `msg_${randomUUID().replaceAll('-', '')}`, type: 'message', role: 'assistant', model: response.model,
     content: claudeContent(response.parts, { includeReasoning: true }), stop_reason: response.parts.some((x) => x.type === 'tool_call') ? 'tool_use' : claudeStopReason(response.stopReason), stop_sequence: null,
@@ -606,6 +728,22 @@ export function formatResponse(response, protocol, responsesOptions = {}) {
       ...(response.reasoningTokens ? { completion_tokens_details: { reasoning_tokens: response.reasoningTokens } } : {})
     }
   };
+}
+
+function geminiResponsePart(part) {
+  if (part.type === 'text') return { text: part.text || '' };
+  if (part.type === 'reasoning') return { text: part.text || '', thought: true, ...(part.signature ? { thoughtSignature: part.signature } : {}) };
+  if (part.type === 'tool_call') return { functionCall: { name: part.name, args: sanitizeToolArguments(part.name, part.arguments), ...(part.id ? { id: part.id } : {}) } };
+  const source = part.source;
+  if (source?.type === 'base64') return { inlineData: { mimeType: source.media_type || (part.type === 'image' ? 'image/png' : 'application/octet-stream'), data: source.data || '' } };
+  if (source?.type === 'url') return { fileData: { mimeType: source.media_type || (part.type === 'image' ? 'image/*' : 'application/octet-stream'), fileUri: source.url } };
+  throw unsupportedFeature(`Gemini 无法表达 ${part.type} file_id；请改用 URL 或 base64 数据`);
+}
+
+function geminiFinishReason(reason) {
+  if (['length', 'max_tokens', 'max_output_tokens', 'MAX_TOKENS'].includes(reason)) return 'MAX_TOKENS';
+  if (['SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII'].includes(reason)) return reason;
+  return 'STOP';
 }
 
 function assertOutputPartsSupported(parts, protocol, supported) {

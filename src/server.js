@@ -41,7 +41,7 @@ const MAX_MODEL_COUNT = 5000;
 const JSON_BACKPRESSURE_THRESHOLD_BYTES = 64 * 1024;
 const CONNECTIONS_CHECKING_INTERVAL_MS = 1000;
 const SINGLETON_REQUEST_HEADERS = new Set([
-  'authorization', 'x-api-key', 'cookie', 'host', 'origin', 'sec-fetch-site',
+  'authorization', 'x-api-key', 'x-goog-api-key', 'cookie', 'host', 'origin', 'sec-fetch-site',
   'content-type', 'content-encoding', 'content-length', 'transfer-encoding',
   'if-match', 'x-forwarded-for', 'x-forwarded-proto', 'anthropic-version'
 ]);
@@ -103,13 +103,26 @@ const json = (res, status, data, headers = {}) => {
 
 function protocolError(res, status, protocol, message, type = 'invalid_request_error', headers = {}, code = null) {
   if (protocol === 'claude') return json(res, status, { type: 'error', error: { type, message } }, headers);
+  if (protocol === 'gemini') return json(res, status, { error: { code: status, message, status: geminiErrorStatus(status) } }, headers);
   return json(res, status, { error: { message, type, code } }, headers);
+}
+
+function geminiErrorStatus(status) {
+  if (status === 400) return 'INVALID_ARGUMENT';
+  if (status === 401) return 'UNAUTHENTICATED';
+  if (status === 403) return 'PERMISSION_DENIED';
+  if (status === 404) return 'NOT_FOUND';
+  if (status === 429) return 'RESOURCE_EXHAUSTED';
+  if (status === 503) return 'UNAVAILABLE';
+  if (status === 504) return 'DEADLINE_EXCEEDED';
+  return 'INTERNAL';
 }
 
 function streamProtocolError(protocol, message, responseSequenceNumber = 0, code = 'upstream_error') {
   const error = { message, type: 'upstream_error', code };
   if (protocol === 'chat') return `data: ${JSON.stringify({ error })}\n\ndata: [DONE]\n\n`;
   if (protocol === 'responses') return `event: error\ndata: ${JSON.stringify({ type: 'error', code, message, param: null, sequence_number: Number.isSafeInteger(responseSequenceNumber) && responseSequenceNumber >= 0 ? responseSequenceNumber : 0 })}\n\n`;
+  if (protocol === 'gemini') return `data: ${JSON.stringify({ error: { code: 502, message, status: 'INTERNAL' } })}\n\n`;
   return `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: error.type, message } })}\n\n`;
 }
 
@@ -280,7 +293,7 @@ function mutationOriginAllowed(req) {
 
 function authenticateClient(req, config) {
   const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
-  const token = req.headers['x-api-key'] || bearer;
+  const token = req.headers['x-goog-api-key'] || req.headers['x-api-key'] || bearer;
   if (!token) return null;
   if (config.clientToken && sameSecret(token, config.clientToken)) return { id: 'legacy', name: '主令牌', maxConcurrentRequests: config.maxConcurrentRequests };
   const candidateHash = hashClientToken(token);
@@ -575,10 +588,21 @@ async function bootstrapConfigFromEnvironment() {
 }
 
 function publicApiScope(pathname) {
-  const scoped = pathname.match(/^\/(zen|go)\/v1(?:\/|$)/);
-  if (scoped) return { base: `/${scoped[1]}/v1`, provider: scoped[1] };
-  if (/^\/v1(?:\/|$)/.test(pathname)) return { base: '/v1', provider: null };
+  const scoped = pathname.match(/^\/(zen|go)\/(v1beta|v1)(?:\/|$)/);
+  if (scoped) return { base: `/${scoped[1]}/${scoped[2]}`, provider: scoped[1] };
+  const version = pathname.match(/^\/(v1beta|v1)(?:\/|$)/);
+  if (version) return { base: `/${version[1]}`, provider: null };
   return null;
+}
+
+function geminiEndpoint(pathname, base) {
+  const match = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/models/(.+):(generateContent|streamGenerateContent)$`).exec(pathname);
+  if (!match) return null;
+  let model;
+  try { model = decodeURIComponent(match[1]); }
+  catch { throw Object.assign(new Error('Gemini 模型 ID 编码无效'), { status: 400 }); }
+  if (!model || model.length > 256 || /[\u0000-\u001f\u007f]/.test(model)) throw Object.assign(new Error('Gemini 模型 ID 必须是长度 1–256 的有效字符串'), { status: 400 });
+  return { model, stream: match[2] === 'streamGenerateContent' };
 }
 
 async function addLog(entry, config) {
@@ -1062,10 +1086,18 @@ function responsesOutputOptions(body, protocol) {
 
 async function proxyRequest(req, res, url, config, client, forcedProvider, requestId) {
   const incomingProtocol = detectProtocol(url.pathname);
-  if (!incomingProtocol) return protocolError(res, 404, 'chat', '仅支持 messages、responses 和 chat/completions 端点');
+  if (!incomingProtocol) return protocolError(res, 404, 'chat', '仅支持 messages、responses、chat/completions 和 Gemini generateContent 端点');
   if (!client) return protocolError(res, 401, incomingProtocol, '访问令牌无效', 'authentication_error');
   const started = Date.now();
   let body = await bodyJson(req, MAX_PROXY_REQUEST_BYTES);
+  if (incomingProtocol === 'gemini') {
+    const scope = publicApiScope(url.pathname);
+    let endpoint;
+    try { endpoint = scope && geminiEndpoint(url.pathname, scope.base); }
+    catch (error) { return protocolError(res, error.status || 400, incomingProtocol, error.message); }
+    if (!endpoint) return protocolError(res, 404, incomingProtocol, 'Gemini 端点格式无效');
+    body = { ...body, model: endpoint.model, stream: endpoint.stream };
+  }
   if (typeof body.model !== 'string' || !body.model.trim() || body.model.length > 256) return protocolError(res, 400, incomingProtocol, 'model 必须是长度 1–256 的非空字符串');
   let promptRewrite;
   if (incomingProtocol === 'claude') {
@@ -1429,6 +1461,13 @@ const server = createServer({
     }
     if (url.pathname.startsWith('/api/')) return await adminApi(req, res, url, config);
     if (apiScope) {
+      let gemini;
+      try { gemini = geminiEndpoint(url.pathname, apiScope.base); }
+      catch (error) { return protocolError(res, error.status || 400, 'gemini', error.message); }
+      if (gemini) {
+        if (req.method !== 'POST') return protocolError(res, 405, 'gemini', '该接口仅支持 POST', 'invalid_request_error', { allow: 'POST' });
+        return await limitedProxyRequest(req, res, url, config, apiScope.provider, requestId);
+      }
       const modelsPath = `${apiScope.base}/models`;
       const modelPrefix = `${modelsPath}/`;
       const modelEndpoint = url.pathname === modelsPath || url.pathname.startsWith(modelPrefix);

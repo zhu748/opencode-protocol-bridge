@@ -791,6 +791,7 @@ function renderExamples() {
   $('#claude-example').textContent = command('/zen/v1/messages', 'x-api-key: YOUR_TOKEN', { model: 'claude-haiku-4-5', max_tokens: 1024, messages: [{ role: 'user', content: '你好' }] });
   $('#responses-example').textContent = command('/zen/v1/responses', 'Authorization: Bearer YOUR_TOKEN', { model: 'gpt-5.6-terra', input: '你好' });
   $('#chat-example').textContent = command('/go/v1/chat/completions', 'Authorization: Bearer YOUR_TOKEN', { model: 'kimi-k2.6', messages: [{ role: 'user', content: '你好' }] });
+  $('#gemini-example').textContent = command('/v1beta/models/kimi-k2.6:generateContent', 'x-goog-api-key: YOUR_TOKEN', { contents: [{ role: 'user', parts: [{ text: '你好' }] }] });
   $('#opencode-example').textContent = JSON.stringify({
     provider: {
       bridgeZen: { npm: '@ai-sdk/openai-compatible', options: { baseURL: `${root}/zen/v1`, apiKey: '{env:OPENCODE_BRIDGE_TOKEN}' }, models: { 'gpt-5.6-terra': {} } },

@@ -44,8 +44,8 @@
 
       <section id="overview" class="view active">
         <div class="hero">
-          <div><span id="service-state" class="pill">● READY</span><h1>一个端点，<br><em>三种协议。</em></h1><p>将 Claude Messages、OpenAI Responses 与 Chat Completions 请求无缝转发至 OpenCode 官方服务。</p></div>
-          <div class="protocol-orbit"><div class="core">OC</div><span class="p1">Claude</span><span class="p2">Responses</span><span class="p3">Chat</span></div>
+          <div><span id="service-state" class="pill">● READY</span><h1>一个端点，<br><em>四种协议。</em></h1><p>将 Claude Messages、OpenAI Responses、Chat Completions 与 Gemini GenerateContent 请求无缝转发至 OpenCode 官方服务。</p></div>
+          <div class="protocol-orbit"><div class="core">OC</div><span class="p1">Claude</span><span class="p2">Responses</span><span class="p3">Chat</span><span class="p4">Gemini</span></div>
         </div>
         <div class="stats">
           <article><span>接口地址</span><strong id="base-url">—</strong><small>本机中转端点</small></article>
@@ -226,11 +226,12 @@
       </section>
 
       <section id="guide" class="view">
-        <div class="section-intro"><h3>接入指南</h3><p>三种常用客户端协议均可直接调用。</p></div>
+        <div class="section-intro"><h3>接入指南</h3><p>四种常用客户端协议均可直接调用。</p></div>
         <div class="guide-grid">
           <article class="panel"><span class="tag purple">CLAUDE</span><h3>Messages API</h3><code>POST /zen/v1/messages</code><pre id="claude-example"></pre></article>
           <article class="panel"><span class="tag green">OPENAI</span><h3>Responses API</h3><code>POST /zen/v1/responses</code><pre id="responses-example"></pre></article>
           <article class="panel"><span class="tag orange">COMPATIBLE</span><h3>Chat Completions</h3><code>POST /go/v1/chat/completions</code><pre id="chat-example"></pre></article>
+          <article class="panel"><span class="tag purple">GOOGLE</span><h3>Gemini GenerateContent</h3><code>POST /v1beta/models/{model}:generateContent</code><pre id="gemini-example"></pre></article>
           <article class="panel"><span class="tag green">OPENCODE</span><h3>opencode.json</h3><code>@ai-sdk/openai-compatible</code><pre id="opencode-example"></pre></article>
         </div>
       </section>

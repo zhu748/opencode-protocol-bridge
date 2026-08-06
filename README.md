@@ -1,12 +1,13 @@
 # OpenCode Protocol Bridge
 
-一个自托管的 OpenCode Zen / Go 协议中转服务。客户端可使用 Claude Messages、OpenAI Responses 或 Chat Completions 协议；服务会按模型选择 OpenCode 官方端点，并转换请求与响应格式。
+一个自托管的 OpenCode Zen / Go 协议中转服务。客户端可使用 Claude Messages、OpenAI Responses、Chat Completions 或 Google Gemini GenerateContent 协议；服务会按模型选择 OpenCode 官方端点，并转换请求与响应格式。
 
 ## 功能
 
 - `POST /zen/v1/messages|responses|chat/completions`：强制转发到 OpenCode Zen
 - `POST /go/v1/messages|responses|chat/completions`：强制转发到 OpenCode Go
 - `POST /v1/messages|responses|chat/completions`：兼容入口，按模型路由选择上游
+- `POST /v1beta/models/{model}:generateContent|streamGenerateContent`：Google Gemini 原生兼容入口；也支持 `/v1`、`/zen/v1`、`/zen/v1beta`、`/go/v1` 与 `/go/v1beta` 前缀
 - OpenCode Zen / Go 密钥和模型路由
 - 每个 Zen / Go Key 可独立配置 HTTP、HTTPS、SOCKS4、SOCKS4a、SOCKS5、SOCKS5h、Clash/mihomo mixed-port，或由 sing-box 托管的 hy2 / TUIC / VLESS / VMess / Trojan / Shadowsocks / Hysteria 分享链接
 - 工具调用、工具结果、并行工具开关、文本消息、图片精度字段，以及 Claude Documents 与 Responses 文件块转换
@@ -178,6 +179,24 @@ Authorization: Bearer YOUR_BRIDGE_TOKEN
 x-api-key: YOUR_BRIDGE_TOKEN
 ```
 
+或 Google Gemini 风格：
+
+```http
+x-goog-api-key: YOUR_BRIDGE_TOKEN
+```
+
+Gemini SDK/客户端使用模型 URL 调用，模型名不放在请求 JSON 中。例如：
+
+```http
+POST /v1beta/models/kimi-k2.6:generateContent
+Content-Type: application/json
+x-goog-api-key: YOUR_BRIDGE_TOKEN
+
+{"contents":[{"role":"user","parts":[{"text":"你好"}]}]}
+```
+
+流式入口为 `/v1beta/models/{model}:streamGenerateContent?alt=sse`。支持 `systemInstruction`、文本、`inlineData`/`fileData` 图片与文件、常用 `generationConfig`、`functionDeclarations`（包括 `parametersJsonSchema`）、`functionCall`/`functionResponse` 和 SSE usage 转换。Google Search、code execution 等 Gemini 内置工具、`cachedContent`、安全策略、多候选、结构化/非文本输出等无法无损映射到当前 OpenCode 上游的能力会明确返回 400，不会静默丢弃；损坏的流式函数参数也会返回错误帧，而不会伪装成空对象。
+
 管理面板中的“主访问令牌”用于兼容单用户部署。多人或多设备使用时，建议在“客户端令牌”中为每个调用方创建独立令牌：令牌只在创建或轮换时显示一次，服务端仅保存 SHA-256 摘要；每个客户端可设置独立并发上限，并可随时停用、轮换或撤销。全局并发上限仍对所有客户端请求总数生效，推理、模型列表和单模型查询共享同一套准入计数。
 
 ### Key 独立代理
@@ -343,7 +362,7 @@ OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变�
 
 ## 当前边界
 
-- 本项目覆盖 Claude Messages、OpenAI Responses 和 Chat Completions 三个协议族；OpenCode 中使用 Google `generateContent` 原生端点的 Gemini 模型不在当前转换范围内。
+- 本项目覆盖 Claude Messages、OpenAI Responses、Chat Completions 和 Google Gemini `generateContent` 四个协议族；Gemini 同时接受 `/v1` 与 `/v1beta` 路径，并可使用 `x-goog-api-key`、`x-api-key` 或 Bearer 令牌。模型路由的目标协议仍是 OpenCode 官方支持的 Claude / Responses / Chat 三类，Gemini 是客户端输入输出协议。
 - 单个 JSON 请求体上限为 10 MiB，模型 ID 上限为 256 个字符；更大的 PDF 或其他文件应先使用目标服务的 Files API 上传，再通过 file ID 引用。
 - HTTP 请求目标只接受 origin-form 路径，不接受 absolute-form、network-path、反斜杠或 URL 片段；长度上限为 8 KiB，查询参数最多 64 项，`provider` 与 `window` 等单值参数不允许重复。请求头总量上限为 16 KiB、字段数上限为 128；认证、Cookie、Host、Origin、消息分帧、配置修订和可信代理相关头不允许重复。请求头最长等待 15 秒，请求体最长等待 30 秒，每条 Keep-Alive 连接最多处理 1000 个请求。响应流本身不受这两个接收超时影响。
 - 所有 JSON 请求体只接受 `application/json` 或 `application/*+json`，不接受 gzip/br 等压缩 `Content-Encoding`；错误媒体类型返回 415。HTTP/1.1 必须携带 Host，冲突的 `Content-Length` / `Transfer-Encoding` 会在进入应用前由严格解析器拒绝。

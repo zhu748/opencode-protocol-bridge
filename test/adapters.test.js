@@ -2,12 +2,69 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, hasUsageData } from '../src/adapters.js';
 
-test('识别三种兼容端点', () => {
+test('识别四种兼容端点', () => {
   assert.equal(detectProtocol('/v1/messages'), 'claude');
   assert.equal(detectProtocol('/v1/responses'), 'responses');
   assert.equal(detectProtocol('/v1/chat/completions'), 'chat');
   assert.equal(detectProtocol('/zen/v1/messages'), 'claude');
   assert.equal(detectProtocol('/go/v1/responses'), 'responses');
+  assert.equal(detectProtocol('/v1beta/models/gemini-2.5-pro:generateContent'), 'gemini');
+  assert.equal(detectProtocol('/zen/v1/models/google%2Fgemini:streamGenerateContent'), 'gemini');
+});
+
+test('Gemini generateContent 请求可转换为 Responses', () => {
+  const source = {
+    model: 'gemini-alias', stream: false,
+    systemInstruction: { parts: [{ text: '你是助手' }] },
+    contents: [
+      { role: 'user', parts: [{ text: '看看图片' }, { inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' } }] },
+      { role: 'model', parts: [{ functionCall: { id: 'call_1', name: 'lookup', args: { city: '上海' } } }] },
+      { role: 'user', parts: [{ functionResponse: { id: 'call_1', name: 'lookup', response: { weather: '晴' } } }] }
+    ],
+    tools: [{ functionDeclarations: [{ name: 'lookup', description: '查询', parametersJsonSchema: { type: 'object', properties: { city: { type: 'string' } } } }] }],
+    toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['lookup'] } },
+    generationConfig: { maxOutputTokens: 512, temperature: 0.2, topP: 0.9 }
+  };
+  const output = prepareUpstreamRequest(source, 'gemini', 'responses', 'gpt-5.6-terra');
+  assert.equal(output.model, 'gpt-5.6-terra');
+  assert.equal(output.instructions, '你是助手');
+  assert.equal(output.max_output_tokens, 512);
+  assert.equal(output.input[0].content[1].type, 'input_image');
+  assert.match(output.input[0].content[1].image_url, /^data:image\/png;base64,/);
+  assert.deepEqual(output.tool_choice, { type: 'function', name: 'lookup' });
+  assert.equal(output.input[1].type, 'function_call');
+  assert.equal(output.input[2].type, 'function_call_output');
+  assert.equal(output.tools[0].name, 'lookup');
+  assert.equal(output.tools[0].parameters.properties.city.type, 'string');
+});
+
+test('OpenAI 响应可转换为 Gemini GenerateContentResponse', () => {
+  const source = {
+    id: 'chat_1', model: 'kimi-k2.6',
+    choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: '先查询', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{"city":"上海"}' } }] } }],
+    usage: { prompt_tokens: 8, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 2 }, completion_tokens_details: { reasoning_tokens: 1 } }
+  };
+  const output = formatResponse(normalizeResponse(source, 'chat'), 'gemini');
+  assert.equal(output.candidates[0].content.role, 'model');
+  assert.equal(output.candidates[0].content.parts[0].text, '先查询');
+  assert.deepEqual(output.candidates[0].content.parts[1].functionCall, { name: 'lookup', args: { city: '上海' }, id: 'call_1' });
+  assert.equal(output.candidates[0].finishReason, 'STOP');
+  assert.deepEqual(output.usageMetadata, { promptTokenCount: 8, candidatesTokenCount: 4, totalTokenCount: 12, cachedContentTokenCount: 2, thoughtsTokenCount: 1 });
+});
+
+test('Gemini 不可无损转换的原生能力会返回明确错误', () => {
+  assert.throws(() => normalizeRequest({ contents: [{ role: 'user', parts: [{ text: '搜索' }] }], tools: [{ googleSearch: {} }] }, 'gemini'), /内置工具/);
+  assert.throws(() => normalizeRequest({ contents: [{ role: 'user', parts: [{ text: '缓存' }] }], cachedContent: 'cachedContents/1' }, 'gemini'), /cachedContent/);
+  assert.throws(() => normalizeRequest({ contents: [], toolConfig: {} }, 'gemini'), /contents/);
+  assert.throws(() => normalizeRequest({ contents: [{ role: 'user', parts: [{ text: '工具' }] }], toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['a', 'b'] } } }, 'gemini'), /多个 allowedFunctionNames/);
+  assert.throws(() => normalizeRequest({ contents: [{ role: 'system', parts: [{ text: '错误角色' }] }] }, 'gemini'), /Content role/);
+  assert.throws(() => normalizeRequest({ systemInstruction: { parts: [{ inlineData: { mimeType: 'image/png', data: 'AA==' } }] }, contents: [{ parts: [{ text: '测试' }] }] }, 'gemini'), /systemInstruction/);
+  assert.throws(() => normalizeRequest({ contents: [{ parts: [] }] }, 'gemini'), /parts 必须是非空数组/);
+  assert.throws(() => normalizeRequest({ contents: [{ parts: [{ text: '冲突', inlineData: { mimeType: 'image/png', data: 'AA==' } }] }] }, 'gemini'), /只能包含一种/);
+  assert.throws(() => normalizeRequest({ contents: [{ parts: [{ inlineData: { mimeType: 'image/png' } }] }] }, 'gemini'), /inlineData/);
+  assert.throws(() => normalizeRequest({ contents: [{ parts: [{ functionCall: { name: 'run', args: 'bad' } }] }] }, 'gemini'), /args 必须是对象/);
+  assert.throws(() => normalizeRequest({ contents: [{ parts: [{ text: '多候选' }] }], generationConfig: { candidateCount: 2 } }, 'gemini'), /candidateCount=1/);
+  assert.throws(() => normalizeRequest({ contents: [{ parts: [{ text: '安全设置' }] }], safetySettings: [{ category: 'HARM_CATEGORY_HARASSMENT' }] }, 'gemini'), /safetySettings/);
 });
 
 test('根据模型选择 OpenCode 官方协议', () => {

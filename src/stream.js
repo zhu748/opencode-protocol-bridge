@@ -271,10 +271,30 @@ function chatSse(data) {
   return `data: ${JSON.stringify(data)}\n\n`;
 }
 
+function geminiSse(data) {
+  return `data: ${JSON.stringify(data)}\n\n`;
+}
+
+function geminiFinishReason(reason) {
+  return ['length', 'max_tokens', 'max_output_tokens'].includes(reason) ? 'MAX_TOKENS' : 'STOP';
+}
+
+function geminiToolArguments(block) {
+  try {
+    const parsed = JSON.parse(block.arguments || '{}');
+    if (block.name === 'Read' && parsed && !Array.isArray(parsed) && typeof parsed === 'object' && parsed.pages === '') delete parsed.pages;
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('工具参数不是 JSON 对象');
+    return parsed;
+  } catch {
+    throw Object.assign(new Error(`上游工具 ${block.name || 'unknown'} 返回了无效 JSON 参数`), { code: 'UPSTREAM_INVALID_TOOL_ARGUMENTS' });
+  }
+}
+
 export async function* translateSse(response, sourceProtocol, targetProtocol, fallbackModel, options = {}) {
   const id = targetProtocol === 'claude' ? `msg_${randomUUID().replaceAll('-', '')}`
     : targetProtocol === 'responses' ? `resp_${randomUUID().replaceAll('-', '')}`
-      : `chatcmpl-${randomUUID()}`;
+      : targetProtocol === 'gemini' ? `gemini-${randomUUID()}`
+        : `chatcmpl-${randomUUID()}`;
   let responseId = id;
   let model = fallbackModel;
   let inputTokens = 0;
@@ -307,6 +327,8 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
         const message = event.error?.message || String(event.error || '上游流式响应失败');
         const code = event.error?.code || event.error?.type || 'upstream_error';
         yield responseSse('error', { type: 'error', code, message, param: event.error?.param ?? null });
+      } else if (targetProtocol === 'gemini') {
+        yield geminiSse({ error: { code: 502, message: event.error?.message || String(event.error || '上游流式响应失败'), status: 'INTERNAL' } });
       } else yield sse('error', { type: 'error', error: event.error });
       return;
     }
@@ -315,7 +337,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       responseId = event.id || responseId; model = event.model || model; inputTokens = event.inputTokens || 0; cachedInputTokens = event.cachedInputTokens || 0; cacheCreationInputTokens = event.cacheCreationInputTokens || 0;
       if (targetProtocol === 'claude') yield sse('message_start', { type: 'message_start', message: { id: responseId, type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: inputTokens, output_tokens: 0, ...(cachedInputTokens ? { cache_read_input_tokens: cachedInputTokens } : {}), ...(cacheCreationInputTokens ? { cache_creation_input_tokens: cacheCreationInputTokens } : {}) } } });
       else if (targetProtocol === 'responses') yield responseSse('response.created', { type: 'response.created', response: { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), status: 'in_progress', model, output: [], parallel_tool_calls: responseParallelToolCalls, tool_choice: responseToolChoice, tools: responseTools, usage: null } });
-      else yield chatSse({ id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] });
+      else if (targetProtocol !== 'gemini') yield chatSse({ id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] });
       continue;
     }
     if (!responseStarted) continue;
@@ -361,6 +383,10 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
           : event.type === 'reasoning_delta' ? 'response.reasoning_summary_text.delta'
             : 'response.function_call_arguments.delta';
         yield responseSse(name, { type: name, item_id: block.item.id, output_index: index, ...(event.type === 'text_delta' ? { content_index: 0, logprobs: [] } : {}), ...(event.type === 'reasoning_delta' ? { summary_index: 0 } : {}), delta: event.delta });
+      } else if (targetProtocol === 'gemini' && (event.type === 'text_delta' || event.type === 'reasoning_delta')) {
+        yield geminiSse({ candidates: [{ content: { role: 'model', parts: [{ text: event.delta, ...(event.type === 'reasoning_delta' ? { thought: true } : {}) }] }, index: 0 }] });
+      } else if (targetProtocol === 'gemini' && event.type === 'tool_delta') {
+        // Gemini 的 functionCall.args 必须是完整对象，等 block_stop 后一次发送。
       } else if (event.type === 'text_delta') {
         yield chatSse({ id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: event.delta }, finish_reason: null }] });
       } else if (event.type === 'reasoning_delta') {
@@ -407,6 +433,9 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
         block.item.status = 'completed';
         yield responseSse('response.output_item.done', { type: 'response.output_item.done', output_index: index, item: block.item });
       }
+      else if (targetProtocol === 'gemini' && block.type === 'tool') {
+        yield geminiSse({ candidates: [{ content: { role: 'model', parts: [{ functionCall: { name: block.name, args: geminiToolArguments(block), id: block.id } }] }, index: 0 }] });
+      }
       continue;
     }
     if (event.type === 'done') {
@@ -422,6 +451,18 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
         const incomplete = ['length', 'max_tokens', 'max_output_tokens'].includes(event.stopReason);
         const final = { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), status: incomplete ? 'incomplete' : 'completed', ...(incomplete ? { incomplete_details: { reason: 'max_output_tokens' } } : {}), model, output, parallel_tool_calls: responseParallelToolCalls, tool_choice: responseToolChoice, tools: responseTools, usage: { input_tokens: inputTokens, input_tokens_details: { cached_tokens: cachedInputTokens, cache_write_tokens: cacheCreationInputTokens }, output_tokens: outputTokens, output_tokens_details: { reasoning_tokens: reasoningTokens }, total_tokens: normalizeUsageCount(inputTokens + outputTokens) } };
         yield responseSse(incomplete ? 'response.incomplete' : 'response.completed', { type: incomplete ? 'response.incomplete' : 'response.completed', response: final });
+      } else if (targetProtocol === 'gemini') {
+        yield geminiSse({
+          candidates: [{ content: { role: 'model', parts: [] }, finishReason: geminiFinishReason(event.stopReason), index: 0 }],
+          usageMetadata: {
+            promptTokenCount: inputTokens, candidatesTokenCount: outputTokens,
+            totalTokenCount: normalizeUsageCount(inputTokens + outputTokens),
+            ...(cachedInputTokens ? { cachedContentTokenCount: cachedInputTokens } : {}),
+            ...(reasoningTokens ? { thoughtsTokenCount: reasoningTokens } : {})
+          },
+          modelVersion: model,
+          responseId
+        });
       } else {
         const promptDetails = (cachedInputTokens || cacheCreationInputTokens) ? { ...(cachedInputTokens ? { cached_tokens: cachedInputTokens } : {}), ...(cacheCreationInputTokens ? { cache_creation_tokens: cacheCreationInputTokens } : {}) } : undefined;
         yield chatSse({ id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: {}, finish_reason: hasTools ? 'tool_calls' : (['length', 'max_tokens', 'max_output_tokens'].includes(event.stopReason) ? 'length' : 'stop') }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: normalizeUsageCount(inputTokens + outputTokens), ...(promptDetails ? { prompt_tokens_details: promptDetails } : {}), ...(reasoningTokens ? { completion_tokens_details: { reasoning_tokens: reasoningTokens } } : {}) } });

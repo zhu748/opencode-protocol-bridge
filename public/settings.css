@@ -1208,3 +1208,8 @@
   color: var(--muted);
   font-weight: 400;
 }
+
+.protocol-orbit .p4 {
+  right: 12px;
+  bottom: 25px;
+}

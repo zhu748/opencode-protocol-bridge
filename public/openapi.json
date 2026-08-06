@@ -3,14 +3,14 @@
   "info": {
     "title": "OpenCode Protocol Bridge API",
     "version": "1.0.0",
-    "description": "Claude Messages、OpenAI Responses 与 Chat Completions 兼容中转接口。"
+    "description": "Claude Messages、OpenAI Responses、Chat Completions 与 Google Gemini GenerateContent 兼容中转接口。"
   },
   "servers": [
     { "url": "/zen/v1", "description": "强制转发到 OpenCode Zen" },
     { "url": "/go/v1", "description": "强制转发到 OpenCode Go" },
     { "url": "/v1", "description": "兼容入口，按模型路由选择上游" }
   ],
-  "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }],
+  "security": [{ "bearerAuth": [] }, { "apiKeyAuth": [] }, { "googleApiKeyAuth": [] }],
   "paths": {
     "/models": {
       "get": {
@@ -46,6 +46,24 @@
         "requestBody": { "required": true, "description": "JSON 请求体最大 10 MiB", "content": { "application/json": { "schema": { "type": "object", "required": ["model", "messages"], "properties": { "model": { "$ref": "#/components/schemas/ModelId" }, "stream": { "type": "boolean" }, "messages": { "type": "array" } } } } } },
         "responses": { "200": { "description": "Chat Completion 或 SSE 流", "headers": { "x-request-id": { "$ref": "#/components/headers/LocalRequestId" }, "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" }, "504": { "$ref": "#/components/responses/UpstreamTimeout" } }
       }
+    },
+    "/models/{model}:generateContent": {
+      "post": {
+        "summary": "Google Gemini GenerateContent 兼容接口",
+        "servers": [{ "url": "/v1beta" }, { "url": "/v1" }, { "url": "/zen/v1beta" }, { "url": "/zen/v1" }, { "url": "/go/v1beta" }, { "url": "/go/v1" }],
+        "parameters": [{ "name": "model", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/ModelId" } }],
+        "requestBody": { "required": true, "description": "Google GenerateContentRequest；JSON 请求体最大 10 MiB", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenerateContentRequest" } } } },
+        "responses": { "200": { "description": "Google GenerateContentResponse", "headers": { "x-request-id": { "$ref": "#/components/headers/LocalRequestId" }, "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" }, "504": { "$ref": "#/components/responses/UpstreamTimeout" } }
+      }
+    },
+    "/models/{model}:streamGenerateContent": {
+      "post": {
+        "summary": "Google Gemini StreamGenerateContent SSE 兼容接口",
+        "servers": [{ "url": "/v1beta" }, { "url": "/v1" }, { "url": "/zen/v1beta" }, { "url": "/zen/v1" }, { "url": "/go/v1beta" }, { "url": "/go/v1" }],
+        "parameters": [{ "name": "model", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/ModelId" } }, { "name": "alt", "in": "query", "schema": { "type": "string", "enum": ["sse"] }, "description": "Google SDK 通常传入 alt=sse；该端点始终返回 SSE。" }],
+        "requestBody": { "required": true, "description": "Google GenerateContentRequest；JSON 请求体最大 10 MiB", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenerateContentRequest" } } } },
+        "responses": { "200": { "description": "GenerateContentResponse SSE 数据帧（无 [DONE]）", "headers": { "x-request-id": { "$ref": "#/components/headers/LocalRequestId" }, "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" }, "504": { "$ref": "#/components/responses/UpstreamTimeout" } }
+      }
     }
   },
   "components": {
@@ -57,7 +75,8 @@
       "Allow": { "description": "该端点允许的 HTTP 方法。", "schema": { "type": "string", "enum": ["GET", "POST"] } }
     },
     "schemas": {
-      "ModelId": { "type": "string", "minLength": 1, "maxLength": 256 }
+      "ModelId": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "GenerateContentRequest": { "type": "object", "required": ["contents"], "properties": { "contents": { "type": "array", "minItems": 1 }, "systemInstruction": { "type": "object" }, "generationConfig": { "type": "object" }, "tools": { "type": "array" }, "toolConfig": { "type": "object" } } }
     },
     "responses": {
       "InvalidRequest": { "description": "请求格式或跨协议参数不兼容", "headers": { "x-request-id": { "$ref": "#/components/headers/LocalRequestId" } } },
@@ -72,7 +91,8 @@
     },
     "securitySchemes": {
       "bearerAuth": { "type": "http", "scheme": "bearer", "description": "管理面板生成或自定义的客户端令牌；自定义值为 6–256 位英文字母或数字。" },
-      "apiKeyAuth": { "type": "apiKey", "in": "header", "name": "x-api-key", "description": "与 Bearer 令牌相同。" }
+      "apiKeyAuth": { "type": "apiKey", "in": "header", "name": "x-api-key", "description": "与 Bearer 令牌相同。" },
+      "googleApiKeyAuth": { "type": "apiKey", "in": "header", "name": "x-goog-api-key", "description": "Gemini SDK 风格认证；填写桥接客户端令牌，不是 Google 或 OpenCode 上游 Key。" }
     }
   }
 }

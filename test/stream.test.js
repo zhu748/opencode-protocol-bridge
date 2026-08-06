@@ -135,6 +135,29 @@ test('Chat SSE 文本可转换为 Responses SSE', async () => {
   assert.match(output, /response\.completed/);
 });
 
+test('Chat SSE 文本、工具和 usage 可转换为 Gemini SSE', async () => {
+  const source = responseFrom([
+    ['message', { id: 'chat_gemini', model: 'kimi', choices: [{ delta: { role: 'assistant', content: '正在查询' }, finish_reason: null }] }],
+    ['message', { id: 'chat_gemini', model: 'kimi', choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_weather', function: { name: 'weather', arguments: '{"city":"上海"}' } }] }, finish_reason: null }] }],
+    ['message', { id: 'chat_gemini', model: 'kimi', choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 6, completion_tokens: 3 } }]
+  ]);
+  const output = await collect(translateSse(source, 'chat', 'gemini', 'alias'));
+  const chunks = output.split(/\n\n/).filter(Boolean).map((block) => JSON.parse(block.slice('data: '.length)));
+  assert.equal(chunks[0].candidates[0].content.parts[0].text, '正在查询');
+  assert.deepEqual(chunks[1].candidates[0].content.parts[0].functionCall, { name: 'weather', args: { city: '上海' }, id: 'call_weather' });
+  assert.equal(chunks.at(-1).candidates[0].finishReason, 'STOP');
+  assert.deepEqual(chunks.at(-1).usageMetadata, { promptTokenCount: 6, candidatesTokenCount: 3, totalTokenCount: 9 });
+  assert.doesNotMatch(output, /\[DONE\]/);
+});
+
+test('转换 Gemini SSE 时不会把损坏的工具参数静默伪装为空对象', async () => {
+  const source = responseFrom([
+    ['message', { id: 'chat_bad_args', model: 'kimi', choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_bad', function: { name: 'run', arguments: '{bad' } }] }, finish_reason: null }] }],
+    ['message', { id: 'chat_bad_args', model: 'kimi', choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }]
+  ]);
+  await assert.rejects(collect(translateSse(source, 'chat', 'gemini', 'alias')), /无效 JSON 参数/);
+});
+
 test('Chat SSE 独立 usage 事件会进入最终响应和日志回调', async () => {
   const source = responseFrom([
     ['message', { id: 'chat_usage', model: 'kimi', choices: [{ delta: { role: 'assistant', content: '完成' }, finish_reason: null }] }],

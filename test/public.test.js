@@ -154,7 +154,7 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
 test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async () => {
   const spec = JSON.parse(await readFile(resolve(publicDir, 'openapi.json'), 'utf8'));
   assert.equal(spec.openapi, '3.1.0');
-  assert.deepEqual(Object.keys(spec.paths).sort(), ['/chat/completions', '/messages', '/models', '/models/{model}', '/responses']);
+  assert.deepEqual(Object.keys(spec.paths).sort(), ['/chat/completions', '/messages', '/models', '/models/{model}', '/models/{model}:generateContent', '/models/{model}:streamGenerateContent', '/responses']);
   assert.equal(spec.components.schemas.ModelId.maxLength, 256);
   assert.ok(spec.paths['/responses'].post.responses['413']);
   assert.equal(spec.paths['/responses'].post.responses['504'].$ref, '#/components/responses/UpstreamTimeout');
@@ -173,10 +173,13 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.equal(spec.components.headers.UpstreamRequestId.schema.maxLength, 256);
   assert.equal(spec.components.responses.RateLimited.headers['Retry-After'].$ref, '#/components/headers/RetryAfter');
   assert.equal(spec.components.responses.MethodNotAllowed.headers.Allow.$ref, '#/components/headers/Allow');
-  for (const [path, method] of [['/models', 'get'], ['/models/{model}', 'get'], ['/messages', 'post'], ['/responses', 'post'], ['/chat/completions', 'post']]) {
+  assert.equal(spec.components.securitySchemes.googleApiKeyAuth.name, 'x-goog-api-key');
+  assert.ok(spec.paths['/models/{model}:generateContent'].post.responses['200']);
+  for (const [path, method] of [['/models', 'get'], ['/models/{model}', 'get'], ['/messages', 'post'], ['/responses', 'post'], ['/chat/completions', 'post'], ['/models/{model}:generateContent', 'post'], ['/models/{model}:streamGenerateContent', 'post']]) {
     assert.equal(spec.paths[path][method].responses['405'].$ref, '#/components/responses/MethodNotAllowed');
   }
   assert.deepEqual(spec.servers.map((server) => server.url), ['/zen/v1', '/go/v1', '/v1']);
+  assert.deepEqual(spec.paths['/models/{model}:generateContent'].post.servers.map((server) => server.url), ['/v1beta', '/v1', '/zen/v1beta', '/zen/v1', '/go/v1beta', '/go/v1']);
   assert.ok(spec.components.securitySchemes.bearerAuth);
   assert.ok(spec.components.securitySchemes.apiKeyAuth);
 });

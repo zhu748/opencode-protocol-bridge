@@ -317,6 +317,39 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(sameResponsesBody.output[0].type, 'custom_tool_call');
     assert.deepEqual(sameResponsesBody.vendor_extension, { preserved: true });
 
+    const geminiResponse = await fetch(`http://127.0.0.1:${bridgePort}/v1beta/models/alias:generateContent`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': createdClient.token },
+      body: JSON.stringify({ systemInstruction: { parts: [{ text: 'Gemini 系统提示' }] }, contents: [{ role: 'user', parts: [{ text: 'Gemini 非流式测试' }] }], generationConfig: { maxOutputTokens: 64 } })
+    });
+    assert.equal(geminiResponse.status, 200);
+    const geminiBody = await geminiResponse.json();
+    assert.equal(geminiBody.candidates[0].content.parts[0].text, '转换成功');
+    assert.equal(geminiBody.candidates[0].finishReason, 'STOP');
+    assert.deepEqual(geminiBody.usageMetadata, { promptTokenCount: 7, candidatesTokenCount: 3, totalTokenCount: 10 });
+    assert.equal(captured.path, '/responses');
+    assert.equal(captured.body.model, 'gpt-test');
+    assert.equal(captured.body.instructions, 'Gemini 系统提示');
+    assert.equal(captured.body.input[0].content[0].text, 'Gemini 非流式测试');
+
+    const geminiStream = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1beta/models/alias:streamGenerateContent?alt=sse`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': createdClient.token },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Gemini 流式测试' }] }] })
+    });
+    assert.equal(geminiStream.status, 200);
+    assert.match(geminiStream.headers.get('content-type'), /^text\/event-stream/);
+    const geminiStreamText = await geminiStream.text();
+    assert.match(geminiStreamText, /"text":"实时"/);
+    assert.match(geminiStreamText, /"finishReason":"STOP"/);
+    assert.match(geminiStreamText, /"promptTokenCount":4/);
+    assert.doesNotMatch(geminiStreamText, /\[DONE\]/);
+
+    const unsupportedGemini = await fetch(`http://127.0.0.1:${bridgePort}/v1beta/models/alias:generateContent`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': createdClient.token },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: '多候选测试' }] }], generationConfig: { candidateCount: 2 } })
+    });
+    assert.equal(unsupportedGemini.status, 400);
+    assert.deepEqual(await unsupportedGemini.json(), { error: { code: 400, message: '跨协议转换仅支持 Gemini candidateCount=1', status: 'INVALID_ARGUMENT' } });
+
     const unsupportedCrossProtocol = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
       body: JSON.stringify({ model: 'claude-alias', input: '搜索', tools: [{ type: 'web_search' }] })
