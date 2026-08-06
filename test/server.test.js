@@ -43,6 +43,13 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.equal(healthBody.ok, true);
     assert.equal(healthBody.ready, false);
     assert.equal(healthBody.configured, false);
+    const healthz = await fetch(`http://127.0.0.1:${port}/healthz`);
+    assert.equal(healthz.status, 200);
+    assert.equal(healthz.headers.get('cache-control'), 'no-store');
+    const healthzBody = await healthz.json();
+    assert.equal(healthzBody.ok, healthBody.ok);
+    assert.equal(healthzBody.ready, healthBody.ready);
+    assert.equal(healthzBody.configured, healthBody.configured);
     const manyHeaders = Object.fromEntries(Array.from({ length: 140 }, (_, index) => [`x-test-${index}`, '1']));
     const excessiveHeaders = await fetch(`http://127.0.0.1:${port}/health`, { headers: manyHeaders });
     assert.equal(excessiveHeaders.status, 431);

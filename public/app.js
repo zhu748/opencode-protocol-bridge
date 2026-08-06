@@ -123,10 +123,22 @@ function fillProxyPreset(button) {
   const field = $(button.dataset.proxyTarget);
   if (!field) return;
   field.value = button.dataset.proxyValue;
-  if (field.id === 'proxyUrl') markConfigDirty('settings');
+  if (field.id === 'proxyUrl') {
+    markConfigDirty('settings');
+    renderDefaultProxyStatus();
+  }
   if (field.id === 'providerCredentialProxy') $('#providerCredentialClearProxy').checked = false;
   field.focus();
   toast(`已填入代理：${button.dataset.proxyValue}`);
+}
+
+function renderDefaultProxyStatus() {
+  const state = $('#default-proxy-state');
+  const draft = $('#proxyUrl').value.trim();
+  state.classList.toggle('pending', Boolean(draft));
+  state.classList.toggle('enabled', !draft && Boolean(config.proxyConfigured));
+  state.textContent = draft ? '新代理待保存' : config.proxyConfigured ? '默认代理已启用' : '当前直连';
+  state.title = draft ? '检测成功后仍需点击“保存设置”才会正式启用' : state.textContent;
 }
 
 function renderDataSourceFailures() {
@@ -252,6 +264,7 @@ async function refresh() {
     $('#maxConcurrentRequests').value = config.maxConcurrentRequests;
     $('#clientToken').placeholder = config.clientToken ? `当前：${config.clientToken}` : '填写客户端访问令牌';
   }
+  renderDefaultProxyStatus();
   $('#encryption-state').textContent = config.encryptionEnabled ? '配置已加密' : '配置未加密';
   $('#encryption-state').classList.toggle('enabled', config.encryptionEnabled);
   const singBox = config.singBoxRuntime || {};
@@ -263,6 +276,7 @@ async function refresh() {
     ? `来源：${singBoxSources[singBox.source] || '未知'}`
     : 'hy2/TUIC/VLESS/VMess 等分享链接需要安装 sing-box';
   $('#sing-box-state').classList.toggle('enabled', Boolean(singBox.available));
+  $('#sing-box-state').classList.toggle('unavailable', !singBox.available);
   if (!dirtyConfigSections.has('routes')) {
     $('#modelRoutes').value = JSON.stringify(config.modelRoutes || {}, null, 2);
     renderRouteList(config.modelRoutes || {});
@@ -695,14 +709,14 @@ function providerCredentialTestPayload(provider, credentialId = '') {
   };
 }
 
-async function testProviderCredential(payload, button) {
+async function testProviderCredential(payload, button, { pendingText = '连接中…', successText = '连接成功' } = {}) {
   const original = button.textContent;
   button.disabled = true;
-  button.textContent = '连接中…';
+  button.textContent = pendingText;
   try {
     const result = await api('/api/models/test', { method: 'POST', body: JSON.stringify(payload) });
     const count = Array.isArray(result.data) ? result.data.length : 0;
-    toast(`连接成功，获取到 ${count} 个模型`);
+    toast(`${successText}，获取到 ${count} 个模型`);
   } catch (error) { toast(`连接失败：${error.message}`); }
   finally { button.disabled = false; button.textContent = original; }
 }
@@ -791,6 +805,7 @@ $$('nav button').forEach((button) => button.addEventListener('click', async () =
 }));
 
 $('#settings-form').addEventListener('input', () => markConfigDirty('settings'));
+$('#proxyUrl').addEventListener('input', renderDefaultProxyStatus);
 $('#settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   try {
@@ -1123,6 +1138,16 @@ $('#test-provider-credential').addEventListener('click', (event) => {
   const payload = providerCredentialTestPayload(provider, credentialId);
   if (!payload.apiKey && !payload.credentialId) return toast('请先填写 API Key');
   return testProviderCredential(payload, event.currentTarget);
+});
+
+$('#test-default-proxy').addEventListener('click', (event) => {
+  const proxyUrl = $('#proxyUrl').value.trim();
+  if (!proxyUrl && !config.proxyConfigured) return toast('请先填写代理地址');
+  return testProviderCredential({
+    provider: $('#defaultProvider').value,
+    proxyScope: 'default',
+    ...(proxyUrl ? { proxyUrl } : {})
+  }, event.currentTarget, { pendingText: '检测中…', successText: '代理可用' });
 });
 
 $('#provider-credential-list').addEventListener('click', async (event) => {

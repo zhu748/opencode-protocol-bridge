@@ -10,5 +10,5 @@ ENV NODE_ENV=production HOST=0.0.0.0 PORT=8787 OPENCODE_BRIDGE_SING_BOX_PATH=/ap
 EXPOSE 8787
 VOLUME ["/app/data"]
 USER node
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8787/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8787/healthz || exit 1
 CMD ["node", "src/server.js"]

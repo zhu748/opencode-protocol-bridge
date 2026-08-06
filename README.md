@@ -127,7 +127,7 @@ npm start
 docker compose up -d --build
 ```
 
-Compose 默认只映射到本机 `127.0.0.1:8787`，配置保存在命名卷 `bridge-data` 中。镜像构建时默认会下载 sing-box 到 `/app/vendor/sing-box/sing-box`，因此容器内也能托管 hy2/TUIC/VLESS/VMess 等分享链接；如需禁用下载，可设置构建参数 `INSTALL_SING_BOX=false` 并改为挂载/指定自己的 `OPENCODE_BRIDGE_SING_BOX_PATH`。容器以非 root 用户运行，并通过 `/health` 执行健康检查。
+Compose 默认只映射到本机 `127.0.0.1:8787`，配置保存在命名卷 `bridge-data` 中。镜像构建时默认会下载 sing-box 到 `/app/vendor/sing-box/sing-box`，因此容器内也能托管 hy2/TUIC/VLESS/VMess 等分享链接；如需禁用下载，可设置构建参数 `INSTALL_SING_BOX=false` 并改为挂载/指定自己的 `OPENCODE_BRIDGE_SING_BOX_PATH`。容器以非 root 用户运行，并通过 `/healthz` 执行健康检查；原 `/health` 路径继续作为兼容别名。
 启动 Compose 前可在 PowerShell 中设置 `$env:CONFIG_ENCRYPTION_KEY`，该变量会传入容器用于配置加密。
 
 如需公网访问，建议继续保持服务监听在本机，并使用 Caddy、Nginx 等反向代理提供 HTTPS。SSE 代理必须关闭响应缓冲并设置足够长的读取超时；不要直接将未加密的 `8787` 端口暴露到公网。
@@ -136,7 +136,7 @@ Compose 默认只映射到本机 `127.0.0.1:8787`，配置保存在命名卷 `br
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/zhu748/opencode-protocol-bridge)
 
-仓库根目录的 `render.yaml` 会创建一个新加坡区域的免费 Node Web Service，自动执行 `npm ci --omit=dev --ignore-scripts`、显式安装固定版本 sing-box、运行 `npm start`，并使用 `/health` 进行健康检查。在 Render 创建 Blueprint 时填写：
+仓库根目录的 `render.yaml` 会创建一个新加坡区域的免费 Node Web Service，自动执行 `npm ci --omit=dev --ignore-scripts`、显式安装固定版本 sing-box、运行 `npm start`，并使用 `/healthz` 进行健康检查。在 Render 创建 Blueprint 时填写：
 
 - `OPENCODE_BRIDGE_ADMIN_PASSWORD`：**必填，不可留空**的管理面板密码，至少 6 位，仅使用英文字母或数字。
 - `OPENCODE_BRIDGE_CLIENT_TOKEN`：**必填，不可留空**的客户端调用令牌，至少 6 位，仅使用英文字母或数字。
@@ -178,7 +178,7 @@ x-api-key: YOUR_BRIDGE_TOKEN
 
 ### Key 独立代理
 
-“连接设置”可以分别为 Zen Key 和 Go Key 指定代理。独立代理优先于默认代理；未配置独立代理时回退到默认代理，默认代理也未配置则直连。代理保存后只向页面返回脱敏地址，输入框留空表示保持原值；需要取消代理时使用对应的“清除代理”按钮。支持以下可被 Node.js 直接使用的 HTTP/SOCKS 写法：
+“连接设置”的“代理与托管隧道”区域可以设置默认代理，每把 Zen / Go Key 也可以指定独立代理。填写地址并保存即启用，清除后恢复直连，不需要额外开关。独立代理优先于默认代理；未配置独立代理时回退到默认代理，默认代理也未配置则直连。代理保存后只向页面返回脱敏地址，输入框留空表示保持原值；需要取消代理时使用对应的“清除代理”按钮。“检测代理”会使用当前默认上游的一把可用 Key，经输入框中的代理拉取模型列表，可以在保存前验证新节点。支持以下可被 Node.js 直接使用的 HTTP/SOCKS 写法：
 
 ```text
 http://127.0.0.1:7890
@@ -370,7 +370,7 @@ npm run rekey
 - 命名客户端令牌由高强度随机数生成，配置中仅保存不可逆摘要；主访问令牌仍受 `CONFIG_ENCRYPTION_KEY` 加密保护。
 - 请求日志不包含提示词、响应正文或密钥。持久化默认关闭，启用后应像其他运行日志一样限制文件访问权限。
 - 依赖安装默认关闭第三方生命周期脚本并使用 `package-lock.json`；CI 固定第三方 Action 的完整提交 SHA，执行生产依赖漏洞与 npm 注册表签名审计，并为 Node 24 构建生成保留 14 天的 CycloneDX SBOM。也可在本地运行 `npm run --silent sbom:prod` 输出依赖清单。
-- `/health` 中的 `ready` 只有在管理密码、至少一个可用客户端令牌和至少一个上游密钥均已配置时才为 `true`。
+- `/healthz`（兼容别名 `/health`）中的 `ready` 只有在管理密码、至少一个可用客户端令牌和至少一个上游密钥均已配置时才为 `true`。
 
 ## 验证
 

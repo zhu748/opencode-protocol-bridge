@@ -6,7 +6,7 @@ services:
     region: singapore
     buildCommand: npm ci --omit=dev --ignore-scripts && npm run install:sing-box
     startCommand: npm start
-    healthCheckPath: /health
+    healthCheckPath: /healthz
     autoDeployTrigger: commit
     maxShutdownDelaySeconds: 30
     envVars:

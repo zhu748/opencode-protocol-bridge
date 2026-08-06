@@ -60,8 +60,14 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /renderRecentPrompt\(\{\}\)/);
   assert.doesNotMatch(script, /api\('\/api\/config'\), api\('\/api\/logs'\), api\('\/api\/status'\), api\('\/api\/clients'\)/);
   assert.match(html, /TUIC\/VLESS\/VMess/);
+  assert.match(html, /id="default-proxy-state"/);
+  assert.match(html, /id="test-default-proxy"[^>]*>检测代理<\/button>/);
   assert.match(html, /data-proxy-value="mixed:\/\/127\.0\.0\.1:7890"/);
   assert.match(script, /function fillProxyPreset\(button\)/);
+  assert.match(script, /function renderDefaultProxyStatus\(\)/);
+  assert.match(script, /test-default-proxy[\s\S]*?proxyScope: 'default'/);
+  assert.match(script, /successText: '代理可用'/);
+  assert.match(settings, /\.proxy-config-card/);
   assert.match(script, /providerCredentialClearProxy'\)\.checked = false/);
   assert.match(settings, /flex-wrap: wrap/);
   assert.match(html, /id="imageHandoffCredential"/);
@@ -82,6 +88,7 @@ test('管理面板脚本引用的静态元素均存在', async () => {
 test('Render Blueprint 暴露批量 Key、逐项代理、远程图片交接和 sing-box 变量', async () => {
   const blueprint = await readFile(resolve(projectDir, 'render.yaml'), 'utf8');
   assert.match(blueprint, /buildCommand: npm ci --omit=dev --ignore-scripts && npm run install:sing-box/);
+  assert.match(blueprint, /healthCheckPath: \/healthz/);
   for (const name of ['OPENCODE_ZEN_KEYS', 'OPENCODE_GO_KEYS', 'OPENCODE_ZEN_PROXY_URLS', 'OPENCODE_GO_PROXY_URLS', 'OPENCODE_BRIDGE_MAX_ADMIN_MUTATIONS', 'OPENCODE_BRIDGE_MAX_ADMIN_MODEL_DISCOVERIES', 'OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS', 'OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_MAX_BYTES', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_LOCAL_RETENTION_MS', 'OPENCODE_BRIDGE_SING_BOX_PATH', 'OPENCODE_BRIDGE_SING_BOX_VERSION']) {
     assert.equal((blueprint.match(new RegExp(`key: ${name}\\b`, 'g')) || []).length, 1, `${name} 应出现一次`);
   }
@@ -112,6 +119,7 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
   assert.match(localLauncher, /Node\.js 22\.20\+ or 24\.11\+/);
   assert.match(dockerfile, /^FROM node:24\.18\.1-alpine3\.24$/m);
   assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
+  assert.match(dockerfile, /HEALTHCHECK .*http:\/\/127\.0\.0\.1:8787\/healthz/);
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
   assert.match(workflow, /node-version: \[22\.23\.2, 24\.18\.1\]/);
   const actionReferences = [...workflow.matchAll(/\buses:\s+([^\s#]+)/g)].map((match) => match[1]);

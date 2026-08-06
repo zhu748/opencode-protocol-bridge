@@ -57,11 +57,18 @@
       </section>
 
       <section id="settings" class="view">
-        <div class="section-intro"><h3>连接设置</h3><p>密钥保存在本机 <code>data/config.json</code>，页面只显示遮罩。<span id="encryption-state" class="security-state"></span><span id="sing-box-state" class="security-state"></span></p></div>
+        <div class="section-intro"><h3>连接设置</h3><p>密钥保存在本机 <code>data/config.json</code>，页面只显示遮罩。<span id="encryption-state" class="security-state"></span></p></div>
         <form id="settings-form" class="panel form-grid">
           <label>默认上游<select id="defaultProvider"><option value="zen">OpenCode Zen</option><option value="go">OpenCode Go</option></select></label>
-          <label>默认代理（可选回退）<input id="proxyUrl" autocomplete="off" placeholder="http://127.0.0.1:7890"><small>仅在对应 Key 未设置独立代理时使用；支持 HTTP(S)、SOCKS、mixed://，也可直接填写 hy2/TUIC/VLESS/VMess/Trojan/SS/Hysteria 分享链接（服务端需有 sing-box）。</small><span class="field-tools proxy-presets"><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="http://127.0.0.1:7890">HTTP 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:7890">SOCKS5h 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:1080">SOCKS5h 1080</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="mixed://127.0.0.1:7890">mixed://7890</button><button type="button" class="link-btn clear-proxy" data-provider="default">清除默认代理</button></span></label>
           <label>主访问令牌<input id="clientToken" type="password" minlength="6" maxlength="256" pattern="[A-Za-z0-9]{6,256}" autocomplete="off" placeholder="留空则保持原值"><small>自定义时须为 6–256 位英文字母或数字</small></label>
+          <section class="proxy-config-card" aria-labelledby="proxy-config-title">
+            <div class="proxy-config-head">
+              <div><span class="tag green">PROXY</span><h4 id="proxy-config-title">代理与托管隧道</h4><p>填写代理地址即启用，清除后恢复直连；单个 Key 的独立代理优先于这里的默认代理。</p></div>
+              <div class="proxy-runtime"><span id="default-proxy-state" class="security-state">当前直连</span><span id="sing-box-state" class="security-state"></span></div>
+            </div>
+            <label class="proxy-url-field">默认代理地址<input id="proxyUrl" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="vless://、vmess://、hy2:// 或 http://127.0.0.1:7890"><small>支持 HTTP(S)、SOCKS4/4a/5/5h、mixed://、hy2/TUIC/VLESS/VMess/Trojan/SS/Hysteria；分享链接由服务端 sing-box 按需启动。</small><span class="field-tools proxy-presets"><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="http://127.0.0.1:7890">HTTP 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:7890">SOCKS5h 7890</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="socks5h://127.0.0.1:1080">SOCKS5h 1080</button><button type="button" class="link-btn proxy-preset" data-proxy-target="#proxyUrl" data-proxy-value="mixed://127.0.0.1:7890">mixed://7890</button><button type="button" class="link-btn clear-proxy" data-provider="default">清除默认代理</button></span></label>
+            <div class="proxy-test-row"><small>检测时使用上方“默认上游”的一个可用 Key 拉取模型；可以先检测输入框中的新地址，再决定是否保存。</small><button id="test-default-proxy" class="ghost" type="button">检测代理</button></div>
+          </section>
           <label>日志保留条数<input id="requestLogLimit" type="number" min="10" max="1000"></label>
           <label class="check-field"><input id="persistLogs" type="checkbox"><span>持久化请求日志<small>仅保存请求元数据，不保存提示词和响应正文</small></span></label>
           <label>上游超时（毫秒）<input id="upstreamTimeoutMs" type="number" min="1000" max="600000" step="1000"></label>

@@ -970,7 +970,8 @@ async function adminApiOperation(req, res, url, config) {
     const selected = selection.credential;
     const apiKey = panelCredentialKey(body.apiKey) || selected?.apiKey || '';
     let proxyUrl;
-    try { proxyUrl = normalizeProxyUrl(body.proxyUrl ?? selected?.proxyUrl ?? providerProxyUrl(config, provider)); }
+    const proxyCandidate = body.proxyUrl ?? (body.proxyScope === 'default' ? config.proxyUrl : selected?.proxyUrl ?? providerProxyUrl(config, provider));
+    try { proxyUrl = normalizeProxyUrl(proxyCandidate); }
     catch (error) { return json(res, 400, { error: `代理地址无效：${error.message}` }); }
     if (!apiKey) {
       applyCredentialRetryHeader(res, selection);
@@ -1384,7 +1385,8 @@ const server = createServer({
       return json(res, 400, { error: message });
     }
     const publicImageMatch = url.pathname.match(/^\/_bridge\/images\/([a-f0-9]{64})$/);
-    if (url.pathname === '/health' || url.pathname.startsWith('/api/') || publicImageMatch || apiScope) res.setHeader('cache-control', 'no-store');
+    const healthEndpoint = url.pathname === '/health' || url.pathname === '/healthz';
+    if (healthEndpoint || url.pathname.startsWith('/api/') || publicImageMatch || apiScope) res.setHeader('cache-control', 'no-store');
     if (publicImageMatch) {
       if (!['GET', 'HEAD'].includes(req.method)) return json(res, 405, { error: '该接口仅支持 GET 或 HEAD' }, { allow: 'GET, HEAD' });
       const image = imageHandoff.acquirePublicImage(publicImageMatch[1]);
@@ -1410,7 +1412,7 @@ const server = createServer({
       }
     }
     const config = await loadConfig();
-    if (url.pathname === '/health') {
+    if (healthEndpoint) {
       return json(res, 200, { ok: true, ready: serviceReady(config), configured: Boolean(config.password), uptime: Math.floor(process.uptime()) });
     }
     if (url.pathname.startsWith('/api/')) return await adminApi(req, res, url, config);

@@ -5,6 +5,78 @@
   min-height: 20px;
 }
 
+.proxy-config-card {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 18px;
+  padding: 20px;
+  border: 1px solid #c8ff6428;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(200, 255, 100, .055), rgba(12, 15, 20, .8));
+}
+
+.proxy-config-head,
+.proxy-test-row,
+.proxy-runtime {
+  display: flex;
+  align-items: center;
+}
+
+.proxy-config-head {
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.proxy-config-head h4 {
+  margin: 5px 0 4px;
+  font-size: 16px;
+}
+
+.proxy-config-head p,
+.proxy-test-row small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.55;
+}
+
+.proxy-runtime {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.proxy-runtime .security-state {
+  margin-left: 0;
+}
+
+.proxy-url-field input {
+  font-family: Consolas, monospace;
+}
+
+.proxy-test-row {
+  justify-content: space-between;
+  gap: 18px;
+  padding-top: 2px;
+}
+
+.proxy-test-row .ghost {
+  flex: 0 0 auto;
+  min-width: 108px;
+}
+
+.security-state.pending {
+  border-color: rgba(245, 184, 75, .35);
+  color: #f5c76e;
+}
+
+.security-state.unavailable {
+  border-color: rgba(255, 107, 118, .35);
+  color: var(--red);
+}
+
 .link-btn {
   padding: 0;
   border: 0;
@@ -275,6 +347,16 @@
 
   .image-handoff-toolbar {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .proxy-config-head,
+  .proxy-test-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .proxy-runtime {
+    justify-content: flex-start;
   }
 }
 
