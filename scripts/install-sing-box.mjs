@@ -94,9 +94,11 @@ function detectLinuxFlavor() {
 }
 
 function archiveArgs(asset, source, destination) {
-  return asset.endsWith('.zip')
-    ? ['-xf', source, '-C', destination]
-    : ['-xzf', source, '-C', destination];
+  const flags = asset.endsWith('.zip') ? ['-xf'] : ['-xzf'];
+  if (process.platform === 'win32') {
+    return ['--force-local', ...flags, source.replaceAll('\\', '/'), '-C', destination.replaceAll('\\', '/')];
+  }
+  return [...flags, source, '-C', destination];
 }
 
 async function expectedArchiveSha256(version, asset, customDownloadUrl) {
@@ -149,7 +151,10 @@ async function verifyArchiveSha256(path, expected) {
 }
 
 async function verifyArchiveEntries(path) {
-  const { stdout } = await run('tar', ['-tf', path], { capture: true });
+  const args = process.platform === 'win32'
+    ? ['--force-local', '-tf', path.replaceAll('\\', '/')]
+    : ['-tf', path];
+  const { stdout } = await run('tar', args, { capture: true });
   for (const entry of stdout.split(/\r?\n/).filter(Boolean)) {
     const normalized = entry.replace(/\\/g, '/');
     if (normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized) || normalized.split('/').includes('..')) {

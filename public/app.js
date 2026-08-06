@@ -1317,6 +1317,10 @@ $('#refresh').addEventListener('click', async () => {
   }
 });
 $$('.copy').forEach((button) => button.addEventListener('click', () => navigator.clipboard.writeText(`${location.origin}/${button.dataset.copy}/v1`).then(() => toast(`已复制 ${button.dataset.copy === 'go' ? 'Go' : 'Zen'} 地址`))));
+$$('.copy-code').forEach((button) => button.addEventListener('click', () => {
+  const target = $(button.dataset.target);
+  if (target) navigator.clipboard.writeText(target.textContent).then(() => toast('已复制示例代码'));
+}));
 
 window.addEventListener('beforeunload', (event) => {
   if (!dirtyConfigSections.size) return;

@@ -24,7 +24,7 @@ test('install-sing-box 脚本可从指定下载 URL 解包到安装目录', asyn
   await mkdir(sourceDirectory, { recursive: true });
   await cp(sourceExecutable, join(sourceDirectory, executableName));
   await run('tar', process.platform === 'win32'
-    ? ['-acf', archivePath, '-C', join(temporary, 'source'), '.']
+    ? ['--force-local', '-acf', archivePath.replaceAll('\\', '/'), '-C', join(temporary, 'source').replaceAll('\\', '/'), '.']
     : ['-czf', archivePath, '-C', join(temporary, 'source'), '.']);
   const archiveSha256 = await fileSha256(archivePath);
 

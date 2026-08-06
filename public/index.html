@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenCode Bridge</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2228%22 fill=%22%23c8ff64%22/><text x=%2250%25%22 y=%2255%25%22 dominant-baseline=%22central%22 text-anchor=%22middle%22 font-family=%22monospace%22 font-weight=%22900%22 font-size=%2245%22 fill=%22%23080a0d%22>OC</text></svg>">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/settings.css">
 </head>
@@ -228,11 +229,11 @@
       <section id="guide" class="view">
         <div class="section-intro"><h3>接入指南</h3><p>四种常用客户端协议均可直接调用。</p></div>
         <div class="guide-grid">
-          <article class="panel"><span class="tag purple">CLAUDE</span><h3>Messages API</h3><code>POST /zen/v1/messages</code><pre id="claude-example"></pre></article>
-          <article class="panel"><span class="tag green">OPENAI</span><h3>Responses API</h3><code>POST /zen/v1/responses</code><pre id="responses-example"></pre></article>
-          <article class="panel"><span class="tag orange">COMPATIBLE</span><h3>Chat Completions</h3><code>POST /go/v1/chat/completions</code><pre id="chat-example"></pre></article>
-          <article class="panel"><span class="tag purple">GOOGLE</span><h3>Gemini GenerateContent</h3><code>POST /v1beta/models/{model}:generateContent</code><pre id="gemini-example"></pre></article>
-          <article class="panel"><span class="tag green">OPENCODE</span><h3>opencode.json</h3><code>@ai-sdk/openai-compatible</code><pre id="opencode-example"></pre></article>
+          <article class="panel"><div class="panel-head"><div><span class="tag purple">CLAUDE</span><h3>Messages API</h3></div><button class="ghost copy-code" data-target="#claude-example" type="button">复制代码</button></div><code>POST /zen/v1/messages</code><pre id="claude-example"></pre></article>
+          <article class="panel"><div class="panel-head"><div><span class="tag green">OPENAI</span><h3>Responses API</h3></div><button class="ghost copy-code" data-target="#responses-example" type="button">复制代码</button></div><code>POST /zen/v1/responses</code><pre id="responses-example"></pre></article>
+          <article class="panel"><div class="panel-head"><div><span class="tag orange">COMPATIBLE</span><h3>Chat Completions</h3></div><button class="ghost copy-code" data-target="#chat-example" type="button">复制代码</button></div><code>POST /go/v1/chat/completions</code><pre id="chat-example"></pre></article>
+          <article class="panel"><div class="panel-head"><div><span class="tag purple">GOOGLE</span><h3>Gemini GenerateContent</h3></div><button class="ghost copy-code" data-target="#gemini-example" type="button">复制代码</button></div><code>POST /v1beta/models/{model}:generateContent</code><pre id="gemini-example"></pre></article>
+          <article class="panel"><div class="panel-head"><div><span class="tag green">OPENCODE</span><h3>opencode.json</h3></div><button class="ghost copy-code" data-target="#opencode-example" type="button">复制代码</button></div><code>@ai-sdk/openai-compatible</code><pre id="opencode-example"></pre></article>
         </div>
       </section>
       <div id="toast"></div>
