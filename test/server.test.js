@@ -197,8 +197,8 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.doesNotMatch(JSON.stringify(redactedConfig), new RegExp(setupBody.clientToken));
     assert.equal(redactedConfig.encryptionEnabled, true);
     assert.equal(redactedConfig.persistLogs, false);
-    assert.equal(redactedConfig.promptRewriteRules.length, 2);
-    assert.equal(redactedConfig.promptRewriteDefaults.length, 2);
+    assert.equal(redactedConfig.promptRewriteRules.length, 3);
+    assert.equal(redactedConfig.promptRewriteDefaults.length, 3);
     assert.equal(redactedConfig.zenProxyUrl, '');
     assert.equal(redactedConfig.goProxyUrl, '');
     assert.equal(redactedConfig.zenProxyConfigured, false);

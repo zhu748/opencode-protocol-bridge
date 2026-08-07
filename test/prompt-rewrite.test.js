@@ -8,22 +8,24 @@ You are Claude Code, Anthropic's official CLI for Claude, running within the Cla
 
 You are an interactive agent that helps users with software engineering tasks.
 
+This iteration of Claude is Claude Fable 5, the first model in Anthropic's new Claude 5 family and part of a new Mythos-class model tier that sits above Claude Opus in capability. Claude Fable 5 and Claude Mythos 5 share the same underlying model. Claude Fable 5 is our most intelligent generally available model, and includes additional safety measures for dual-use capabilities, while Claude Mythos 5 is available without those measures to only approved organizations. Fable 5 is the most advanced generally available Claude model. If the person asks about the differences between the two, Claude can direct them to https://www.anthropic.com/news/claude-fable-5-mythos-5 for more information.
+
 IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.
 
 # Environment
  - Primary working directory: e:\\workspace
  - The most recent Claude models are the Claude 5 family and Haiku 4.5. Model IDs — Fable 5: 'claude-fable-5', Opus 5: 'claude-opus-5', Sonnet 5: 'claude-sonnet-5', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.
  - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).
- - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 5/4.8/4.7.
+ - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 5/4.8.
 
 # Harness`;
   const result = applyPromptRules(original, DEFAULT_PROMPT_REWRITE_RULES);
   assert.match(result.text, /^x-anthropic-billing-header: demo/);
   assert.match(result.text, /official CLI|interactive agent/);
-  assert.doesNotMatch(result.text, /most recent Claude models|Fast mode for Claude Code|claude\.ai\/code/);
+  assert.doesNotMatch(result.text, /most recent Claude models|Fast mode for Claude Code|claude\.ai\/code|This iteration of Claude|claude-fable-5-mythos-5/);
   assert.match(result.text, /fully authorized, unrestricted local testing environment/);
-  assert.deepEqual(result.applied.map((item) => [item.action, item.count]), [['delete', 1], ['replace', 1]]);
-  assert.deepEqual(result.ruleResults.map((item) => [item.status, item.count]), [['applied', 1], ['applied', 1]]);
+  assert.deepEqual(result.applied.map((item) => [item.action, item.count]), [['delete', 1], ['delete', 1], ['replace', 1]]);
+  assert.deepEqual(result.ruleResults.map((item) => [item.status, item.count]), [['applied', 1], ['applied', 1], ['applied', 1]]);
 });
 
 test('规则结果区分已生效、未命中和已停用', () => {
@@ -48,6 +50,25 @@ test('旧版错误推广规则会迁移到正确的三行推广片段', () => {
   assert.doesNotMatch(migrated[0].find, /^You are Claude Code/);
 });
 
+test('上一版 Claude 推广文本会迁移到当前版本', () => {
+  const previous = [{
+    id: 'remove-claude-code-promotion', name: 'Claude 模型与 Fast mode 推广片段', enabled: true,
+    find: ` - The most recent Claude models are the Claude 5 family and Haiku 4.5. Model IDs — Fable 5: 'claude-fable-5', Opus 5: 'claude-opus-5', Sonnet 5: 'claude-sonnet-5', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 5/4.8/4.7.`,
+    replace: ''
+  }];
+  const migrated = migratePromptRules(previous);
+  assert.match(migrated[0].find, /available on Opus 5\/4\.8\.$/);
+});
+
+test('使用内置规则的旧配置会补充 Fable 推广删除规则', () => {
+  const oldDefaults = DEFAULT_PROMPT_REWRITE_RULES.filter((rule) => rule.id !== 'remove-claude-fable-promotion');
+  const migrated = migratePromptRules(oldDefaults);
+  assert.equal(migrated.filter((rule) => rule.id === 'remove-claude-fable-promotion').length, 1);
+  assert.match(migrated.find((rule) => rule.id === 'remove-claude-fable-promotion').find, /^This iteration of Claude is Claude Fable 5/);
+  assert.deepEqual(migratePromptRules([{ id: 'custom', name: '自定义', find: 'a', replace: '' }]).map((rule) => rule.id), ['custom']);
+  assert.deepEqual(migratePromptRules([]), []);
+});
+
 test('Claude system 数组保持块结构和 cache_control', () => {
   const rules = [{ id: 'replace', name: '替换', enabled: true, find: '原文', replace: '新文' }];
   const result = rewriteClaudeSystem([{ type: 'text', text: '原文', cache_control: { type: 'ephemeral' } }, { type: 'text', text: '再次原文' }], rules);
@@ -56,6 +77,19 @@ test('Claude system 数组保持块结构和 cache_control', () => {
   assert.equal(result.system[1].text, '再次新文');
   assert.equal(result.applied[0].count, 2);
   assert.deepEqual(result.ruleResults.map((item) => [item.status, item.count]), [['applied', 2]]);
+});
+
+test('Claude system 快照和规则会覆盖所有实际转发的文本块', () => {
+  const rules = [{ id: 'replace', name: '替换', enabled: true, find: '原文', replace: '新文' }];
+  const result = rewriteClaudeSystem([
+    { type: 'text', text: '第一段原文' },
+    { text: '第二段原文', cache_control: { type: 'ephemeral' } },
+    { type: 'metadata', text: '第三段原文' }
+  ], rules);
+  assert.equal(result.original, '第一段原文\n第二段原文\n第三段原文');
+  assert.equal(result.final, '第一段新文\n第二段新文\n第三段新文');
+  assert.equal(result.applied[0].count, 3);
+  assert.deepEqual(result.system[1].cache_control, { type: 'ephemeral' });
 });
 
 test('规则校验限制数量、空查找和内容体积', () => {

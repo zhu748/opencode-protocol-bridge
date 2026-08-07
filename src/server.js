@@ -14,7 +14,7 @@ import { CredentialHealthTracker } from './credential-health.js';
 import { createSseObserver, translateSse } from './stream.js';
 import { RequestLogStore } from './request-log.js';
 import { aggregateRequestStats } from './stats.js';
-import { applyPromptRules, MAX_PROMPT_BYTES, normalizePromptRules, promptSnapshotText, rewriteClaudeSystem } from './prompt-rewrite.js';
+import { applyPromptRules, claudeSystemBlockText, MAX_PROMPT_BYTES, normalizePromptRules, promptSnapshotText, rewriteClaudeSystem } from './prompt-rewrite.js';
 import { ImageHandoffStore, imageHandoffStorageOptions, localImageHandoffEnabled } from './image-handoff.js';
 import { canonicalStaticRoot, ifNoneMatchMatches, resolveStaticFile } from './static-files.js';
 import { writeResponseBuffer, writeResponseChunk, writeResponseStream } from './response-write.js';
@@ -1067,7 +1067,7 @@ function upstreamSystemText(body, protocol) {
   if (protocol === 'responses') return typeof body.instructions === 'string' ? body.instructions : '';
   if (protocol === 'claude') {
     if (typeof body.system === 'string') return body.system;
-    return Array.isArray(body.system) ? body.system.map((block) => typeof block === 'string' ? block : block?.text || '').filter(Boolean).join('\n') : '';
+    return Array.isArray(body.system) ? body.system.map(claudeSystemBlockText).filter(Boolean).join('\n') : '';
   }
   return (Array.isArray(body.messages) ? body.messages : [])
     .filter((message) => ['system', 'developer'].includes(message?.role))

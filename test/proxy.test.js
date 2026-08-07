@@ -166,7 +166,11 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
 
     const response = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token, 'anthropic-beta': 'must-not-cross-protocols' },
-      body: JSON.stringify({ model: 'alias', max_tokens: 256, system: 'x-anthropic-billing-header: test\n\n系统提示', messages: [{ role: 'user', content: '你好' }] })
+      body: JSON.stringify({
+        model: 'alias', max_tokens: 256,
+        system: [{ type: 'text', text: 'x-anthropic-billing-header: test\n\n系统提示' }, { text: '附加 system 块' }],
+        messages: [{ role: 'user', content: '你好' }]
+      })
     });
     assert.equal(response.status, 200);
     const localRequestId = response.headers.get('x-request-id');
@@ -180,11 +184,11 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.authorization, 'Bearer upstream-secret');
     assert.equal(captured.anthropicBeta, undefined);
     assert.equal(captured.body.model, 'gpt-test');
-    assert.equal(captured.body.instructions, '处理后系统提示');
+    assert.equal(captured.body.instructions, '处理后系统提示\n附加 system 块');
     assert.equal(captured.body.input[0].content[0].text, '你好');
     const recentPrompt = await fetch(`http://127.0.0.1:${bridgePort}/api/prompt-rewrite/recent`, { headers: { cookie } }).then((result) => result.json());
-    assert.equal(recentPrompt.original, 'x-anthropic-billing-header: test\n\n系统提示');
-    assert.equal(recentPrompt.final, '处理后系统提示');
+    assert.equal(recentPrompt.original, 'x-anthropic-billing-header: test\n\n系统提示\n附加 system 块');
+    assert.equal(recentPrompt.final, '处理后系统提示\n附加 system 块');
     assert.equal(recentPrompt.upstreamProtocol, 'responses');
     assert.deepEqual(recentPrompt.applied.map((item) => [item.name, item.count]), [['集成替换', 1]]);
     assert.deepEqual(recentPrompt.ruleResults.map((item) => [item.name, item.status, item.count]), [['集成替换', 'applied', 1]]);

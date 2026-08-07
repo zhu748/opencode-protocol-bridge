@@ -338,7 +338,7 @@ OpenCode 的模型端点会随产品更新。遇到新模型或官方端点变�
 - `find`：需要匹配的完整文本
 - `replace`：替换内容；空字符串表示删除
 
-项目默认启用两条规则：保留开头的 Claude Code 身份说明，删除 Environment 中“最新 Claude 模型 / Claude Code 可用平台 / Fast mode”三行推广，并替换 Claude Code 注入的安全测试限制段。默认规则可以关闭、编辑或恢复；曾保存过旧版错误默认规则的配置会自动迁移到正确片段。
+项目默认启用三条规则：保留开头的 Claude Code 身份说明，删除 Environment 中“最新 Claude 模型 / Claude Code 可用平台 / Fast mode”三行推广和 Fable/Mythos 产品定位与官网导流段，并替换 Claude Code 注入的安全测试限制段。默认规则可以关闭、编辑或恢复；仍在使用内置规则的旧配置会自动迁移旧版推广文本并补充 Fable/Mythos 删除规则，完全自定义或已清空默认规则的配置不会被强制添加。
 
 最近一次 Claude 请求中收到的原始 system 和最终发送给上游的 system 只保存在当前 Node.js 进程内，各自最多保留 1 MiB，不进入请求日志或配置文件。控制台会逐条显示该次请求中规则是“已生效”“未命中”还是“已停用”，因此两条内置 Claude 规则是否实际生效可以直接确认。
 

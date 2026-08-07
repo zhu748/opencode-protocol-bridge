@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
+import { claudeSystemBlockText } from './prompt-rewrite.js';
+
 const asArray = (value) => Array.isArray(value) ? value : value == null ? [] : [value];
 const BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
 const CHAT_TOOL_NAME_MAX_LENGTH = 64;
@@ -294,7 +296,7 @@ export function normalizeRequest(body, protocol) {
 
   if (protocol === 'claude') {
     normalized.systemMessages = asArray(body.system).map((item) => ({
-      text: stripLeadingBillingHeader(typeof item === 'string' ? item : item?.text || ''),
+      text: stripLeadingBillingHeader(claudeSystemBlockText(item)),
       ...(item?.cache_control ? { cacheControl: item.cache_control } : {})
     })).filter((item) => item.text);
     normalized.system = normalized.systemMessages.map((item) => item.text).join('\n');
