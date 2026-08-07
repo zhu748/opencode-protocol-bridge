@@ -5,7 +5,7 @@ import { stat } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from './auth.js';
 import { loadConfig, saveConfig, updateConfig, publicConfig, configRevision, normalizeImageHandoffModels, normalizeModelRoutes, ROOT } from './config.js';
-import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, hasUsageData } from './adapters.js';
+import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, hasHostedResponsesWebSearch, hasUsageData } from './adapters.js';
 import { callUpstream, closeDirectUpstreamDispatcher, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJson, readResponseText, upstreamConnectionFailure } from './upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, singBoxRuntimeStatus } from './proxy.js';
 import { KeepAliveService, normalizeKeepAliveUrl, resolveKeepAliveConfig } from './keep-alive.js';
@@ -1106,6 +1106,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   }
   const route = resolveRoute(body.model, config, forcedProvider);
   const responseOptions = responsesOutputOptions(body, incomingProtocol);
+  const webSearchDegraded = incomingProtocol === 'responses' && route.protocol !== 'responses' && hasHostedResponsesWebSearch(body.tools);
   if (!route.upstreamModel) return protocolError(res, 400, incomingProtocol, '上游模型名不能为空');
   const imageHandoffEnabled = imageHandoffEnabledForRoute(config, route);
   let upstreamBody;
@@ -1117,6 +1118,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   } catch (error) {
     return protocolError(res, error.status || 400, incomingProtocol, error.message, error.type || 'invalid_request_error');
   }
+  if (webSearchDegraded) res.setHeader('x-opencode-tool-degradations', 'web_search');
   const selection = selectProviderCredential(config, route.provider);
   let credential = selection.credential;
   if (!credential) {
@@ -1136,7 +1138,11 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       ruleResults: promptRewrite.ruleResults
     };
   }
-  const protocolLabel = `${incomingProtocol} → ${route.protocol}${route.toolChoiceFallback ? ` (${route.toolChoiceFallback} tool choice)` : ''}`;
+  const compatibilityLabels = [
+    ...(route.toolChoiceFallback ? [`${route.toolChoiceFallback} tool choice`] : []),
+    ...(webSearchDegraded ? ['web_search unavailable'] : [])
+  ];
+  const protocolLabel = `${incomingProtocol} → ${route.protocol}${compatibilityLabels.length ? ` (${compatibilityLabels.join(', ')})` : ''}`;
   let upstreamMetadata = {};
   let credentialAttempts = 0;
   let upstreamWaitMs = 0;

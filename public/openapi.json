@@ -37,7 +37,7 @@
       "post": {
         "summary": "OpenAI Responses 兼容接口",
         "requestBody": { "required": true, "description": "JSON 请求体最大 10 MiB", "content": { "application/json": { "schema": { "type": "object", "required": ["model", "input"], "properties": { "model": { "$ref": "#/components/schemas/ModelId" }, "stream": { "type": "boolean" }, "input": {} } } } } },
-        "responses": { "200": { "description": "OpenAI Response 或 SSE 流", "headers": { "x-request-id": { "$ref": "#/components/headers/LocalRequestId" }, "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" }, "504": { "$ref": "#/components/responses/UpstreamTimeout" } }
+        "responses": { "200": { "description": "OpenAI Response 或 SSE 流", "headers": { "x-request-id": { "$ref": "#/components/headers/LocalRequestId" }, "x-opencode-key-attempts": { "$ref": "#/components/headers/KeyAttempts" }, "x-opencode-upstream-request-id": { "$ref": "#/components/headers/UpstreamRequestId" }, "x-opencode-tool-degradations": { "$ref": "#/components/headers/ToolDegradations" } } }, "400": { "$ref": "#/components/responses/InvalidRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" }, "413": { "$ref": "#/components/responses/BodyTooLarge" }, "415": { "$ref": "#/components/responses/UnsupportedMediaType" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/UpstreamError" }, "503": { "$ref": "#/components/responses/NotConfigured" }, "504": { "$ref": "#/components/responses/UpstreamTimeout" } }
       }
     },
     "/chat/completions": {
@@ -72,6 +72,7 @@
       "KeyAttempts": { "description": "发生自动切换时返回，值为实际尝试的 Key 数量。推理请求仅对 401、403、429 切换；幂等模型发现还可对网络错误和 5xx 切换。", "schema": { "type": "integer", "minimum": 2 } },
       "RetryAfter": { "description": "建议等待秒数或 HTTP 日期，来自本地冷却策略或最终上游响应。", "schema": { "type": "string" } },
       "UpstreamRequestId": { "description": "最终上游响应的请求追踪 ID；本项目自己的请求 ID 仍位于 x-request-id。", "schema": { "type": "string", "maxLength": 256 } },
+      "ToolDegradations": { "description": "仅在跨协议时无法向上游提供请求中的托管工具时返回；当前值 web_search 表示原始声明仍保留在客户端 Response 元数据中，但非 Responses 上游未执行托管搜索。", "schema": { "type": "string", "enum": ["web_search"] } },
       "Allow": { "description": "该端点允许的 HTTP 方法。", "schema": { "type": "string", "enum": ["GET", "POST"] } }
     },
     "schemas": {

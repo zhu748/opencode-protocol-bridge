@@ -166,6 +166,8 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.equal(spec.paths['/messages'].post.responses['200'].headers['x-request-id'].$ref, '#/components/headers/LocalRequestId');
   assert.equal(spec.paths['/messages'].post.responses['415'].$ref, '#/components/responses/UnsupportedMediaType');
   assert.equal(spec.paths['/messages'].post.responses['200'].headers['x-opencode-key-attempts'].$ref, '#/components/headers/KeyAttempts');
+  assert.equal(spec.paths['/responses'].post.responses['200'].headers['x-opencode-tool-degradations'].$ref, '#/components/headers/ToolDegradations');
+  assert.deepEqual(spec.components.headers.ToolDegradations.schema.enum, ['web_search']);
   assert.equal(spec.paths['/models'].get.responses['200'].headers['x-opencode-key-attempts'].$ref, '#/components/headers/KeyAttempts');
   assert.equal(spec.paths['/models'].get.responses['400'].$ref, '#/components/responses/InvalidRequest');
   assert.deepEqual(spec.paths['/models/{model}'].get.parameters.find((parameter) => parameter.name === 'provider').schema.enum, ['zen', 'go']);

@@ -65,6 +65,28 @@ test('Chat SSE 工具调用可转换为 Claude SSE', async () => {
   assert.match(output, /"stop_reason":"tool_use"/);
 });
 
+test('Chat SSE 的 Codex namespace 工具别名可还原为 Responses namespace 调用', async () => {
+  const source = responseFrom([
+    ['message', { id: 'chat_namespace', model: 'deepseek-v4-flash', choices: [{ delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_ns', function: { name: 'multi_agent_v1__spawn_agent', arguments: '{"task":' } }] }, finish_reason: null }] }],
+    ['message', { id: 'chat_namespace', model: 'deepseek-v4-flash', choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"检查"}' } }] }, finish_reason: null }] }],
+    ['message', { id: 'chat_namespace', model: 'deepseek-v4-flash', choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 3, completion_tokens: 4 } }]
+  ]);
+  const tools = [{
+    type: 'namespace', name: 'multi_agent_v1', description: '管理子代理', tools: [
+      { type: 'function', name: 'spawn_agent', description: '创建子代理', parameters: { type: 'object' } }
+    ]
+  }];
+  const output = await collect(translateSse(source, 'chat', 'responses', 'deepseek-v4-flash', { responsesOptions: { tools } }));
+  const events = output.split(/\n\n/).filter(Boolean).map((block) => JSON.parse(block.split(/\r?\n/).find((line) => line.startsWith('data: ')).slice(6)));
+  const added = events.find((event) => event.type === 'response.output_item.added');
+  const done = events.find((event) => event.type === 'response.output_item.done');
+  assert.equal(added.item.namespace, 'multi_agent_v1');
+  assert.equal(added.item.name, 'spawn_agent');
+  assert.equal(done.item.namespace, 'multi_agent_v1');
+  assert.equal(done.item.name, 'spawn_agent');
+  assert.equal(done.item.arguments, '{"task":"检查"}');
+});
+
 test('Chat SSE 并行工具调用保留独立索引和参数', async () => {
   const source = responseFrom([
     ['message', { id: 'chat_parallel', model: 'kimi', choices: [{ delta: { role: 'assistant', tool_calls: [

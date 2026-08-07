@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto';
 
 const asArray = (value) => Array.isArray(value) ? value : value == null ? [] : [value];
 const BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
+const CHAT_TOOL_NAME_MAX_LENGTH = 64;
+const RESPONSES_WEB_SEARCH_TOOL_TYPES = new Set(['web_search', 'web_search_preview', 'web_search_preview_2025_03_11']);
+const WEB_SEARCH_COMPATIBILITY_NOTICE = 'Protocol bridge compatibility: this non-Responses upstream cannot execute the hosted web_search tool. Do not claim to have searched the web; use another available function tool or explain that web search is unavailable.';
 
 function stripLeadingBillingHeader(text) {
   if (typeof text !== 'string' || !text.startsWith(BILLING_HEADER_PREFIX)) return text || '';
@@ -109,6 +112,111 @@ function unsupportedFeature(message) {
   return Object.assign(new Error(message), { status: 400, type: 'invalid_request_error' });
 }
 
+function validResponsesFunction(tool, label) {
+  if (!tool || typeof tool !== 'object' || Array.isArray(tool) || tool.type !== 'function' || typeof tool.name !== 'string' || !tool.name) {
+    throw unsupportedFeature(`${label} 必须是具有有效 name 的 function tool`);
+  }
+}
+
+function sanitizedChatToolName(value, fallback = 'tool') {
+  const name = String(value || '').replace(/[^A-Za-z0-9_-]/g, '_').replace(/^_+|_+$/g, '');
+  return name || fallback;
+}
+
+function allocateChatToolAlias(namespace, name, usedNames, namespaceIndex, toolIndex) {
+  const base = `${sanitizedChatToolName(namespace, 'namespace')}__${sanitizedChatToolName(name)}`;
+  let alias = base.slice(0, CHAT_TOOL_NAME_MAX_LENGTH);
+  if (!usedNames.has(alias)) {
+    usedNames.add(alias);
+    return alias;
+  }
+  const suffix = `__n${namespaceIndex}t${toolIndex}`;
+  alias = `${base.slice(0, CHAT_TOOL_NAME_MAX_LENGTH - suffix.length)}${suffix}`;
+  let collision = 1;
+  while (usedNames.has(alias)) {
+    const collisionSuffix = `${suffix}_${collision++}`;
+    alias = `${base.slice(0, CHAT_TOOL_NAME_MAX_LENGTH - collisionSuffix.length)}${collisionSuffix}`;
+  }
+  usedNames.add(alias);
+  return alias;
+}
+
+function responsesToolCompatibility(tools, { rejectUnsupported = true } = {}) {
+  const source = asArray(tools);
+  const usedNames = new Set(source.filter((tool) => tool?.type === 'function' && typeof tool.name === 'string').map((tool) => tool.name));
+  const directNames = new Set();
+  const namespaceNames = new Set();
+  const namespaceChildren = new Set();
+  const flattened = [];
+  const aliases = [];
+  const unsupportedTypes = [];
+  let droppedWebSearch = false;
+
+  for (let namespaceIndex = 0; namespaceIndex < source.length; namespaceIndex++) {
+    const tool = source[namespaceIndex];
+    if (tool?.type === 'function') {
+      validResponsesFunction(tool, `Responses tools[${namespaceIndex}]`);
+      if (directNames.has(tool.name)) throw unsupportedFeature(`Responses function tool 名称重复：${tool.name}`);
+      directNames.add(tool.name);
+      flattened.push({ name: tool.name, description: tool.description, schema: tool.parameters || {}, strict: tool.strict });
+      continue;
+    }
+    if (RESPONSES_WEB_SEARCH_TOOL_TYPES.has(tool?.type)) {
+      droppedWebSearch = true;
+      continue;
+    }
+    if (tool?.type !== 'namespace') {
+      unsupportedTypes.push(tool?.type || 'unknown');
+      continue;
+    }
+    if (typeof tool.name !== 'string' || !tool.name || !Array.isArray(tool.tools)) {
+      throw unsupportedFeature(`Responses namespace tools[${namespaceIndex}] 缺少有效 name 或 tools 数组`);
+    }
+    if (namespaceNames.has(tool.name)) throw unsupportedFeature(`Responses namespace 名称重复：${tool.name}`);
+    namespaceNames.add(tool.name);
+    for (let toolIndex = 0; toolIndex < tool.tools.length; toolIndex++) {
+      const child = tool.tools[toolIndex];
+      validResponsesFunction(child, `Responses namespace ${tool.name}.tools[${toolIndex}]`);
+      const childIdentity = `${tool.name}\n${child.name}`;
+      if (namespaceChildren.has(childIdentity)) throw unsupportedFeature(`Responses namespace ${tool.name} 的 function tool 名称重复：${child.name}`);
+      namespaceChildren.add(childIdentity);
+      const alias = allocateChatToolAlias(tool.name, child.name, usedNames, namespaceIndex, toolIndex);
+      aliases.push({ alias, namespace: tool.name, name: child.name });
+      const namespaceDescription = [
+        `[Responses namespace: ${tool.name}]`,
+        tool.description,
+        child.description
+      ].filter(Boolean).join('\n');
+      flattened.push({ name: alias, description: namespaceDescription, schema: child.parameters || {}, strict: child.strict });
+    }
+  }
+
+  if (rejectUnsupported && unsupportedTypes.length) {
+    throw unsupportedFeature(`跨协议转换暂不支持 Responses 工具类型：${[...new Set(unsupportedTypes)].join(', ')}`);
+  }
+  return { tools: flattened, aliases, droppedWebSearch };
+}
+
+export function hasHostedResponsesWebSearch(tools) {
+  return asArray(tools).some((tool) => RESPONSES_WEB_SEARCH_TOOL_TYPES.has(tool?.type));
+}
+
+function responsesToolAlias(namespace, name, aliases) {
+  if (!namespace) return name;
+  return aliases.find((entry) => entry.namespace === namespace && entry.name === name)?.alias
+    || `${sanitizedChatToolName(namespace, 'namespace')}__${sanitizedChatToolName(name)}`.slice(0, CHAT_TOOL_NAME_MAX_LENGTH);
+}
+
+export function resolveResponsesToolIdentity(chatName, tools) {
+  const compatibility = responsesToolCompatibility(tools, { rejectUnsupported: false });
+  const exact = compatibility.aliases.find((entry) => entry.alias === chatName);
+  if (exact) return { namespace: exact.namespace, name: exact.name };
+  const directNames = new Set(asArray(tools).filter((tool) => tool?.type === 'function').map((tool) => tool.name));
+  const childMatches = compatibility.aliases.filter((entry) => entry.name === chatName);
+  if (!directNames.has(chatName) && childMatches.length === 1) return { namespace: childMatches[0].namespace, name: childMatches[0].name };
+  return { name: chatName };
+}
+
 export function detectProtocol(path) {
   if (path.endsWith('/messages')) return 'claude';
   if (path.endsWith('/responses')) return 'responses';
@@ -199,13 +307,21 @@ export function normalizeRequest(body, protocol) {
     normalized.tools = asArray(body.tools).map((tool) => ({ name: tool.name, description: tool.description, schema: tool.input_schema || {}, ...(tool.cache_control ? { cacheControl: tool.cache_control } : {}) }));
   } else if (protocol === 'responses') {
     normalized.system = body.instructions || '';
+    const compatibility = responsesToolCompatibility(body.tools);
+    normalized.tools = compatibility.tools;
+    if (compatibility.droppedWebSearch) normalized.system += `${normalized.system ? '\n\n' : ''}${WEB_SEARCH_COMPATIBILITY_NOTICE}`;
+    if (body.tool_choice && typeof body.tool_choice === 'object' && body.tool_choice.type === 'function') {
+      normalized.toolChoice = { type: 'tool', name: responsesToolAlias(body.tool_choice.namespace, body.tool_choice.name, compatibility.aliases) };
+    } else if (compatibility.droppedWebSearch && (body.tool_choice === 'required' || RESPONSES_WEB_SEARCH_TOOL_TYPES.has(body.tool_choice?.type))) {
+      normalized.toolChoice = { type: 'auto' };
+    }
     const input = typeof body.input === 'string' ? [{ role: 'user', content: body.input }] : asArray(body.input);
     for (const item of input) {
       if (['custom_tool_call', 'custom_tool_call_output'].includes(item.type)) {
         throw unsupportedFeature('跨协议转换暂不支持 Responses custom tool；请使用 /responses 同协议路由或改用 function tool');
       }
       if (item.type === 'function_call') {
-        normalized.messages.push({ role: 'assistant', parts: [{ type: 'tool_call', id: item.call_id || item.id, name: item.name, arguments: parseArguments(item.arguments) }] });
+        normalized.messages.push({ role: 'assistant', parts: [{ type: 'tool_call', id: item.call_id || item.id, name: responsesToolAlias(item.namespace, item.name, compatibility.aliases), arguments: parseArguments(item.arguments) }] });
       } else if (item.type === 'function_call_output') {
         normalized.messages.push({ role: 'user', parts: [{ type: 'tool_result', id: item.call_id, content: item.output }] });
       } else if (['system', 'developer'].includes(item.role)) {
@@ -217,12 +333,6 @@ export function normalizeRequest(body, protocol) {
         normalized.messages.push({ role: item.role || 'user', parts: normalizeParts(item.content, { rejectUnknown: true }) });
       }
     }
-    const unsupportedTools = asArray(body.tools).filter((tool) => tool.type !== 'function');
-    if (unsupportedTools.length) {
-      const types = [...new Set(unsupportedTools.map((tool) => tool.type || 'unknown'))].join(', ');
-      throw unsupportedFeature(`跨协议转换暂不支持 Responses 工具类型：${types}；请使用 /responses 同协议路由或改用 function tool`);
-    }
-    normalized.tools = asArray(body.tools).filter((tool) => tool.type === 'function').map((tool) => ({ name: tool.name, description: tool.description, schema: tool.parameters || {}, strict: tool.strict }));
   } else {
     for (const message of asArray(body.messages)) {
       if (message.role === 'system' || message.role === 'developer') {
@@ -701,7 +811,10 @@ export function formatResponse(response, protocol, responsesOptions = {}) {
     parallel_tool_calls: typeof responsesOptions.parallelToolCalls === 'boolean' ? responsesOptions.parallelToolCalls : true,
     tool_choice: responsesOptions.toolChoice ?? 'auto', tools: Array.isArray(responsesOptions.tools) ? responsesOptions.tools : [],
     output: response.parts.flatMap((part, index) => {
-      if (part.type === 'tool_call') return { id: `fc_${index}`, type: 'function_call', status: 'completed', call_id: part.id, name: part.name, arguments: canonicalJsonString(part.arguments) };
+      if (part.type === 'tool_call') {
+        const identity = resolveResponsesToolIdentity(part.name, responsesOptions.tools);
+        return { id: `fc_${index}`, type: 'function_call', status: 'completed', call_id: part.id, ...identity, arguments: canonicalJsonString(part.arguments) };
+      }
       if (part.type === 'reasoning') return { id: `rs_${index}`, type: 'reasoning', status: 'completed', summary: [{ type: 'summary_text', text: part.text || '' }] };
       if (part.type === 'text') return { id: `msg_${index}`, type: 'message', status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: part.text || '', annotations: [] }] };
       return [];

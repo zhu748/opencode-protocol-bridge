@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { hasUsageData, normalizeUsageCount } from './adapters.js';
+import { hasUsageData, normalizeUsageCount, resolveResponsesToolIdentity } from './adapters.js';
 
 export const MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 
@@ -344,7 +344,10 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
     if (event.type === 'block_start') {
       const index = targetIndex++;
       indices.set(event.sourceIndex, index);
-      blocks.set(index, { type: event.blockType, id: event.id || `call_${randomUUID().replaceAll('-', '')}`, name: event.name || '', text: '', arguments: '', ...(event.blockType === 'tool' ? { chatToolIndex: chatToolIndex++ } : {}) });
+      const toolIdentity = event.blockType === 'tool' && targetProtocol === 'responses'
+        ? resolveResponsesToolIdentity(event.name || '', responseTools)
+        : { name: event.name || '' };
+      blocks.set(index, { type: event.blockType, id: event.id || `call_${randomUUID().replaceAll('-', '')}`, ...toolIdentity, text: '', arguments: '', ...(event.blockType === 'tool' ? { chatToolIndex: chatToolIndex++ } : {}) });
       if (targetProtocol === 'claude') {
         const content_block = event.blockType === 'tool' ? { type: 'tool_use', id: blocks.get(index).id, name: blocks.get(index).name, input: {} }
           : event.blockType === 'reasoning' ? { type: 'thinking', thinking: '', signature: '' }
@@ -352,7 +355,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
         yield sse('content_block_start', { type: 'content_block_start', index, content_block });
       } else if (targetProtocol === 'responses') {
         const item = event.blockType === 'tool'
-          ? { id: `fc_${randomUUID().replaceAll('-', '')}`, type: 'function_call', status: 'in_progress', call_id: blocks.get(index).id, name: blocks.get(index).name, arguments: '' }
+          ? { id: `fc_${randomUUID().replaceAll('-', '')}`, type: 'function_call', status: 'in_progress', call_id: blocks.get(index).id, ...(blocks.get(index).namespace ? { namespace: blocks.get(index).namespace } : {}), name: blocks.get(index).name, arguments: '' }
           : event.blockType === 'reasoning'
             ? { id: `rs_${randomUUID().replaceAll('-', '')}`, type: 'reasoning', status: 'in_progress', summary: [] }
             : { id: `msg_${randomUUID().replaceAll('-', '')}`, type: 'message', status: 'in_progress', role: 'assistant', content: [] };

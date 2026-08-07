@@ -58,6 +58,22 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ id: 'msg_upstream', type: 'message', role: 'assistant', model: current.body.model, content: [{ type: 'text', text: 'Claude 透传成功' }], stop_reason: 'end_turn', usage: { input_tokens: 2, output_tokens: 3 }, vendor_extension: { preserved: true } }));
     }
+    if (req.url === '/chat/completions') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        id: 'chat_codex', object: 'chat.completion', model: current.body.model,
+        choices: [{
+          index: 0,
+          finish_reason: 'tool_calls',
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [{ id: 'call_ns', type: 'function', function: { name: 'multi_agent_v1__spawn_agent', arguments: '{"task":"检查"}' } }]
+          }
+        }],
+        usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 }
+      }));
+    }
     if (current.body.stream) {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.flushHeaders();
@@ -99,7 +115,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     const cookie = setup.headers.get('set-cookie').split(';')[0];
     const saved = await fetch(`http://127.0.0.1:${bridgePort}/api/config`, {
       method: 'PUT', headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ defaultProvider: 'zen', proxyUrl: '', zenKey: 'upstream-secret', goKey: 'go-secret', clientToken: '', requestLogLimit: 100, persistLogs: true, upstreamTimeoutMs: 1000, maxConcurrentRequests: 10, modelRoutes: { alias: { provider: 'zen', protocol: 'responses', upstreamModel: 'gpt-test' }, 'responses-same': { provider: 'zen', protocol: 'responses', upstreamModel: 'responses-vendor' }, 'missing-usage': { provider: 'zen', protocol: 'responses', upstreamModel: 'no-usage' }, 'stream-json': { provider: 'zen', protocol: 'responses', upstreamModel: 'stream-json' }, broken: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-json' }, malformed: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-shape' }, slow: { provider: 'zen', protocol: 'responses', upstreamModel: 'slow-response' }, 'claude-alias': { provider: 'zen', protocol: 'claude', upstreamModel: 'claude-upstream' } }, promptRewriteRules: [{ id: 'integration', name: '集成替换', enabled: true, find: '系统提示', replace: '处理后系统提示' }] })
+      body: JSON.stringify({ defaultProvider: 'zen', proxyUrl: '', zenKey: 'upstream-secret', goKey: 'go-secret', clientToken: '', requestLogLimit: 100, persistLogs: true, upstreamTimeoutMs: 1000, maxConcurrentRequests: 10, modelRoutes: { alias: { provider: 'zen', protocol: 'responses', upstreamModel: 'gpt-test' }, 'responses-same': { provider: 'zen', protocol: 'responses', upstreamModel: 'responses-vendor' }, 'missing-usage': { provider: 'zen', protocol: 'responses', upstreamModel: 'no-usage' }, 'stream-json': { provider: 'zen', protocol: 'responses', upstreamModel: 'stream-json' }, broken: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-json' }, malformed: { provider: 'zen', protocol: 'responses', upstreamModel: 'bad-shape' }, slow: { provider: 'zen', protocol: 'responses', upstreamModel: 'slow-response' }, 'claude-alias': { provider: 'zen', protocol: 'claude', upstreamModel: 'claude-upstream' }, 'chat-alias': { provider: 'zen', protocol: 'chat', upstreamModel: 'deepseek-v4-flash' } }, promptRewriteRules: [{ id: 'integration', name: '集成替换', enabled: true, find: '系统提示', replace: '处理后系统提示' }] })
     });
     assert.equal(saved.status, 200);
 
@@ -350,14 +366,36 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(unsupportedGemini.status, 400);
     assert.deepEqual(await unsupportedGemini.json(), { error: { code: 400, message: '跨协议转换仅支持 Gemini candidateCount=1', status: 'INVALID_ARGUMENT' } });
 
-    const unsupportedCrossProtocol = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
+    const codexCrossProtocol = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
-      body: JSON.stringify({ model: 'claude-alias', input: '搜索', tools: [{ type: 'web_search' }] })
+      body: JSON.stringify({
+        model: 'chat-alias',
+        input: '搜索并分派检查任务',
+        tools: [
+          {
+            type: 'namespace',
+            name: 'multi_agent_v1',
+            description: '多代理工具',
+            tools: [{ type: 'function', name: 'spawn_agent', description: '创建代理', parameters: { type: 'object', properties: { task: { type: 'string' } }, required: ['task'] } }]
+          },
+          { type: 'web_search', external_web_access: true }
+        ]
+      })
     });
-    assert.equal(unsupportedCrossProtocol.status, 400);
-    const unsupportedBody = await unsupportedCrossProtocol.json();
-    assert.match(unsupportedBody.error.message, /web_search/);
-    assert.equal(unsupportedBody.error.type, 'invalid_request_error');
+    assert.equal(codexCrossProtocol.status, 200);
+    assert.equal(codexCrossProtocol.headers.get('x-opencode-tool-degradations'), 'web_search');
+    const codexBody = await codexCrossProtocol.json();
+    assert.equal(codexBody.output[0].type, 'function_call');
+    assert.equal(codexBody.output[0].namespace, 'multi_agent_v1');
+    assert.equal(codexBody.output[0].name, 'spawn_agent');
+    assert.equal(codexBody.output[0].arguments, '{"task":"检查"}');
+    assert.deepEqual(codexBody.tools.map((tool) => tool.type), ['namespace', 'web_search']);
+    assert.equal(captured.path, '/chat/completions');
+    assert.equal(captured.body.model, 'deepseek-v4-flash');
+    assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['multi_agent_v1__spawn_agent']);
+    assert.match(captured.body.messages.find((message) => message.role === 'system').content, /cannot execute the hosted web_search tool/);
+    const codexLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
+    assert.equal(codexLog.protocol, 'responses → chat (web_search unavailable)');
 
     const wrongStreamType = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },

@@ -267,10 +267,94 @@ test('Claude Documents 与 Responses 文件块可转换', () => {
   ]);
 });
 
+test('Codex namespace 工具可展开到 Chat 并在响应中还原命名空间', () => {
+  const responsesTools = [
+    { type: 'function', name: 'shell_command', description: '执行命令', parameters: { type: 'object' } },
+    { type: 'namespace', name: 'multi_agent_v1', description: '管理子代理', tools: [
+      { type: 'function', name: 'spawn_agent', description: '创建子代理', strict: false, parameters: { type: 'object', properties: { task: { type: 'string' } } } }
+    ] },
+    { type: 'web_search', external_web_access: true }
+  ];
+  const chat = prepareUpstreamRequest({
+    model: 'alias', instructions: '基础规则', input: [
+      { type: 'function_call', call_id: 'old_call', namespace: 'multi_agent_v1', name: 'spawn_agent', arguments: '{"task":"旧任务"}' },
+      { type: 'function_call_output', call_id: 'old_call', output: '完成' },
+      { role: 'user', content: [{ type: 'input_text', text: '继续' }] }
+    ],
+    tools: responsesTools,
+    tool_choice: { type: 'function', namespace: 'multi_agent_v1', name: 'spawn_agent' }
+  }, 'responses', 'chat', 'deepseek-v4-flash');
+  assert.deepEqual(chat.tools.map((tool) => tool.function.name), ['shell_command', 'multi_agent_v1__spawn_agent']);
+  assert.match(chat.tools[1].function.description, /Responses namespace: multi_agent_v1/);
+  assert.deepEqual(chat.tool_choice, { type: 'function', function: { name: 'multi_agent_v1__spawn_agent' } });
+  assert.match(chat.messages[0].content, /web_search.*unavailable/);
+  assert.equal(chat.messages[1].tool_calls[0].function.name, 'multi_agent_v1__spawn_agent');
+
+  const restored = formatResponse(normalizeResponse({
+    id: 'chat_codex', model: 'deepseek-v4-flash',
+    choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: null, tool_calls: [
+      { id: 'call_1', type: 'function', function: { name: 'multi_agent_v1__spawn_agent', arguments: '{"task":"新任务"}' } }
+    ] } }], usage: { prompt_tokens: 3, completion_tokens: 2 }
+  }, 'chat'), 'responses', { tools: responsesTools, toolChoice: 'auto', parallelToolCalls: true });
+  assert.deepEqual(restored.output[0], {
+    id: 'fc_0', type: 'function_call', status: 'completed', call_id: 'call_1',
+    namespace: 'multi_agent_v1', name: 'spawn_agent', arguments: '{"task":"新任务"}'
+  });
+});
+
+test('Responses 托管搜索降级不会强迫模型误调用其他函数', () => {
+  const chat = prepareUpstreamRequest({
+    model: 'alias', input: '搜索或检查', tool_choice: 'required', tools: [
+      { type: 'web_search', external_web_access: true },
+      { type: 'function', name: 'inspect', parameters: { type: 'object' } }
+    ]
+  }, 'responses', 'chat', 'deepseek-v4-flash');
+  assert.equal(chat.tool_choice, 'auto');
+  assert.deepEqual(chat.tools.map((tool) => tool.function.name), ['inspect']);
+  assert.match(chat.messages[0].content, /web_search.*unavailable/);
+
+  assert.throws(() => prepareUpstreamRequest({
+    model: 'alias', input: '检查', tools: [
+      { type: 'function', name: 'inspect', parameters: { type: 'object' } },
+      { type: 'function', name: 'inspect', parameters: { type: 'object' } }
+    ]
+  }, 'responses', 'chat', 'chat-test'), /function tool 名称重复/);
+  assert.throws(() => prepareUpstreamRequest({
+    model: 'alias', input: '检查', tools: [{
+      type: 'namespace', name: 'tools', tools: [
+        { type: 'function', name: 'inspect', parameters: { type: 'object' } },
+        { type: 'function', name: 'inspect', parameters: { type: 'object' } }
+      ]
+    }]
+  }, 'responses', 'chat', 'chat-test'), /namespace tools.*名称重复/);
+});
+
+test('Responses namespace 别名处理直接函数冲突、非法字符和长度限制', () => {
+  const longNamespace = `mcp.${'very-long-namespace-'.repeat(4)}`;
+  const tools = [
+    { type: 'function', name: 'tools__inspect', parameters: { type: 'object' } },
+    { type: 'namespace', name: 'tools', tools: [{ type: 'function', name: 'inspect', parameters: { type: 'object' } }] },
+    { type: 'namespace', name: longNamespace, tools: [{ type: 'function', name: 'run.command', parameters: { type: 'object' } }] }
+  ];
+  const chat = prepareUpstreamRequest({ model: 'alias', input: '检查', tools }, 'responses', 'chat', 'chat-test');
+  const names = chat.tools.map((tool) => tool.function.name);
+  assert.equal(names[0], 'tools__inspect');
+  assert.equal(names[1], 'tools__inspect__n1t0');
+  assert.ok(names[2].length <= 64);
+  assert.match(names[2], /^[A-Za-z0-9_-]+$/);
+
+  const restored = formatResponse({
+    id: 'chat_collision', model: 'chat-test', inputTokens: 1, outputTokens: 1, stopReason: 'tool_calls',
+    parts: [{ type: 'tool_call', id: 'call_2', name: names[2], arguments: { ok: true } }]
+  }, 'responses', { tools });
+  assert.equal(restored.output[0].namespace, longNamespace);
+  assert.equal(restored.output[0].name, 'run.command');
+});
+
 test('无法无损跨协议的工具和文件会明确拒绝', () => {
   assert.throws(() => prepareUpstreamRequest({
-    model: 'alias', input: '搜索', tools: [{ type: 'web_search' }]
-  }, 'responses', 'claude', 'claude-test'), (error) => error.status === 400 && /web_search/.test(error.message));
+    model: 'alias', input: '搜索', tools: [{ type: 'file_search' }]
+  }, 'responses', 'claude', 'claude-test'), (error) => error.status === 400 && /file_search/.test(error.message));
 
   assert.throws(() => prepareUpstreamRequest({
     model: 'alias', input: [{ type: 'custom_tool_call', call_id: 'c1', name: 'shell', input: 'dir' }]
@@ -280,7 +364,7 @@ test('无法无损跨协议的工具和文件会明确拒绝', () => {
     model: 'alias', messages: [{ role: 'user', content: [{ type: 'document', source: { type: 'url', url: 'https://example.com/a.pdf' } }] }]
   }, 'claude', 'chat', 'chat-test'), (error) => error.status === 400 && /文件内容块/.test(error.message));
 
-  const passthrough = { model: 'alias', input: '搜索', tools: [{ type: 'web_search' }] };
+  const passthrough = { model: 'alias', input: '搜索', tools: [{ type: 'web_search', external_web_access: true, filters: { allowed_domains: ['example.com'] } }] };
   assert.deepEqual(prepareUpstreamRequest(passthrough, 'responses', 'responses', 'gpt-test'), { ...passthrough, model: 'gpt-test' });
 });
 
