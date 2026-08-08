@@ -267,6 +267,59 @@ test('Claude Documents 与 Responses 文件块可转换', () => {
   ]);
 });
 
+test('Claude 文本附件可按原始顺序内联到 Chat 消息', () => {
+  const chat = prepareUpstreamRequest({
+    model: 'alias', max_tokens: 64,
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: '附件前' },
+      {
+        type: 'document', title: 'www.temporary-mail.net.txt', context: '注册邮件',
+        source: { type: 'text', media_type: 'text/plain', data: '邮件正文' },
+        cache_control: { type: 'ephemeral' }
+      },
+      { type: 'text', text: '附件后' }
+    ] }]
+  }, 'claude', 'chat', 'deepseek-v4-flash');
+  assert.equal(chat.messages[0].content.length, 3);
+  assert.equal(chat.messages[0].content[0].text, '附件前');
+  assert.match(chat.messages[0].content[1].text, /www\.temporary-mail\.net\.txt/);
+  assert.match(chat.messages[0].content[1].text, /注册邮件/);
+  assert.match(chat.messages[0].content[1].text, /邮件正文/);
+  assert.deepEqual(chat.messages[0].content[1].cache_control, { type: 'ephemeral' });
+  assert.equal(chat.messages[0].content[2].text, '附件后');
+
+  const base64 = prepareUpstreamRequest({
+    model: 'alias', messages: [{ role: 'user', content: [{
+      type: 'document', filename: '邮件.txt',
+      source: { type: 'base64', media_type: 'text/plain; charset=utf-8', data: Buffer.from('你好 UTF-8').toString('base64') }
+    }] }]
+  }, 'claude', 'chat', 'deepseek-v4-flash');
+  assert.match(base64.messages[0].content[0].text, /你好 UTF-8/);
+
+  const custom = prepareUpstreamRequest({
+    model: 'alias', messages: [{ role: 'user', content: [{
+      type: 'document', title: '分块文档', source: { type: 'content', content: [
+        { type: 'text', text: '第一段' }, { type: 'text', text: '第二段' }
+      ] }
+    }] }]
+  }, 'claude', 'chat', 'deepseek-v4-flash');
+  assert.match(custom.messages[0].content[0].text, /第一段\n第二段/);
+});
+
+test('Claude 文本附件拒绝无效编码且非文本文件仍需原生路由', () => {
+  assert.throws(() => prepareUpstreamRequest({
+    model: 'alias', messages: [{ role: 'user', content: [{
+      type: 'document', source: { type: 'base64', media_type: 'text/plain', data: '/w==' }
+    }] }]
+  }, 'claude', 'chat', 'chat-test'), (error) => error.status === 400 && /UTF-8/.test(error.message));
+
+  assert.throws(() => prepareUpstreamRequest({
+    model: 'alias', messages: [{ role: 'user', content: [{
+      type: 'document', source: { type: 'content', content: [{ type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } }] }
+    }] }]
+  }, 'claude', 'chat', 'chat-test'), (error) => error.status === 400 && /全部由文本块/.test(error.message));
+});
+
 test('Codex namespace 工具可展开到 Chat 并在响应中还原命名空间', () => {
   const responsesTools = [
     { type: 'function', name: 'shell_command', description: '执行命令', parameters: { type: 'object' } },

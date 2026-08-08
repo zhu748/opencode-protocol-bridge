@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { TextDecoder } from 'node:util';
 
 import { claudeSystemBlockText } from './prompt-rewrite.js';
 
@@ -7,6 +8,7 @@ const BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
 const CHAT_TOOL_NAME_MAX_LENGTH = 64;
 const RESPONSES_WEB_SEARCH_TOOL_TYPES = new Set(['web_search', 'web_search_preview', 'web_search_preview_2025_03_11']);
 const WEB_SEARCH_COMPATIBILITY_NOTICE = 'Protocol bridge compatibility: this non-Responses upstream cannot execute the hosted web_search tool. Do not claim to have searched the web; use another available function tool or explain that web search is unavailable.';
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
 function stripLeadingBillingHeader(text) {
   if (typeof text !== 'string' || !text.startsWith(BILLING_HEADER_PREFIX)) return text || '';
@@ -469,13 +471,71 @@ function fileDataUrl(source) {
 }
 
 function fallbackFilename(source) {
+  if (['text', 'content'].includes(source?.type)) return 'document.txt';
+  const mediaType = String(source?.media_type || '').split(';', 1)[0].trim().toLowerCase();
   const extension = {
     'application/pdf': 'pdf',
     'text/plain': 'txt',
     'text/csv': 'csv',
+    'text/markdown': 'md',
     'application/json': 'json'
-  }[source?.media_type] || 'bin';
+  }[mediaType] || 'bin';
   return `document.${extension}`;
+}
+
+function textualMediaType(value) {
+  const mediaType = String(value || '').split(';', 1)[0].trim().toLowerCase();
+  return mediaType.startsWith('text/')
+    || ['application/json', 'application/xml', 'application/javascript', 'application/x-javascript', 'application/yaml', 'application/x-yaml', 'application/toml', 'application/sql'].includes(mediaType)
+    || mediaType.endsWith('+json')
+    || mediaType.endsWith('+xml');
+}
+
+function decodeBase64Utf8(data) {
+  const compact = String(data || '').replace(/\s/g, '');
+  if (!compact || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact) || compact.length % 4 === 1) {
+    throw unsupportedFeature('Claude 文本附件包含无效的 base64 数据');
+  }
+  const buffer = Buffer.from(compact, 'base64');
+  if (buffer.toString('base64').replace(/=+$/, '') !== compact.replace(/=+$/, '')) {
+    throw unsupportedFeature('Claude 文本附件包含无效的 base64 数据');
+  }
+  try { return UTF8_DECODER.decode(buffer); }
+  catch { throw unsupportedFeature('Claude 文本附件不是有效的 UTF-8 文本'); }
+}
+
+function textDocumentData(part) {
+  const source = part?.source;
+  if (source?.type === 'text') {
+    if (typeof source.data !== 'string') throw unsupportedFeature('Claude 文本附件缺少字符串 data');
+    return source.data;
+  }
+  if (source?.type === 'content') {
+    if (!Array.isArray(source.content)) throw unsupportedFeature('Claude 自定义文本附件缺少 content 数组');
+    if (source.content.some((block) => block?.type !== 'text' || typeof block.text !== 'string')) {
+      throw unsupportedFeature('Chat Completions 只能内联全部由文本块组成的 Claude 附件');
+    }
+    return source.content.map((block) => block.text).join('\n');
+  }
+  if (source?.type === 'base64' && textualMediaType(source.media_type)) {
+    if (typeof source.data !== 'string') throw unsupportedFeature('Claude 文本附件缺少 base64 data');
+    return decodeBase64Utf8(source.data);
+  }
+  return undefined;
+}
+
+function chatTextDocumentPart(part) {
+  const text = textDocumentData(part);
+  if (text === undefined) return undefined;
+  const metadata = {
+    name: part.title || part.filename || fallbackFilename(part.source),
+    ...(typeof part.context === 'string' && part.context ? { context: part.context } : {})
+  };
+  return {
+    type: 'text',
+    text: `[Attached text document ${canonicalJsonString(metadata)}]\n${text}\n[End attached text document]`,
+    ...(part.cacheControl ? { cache_control: part.cacheControl } : {})
+  };
 }
 
 function responsesFilePart(part) {
@@ -616,16 +676,25 @@ export function formatRequest(request, protocol, options = {}) {
     const textParts = message.parts.filter((x) => x.type === 'text');
     const images = message.parts.filter((x) => x.type === 'image');
     const files = message.parts.filter((x) => x.type === 'file');
-    if (files.length) throw unsupportedFeature('Chat Completions 跨协议转换无法无损表达文件内容块；请将该模型路由设为 responses 或 claude');
+    const chatFiles = new Map(files.map((file) => [file, chatTextDocumentPart(file)]));
+    if ([...chatFiles.values()].some((part) => !part)) {
+      throw unsupportedFeature('Chat Completions 跨协议转换无法无损表达非文本文件内容块；请将该模型路由设为 responses 或 claude');
+    }
     const text = textParts.map((x) => x.text).join('');
     const hasCacheControl = textParts.some((part) => part.cacheControl);
+    const richContent = message.parts.flatMap((part) => {
+      if (part.type === 'text') return [{ type: 'text', text: part.text, ...(part.cacheControl ? { cache_control: part.cacheControl } : {}) }];
+      if (part.type === 'image') return [chatImagePart(part, options.imageHandoffEnabled)];
+      if (part.type === 'file') return [chatFiles.get(part)];
+      return [];
+    });
     const calls = message.parts.filter((x) => x.type === 'tool_call');
     const results = message.parts.filter((x) => x.type === 'tool_result');
     const reasoning = message.parts.filter((x) => x.type === 'reasoning').map((x) => x.text).filter(Boolean).join('\n');
     for (const result of results) messages.push({ role: 'tool', tool_call_id: result.id, content: typeof result.content === 'string' ? result.content : canonicalJsonString(result.content) });
-    if (text || images.length || calls.length) appendChatAssistantMessage(messages, {
+    if (text || images.length || files.length || calls.length) appendChatAssistantMessage(messages, {
       role: message.role,
-      content: images.length || hasCacheControl ? [...textParts.map((x) => ({ type: 'text', text: x.text, ...(x.cacheControl ? { cache_control: x.cacheControl } : {}) })), ...images.map((part) => chatImagePart(part, options.imageHandoffEnabled))] : (text || null),
+      content: images.length || files.length || hasCacheControl ? richContent : (text || null),
       ...(message.role === 'assistant' && usesReasoningContent(request.model) && (reasoning || calls.length) ? { reasoning_content: reasoning || 'tool call' } : {}),
       ...(calls.length ? { tool_calls: calls.map((x) => ({ id: x.id, type: 'function', function: { name: x.name, arguments: canonicalJsonString(x.arguments) } })) } : {})
     });

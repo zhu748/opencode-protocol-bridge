@@ -351,6 +351,23 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.body.instructions, 'Gemini 系统提示');
     assert.equal(captured.body.input[0].content[0].text, 'Gemini 非流式测试');
 
+    const claudeTextAttachment = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
+      body: JSON.stringify({
+        model: 'chat-alias', max_tokens: 64,
+        messages: [{ role: 'user', content: [
+          { type: 'document', title: 'www.temporary-mail.net.txt', source: { type: 'text', media_type: 'text/plain', data: '实际收到了注册邮件' } },
+          { type: 'text', text: '请检查附件' }
+        ] }]
+      })
+    });
+    assert.equal(claudeTextAttachment.status, 200);
+    assert.equal(captured.path, '/chat/completions');
+    assert.equal(captured.body.model, 'deepseek-v4-flash');
+    assert.match(captured.body.messages[0].content[0].text, /www\.temporary-mail\.net\.txt/);
+    assert.match(captured.body.messages[0].content[0].text, /实际收到了注册邮件/);
+    assert.equal(captured.body.messages[0].content[1].text, '请检查附件');
+
     const geminiStream = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1beta/models/alias:streamGenerateContent?alt=sse`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': createdClient.token },
       body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Gemini 流式测试' }] }] })
