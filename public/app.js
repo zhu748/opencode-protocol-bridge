@@ -1,6 +1,7 @@
 import { compactIdentifier, filterRequestLogs, formatCooldownRemaining, requestLogsToCsv } from './log-utils.js';
 import { createLatestRequestGate, optionalLoad, summarizeSourceFailures } from './refresh-utils.js';
 import { escapeHtml } from './html-utils.js';
+import { createOpenCodeConfig } from './opencode-config.js';
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -179,9 +180,20 @@ function renderRuntimeSummary() {
     const httpConnections = Number.isFinite(serviceStatus.activeHttpConnections)
       ? ` · 连接 ${formatNumber(serviceStatus.activeHttpConnections)}/${formatNumber(serviceStatus.maxHttpConnections)}`
       : '';
+    const inferenceDetails = [
+      serviceStatus.activeInferenceRequests ? `最久 ${formatDuration(serviceStatus.oldestActiveInferenceMs)}` : '',
+      serviceStatus.activeStreamingRequests ? `流 ${formatNumber(serviceStatus.activeStreamingRequests)}` : '',
+      serviceStatus.activeUpstreamWaitRequests ? `等上游 ${formatNumber(serviceStatus.activeUpstreamWaitRequests)}` : '',
+      serviceStatus.activeStreamWrites ? `写入 ${formatNumber(serviceStatus.activeStreamWrites)}` : '',
+      serviceStatus.activeEstablishedStreams ? `最长静默 ${formatDuration(serviceStatus.longestActiveStreamSilenceMs)}` : '',
+      serviceStatus.activeStreamHeartbeats ? `心跳 ${formatNumber(serviceStatus.activeStreamHeartbeats)}` : ''
+    ].filter(Boolean).join(' · ');
+    const inference = serviceStatus.activeInferenceRequests
+      ? ` · 推理 ${formatNumber(serviceStatus.activeInferenceRequests)}${inferenceDetails ? `（${inferenceDetails}）` : ''}`
+      : '';
     const adminMutations = serviceStatus.activeAdminMutations ? ` · 管理写 ${formatNumber(serviceStatus.activeAdminMutations)}/${formatNumber(serviceStatus.maxAdminMutations)}` : '';
     const adminDiscoveries = serviceStatus.activeAdminModelDiscoveries ? ` · 模型发现 ${formatNumber(serviceStatus.activeAdminModelDiscoveries)}/${formatNumber(serviceStatus.maxAdminModelDiscoveries)}` : '';
-    $('#request-summary').textContent = `${successSummary} · 活跃 ${serviceStatus.activeRequests}${httpConnections}${adminMutations}${adminDiscoveries} · 平均 ${formatDuration(serviceStatus.averageDuration)}${upstreamTiming} · ${serviceStatus.memoryMb} MiB${serviceStatus.logPersistenceError ? ' · 日志异常' : ''}${statusStale ? ' · 状态未更新' : ''}${logsStale ? ' · 日志未更新' : ''}`;
+    $('#request-summary').textContent = `${successSummary} · 活跃 ${serviceStatus.activeRequests}${inference}${httpConnections}${adminMutations}${adminDiscoveries} · 平均 ${formatDuration(serviceStatus.averageDuration)}${upstreamTiming} · ${serviceStatus.memoryMb} MiB${serviceStatus.logPersistenceError ? ' · 日志异常' : ''}${statusStale ? ' · 状态未更新' : ''}${logsStale ? ' · 日志未更新' : ''}`;
     $('#request-summary').title = serviceStatus.logPersistenceError || '';
   } else {
     $('#request-summary').textContent = `运行状态暂不可用${logsStale ? ' · 日志未更新' : ''}`;
@@ -261,6 +273,7 @@ async function refresh() {
     $('#requestLogLimit').value = config.requestLogLimit;
     $('#persistLogs').checked = Boolean(config.persistLogs);
     $('#upstreamTimeoutMs').value = config.upstreamTimeoutMs;
+    $('#upstreamStreamIdleTimeoutMs').value = config.upstreamStreamIdleTimeoutMs;
     $('#maxConcurrentRequests').value = config.maxConcurrentRequests;
     $('#keepAliveUrl').value = config.keepAliveUrl || '';
     $('#keepAliveIntervalSeconds').value = config.keepAliveIntervalSeconds || 60;
@@ -323,7 +336,9 @@ function renderRecentPrompt(snapshot = {}) {
   }
   const actions = (recentPrompt.applied || []).map((item) => `${item.action === 'delete' ? '已删除' : '已替换'}${item.name}×${item.count}`).join('，') || '没有规则命中';
   const truncated = recentPrompt.originalTruncated || recentPrompt.finalTruncated ? ' · 内存预览已截断' : '';
-  $('#prompt-meta').textContent = `${recentPrompt.model} · ${recentPrompt.protocol} → ${recentPrompt.upstreamProtocol || 'unknown'} · ${new Date(recentPrompt.time).toLocaleString()} · 原始 ${recentPrompt.originalBytes}B → 最终 ${recentPrompt.finalBytes}B · ${actions}${truncated}`;
+  const sources = recentPrompt.messageSystemCount ? ` · 顶层 system + 会话中途 system×${recentPrompt.messageSystemCount}` : ' · 顶层 system';
+  const steering = recentPrompt.messageUserSteeringCount ? ` · 运行中用户引导×${recentPrompt.messageUserSteeringCount}` : '';
+  $('#prompt-meta').textContent = `${recentPrompt.model} · ${recentPrompt.protocol} → ${recentPrompt.upstreamProtocol || 'unknown'} · ${new Date(recentPrompt.time).toLocaleString()}${sources}${steering} · 原始 ${recentPrompt.originalBytes}B → 最终 ${recentPrompt.finalBytes}B · ${actions}${truncated}`;
   renderPromptRuleResults(recentPrompt.ruleResults || []);
   renderPromptRuleList();
 }
@@ -430,7 +445,10 @@ function renderLogs() {
   $('#log-filter-count').textContent = `显示 ${formatNumber(items.length)} / ${formatNumber(requestLogItems.length)}`;
   $('#export-logs').disabled = items.length === 0;
   $('#log-rows').innerHTML = items.map((item) => {
-    const tokens = item.inputTokens === undefined ? '—' : `${item.inputTokens} / ${item.outputTokens}${item.cachedInputTokens ? ` · 缓存读取 ${item.cachedInputTokens}` : ''}${item.cacheCreationInputTokens ? ` · 缓存写入 ${item.cacheCreationInputTokens}` : ''}${item.reasoningTokens ? ` · 推理 ${item.reasoningTokens}` : ''}`;
+    const cacheTtl = item.cacheCreation5mInputTokens || item.cacheCreation1hInputTokens
+      ? `（5m ${item.cacheCreation5mInputTokens || 0} / 1h ${item.cacheCreation1hInputTokens || 0}）`
+      : '';
+    const tokens = item.inputTokens === undefined ? '—' : `${item.inputTokens} / ${item.outputTokens}${item.cachedInputTokens ? ` · 缓存读取 ${item.cachedInputTokens}` : ''}${item.cacheCreationInputTokens ? ` · 缓存写入 ${item.cacheCreationInputTokens}${cacheTtl}` : ''}${item.reasoningTokens ? ` · 推理 ${item.reasoningTokens}` : ''}`;
     const model = item.upstreamModel && item.upstreamModel !== item.model ? `${item.model} → ${item.upstreamModel}` : item.model;
     const statusClass = item.status >= 200 && item.status < 400 ? 'status-ok' : 'status-bad';
     const errorText = [item.errorCode, item.error].filter(Boolean).join(' · ');
@@ -441,12 +459,15 @@ function renderLogs() {
     const retryAfter = item.retryAfter ? `<small class="log-retry-after">等待 ${escapeHtml(item.retryAfter)}</small>` : '';
     const attempts = Number(item.credentialAttempts) > 1 ? `<small class="log-key-attempts">尝试 ${formatNumber(item.credentialAttempts)} 把 Key</small>` : '';
     const credential = `${escapeHtml(credentialLabel(item))}${attempts}`;
+    const responseDegradations = item.responseDegradations
+      ? `<small class="log-response-degradations" title="${escapeHtml(item.responseDegradations)}">响应元数据降级：${escapeHtml(item.responseDegradations)}</small>`
+      : '';
     const phases = [
       Object.hasOwn(item, 'upstreamWaitMs') ? `等待 ${formatDuration(item.upstreamWaitMs)}` : '',
       Object.hasOwn(item, 'upstreamBodyMs') ? `响应体 ${formatDuration(item.upstreamBodyMs)}` : ''
     ].filter(Boolean).join(' · ');
     const timing = `${formatDuration(item.duration)}${phases ? `<small class="log-timing">${phases}</small>` : ''}`;
-    return `<tr><td>${escapeHtml(new Date(item.time).toLocaleString())}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}</td><td class="${statusClass}">${formatNumber(item.status)}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
+    return `<tr><td>${escapeHtml(new Date(item.time).toLocaleString())}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}${responseDegradations}</td><td class="${statusClass}">${formatNumber(item.status)}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
   }).join('');
 }
 
@@ -632,6 +653,19 @@ function visibleImageHandoffModels() {
   return (discoveredImageModels.get(provider) || []).filter((model) => !query || model.toLowerCase().includes(query));
 }
 
+function modelCapability(provider, model) {
+  if (!['go', 'zen'].includes(provider) || typeof model !== 'string') return null;
+  return config[`${provider}ModelCapabilities`]?.[model.toLowerCase()] || null;
+}
+
+function modelCapabilityBadges(provider, model) {
+  const capability = modelCapability(provider, model);
+  if (!capability) return '<em class="model-capability unknown">能力未知</em>';
+  const protocol = { responses: 'RESPONSES', claude: 'CLAUDE', chat: 'CHAT', gemini: 'GEMINI' }[capability.protocol] || 'UNKNOWN';
+  const vision = capability.imageInput ? '原生视觉' : '文本 · 建议交接';
+  return `<em class="model-capability protocol-${escapeHtml(capability.protocol)}">${protocol}</em><em class="model-capability ${capability.imageInput ? 'vision' : 'text-only'}">${vision}</em>`;
+}
+
 function renderSelectedImageHandoffModels() {
   $('#image-handoff-selected').innerHTML = imageHandoffModels.length
     ? imageHandoffModels.map((entry) => `<span class="image-handoff-chip"><b>${escapeHtml(entry.provider.toUpperCase())}</b>${escapeHtml(entry.model)}<button class="remove-image-handoff-model" data-provider="${escapeHtml(entry.provider)}" data-model="${escapeHtml(entry.model)}" type="button" aria-label="移除 ${escapeHtml(entry.model)}">×</button></span>`).join('')
@@ -646,7 +680,7 @@ function renderImageHandoffModelList() {
   $('#image-handoff-model-list').innerHTML = !discovered
     ? '<p class="empty-inline">请选择项目 Key 并拉取模型列表</p>'
     : models.length
-      ? models.map((model) => `<label class="image-model-option"><input type="checkbox" data-provider="${escapeHtml(provider)}" data-model="${escapeHtml(model)}" ${selected.has(imageHandoffKey(provider, model)) ? 'checked' : ''}><span>${escapeHtml(model)}</span></label>`).join('')
+      ? models.map((model) => `<label class="image-model-option"><input type="checkbox" data-provider="${escapeHtml(provider)}" data-model="${escapeHtml(model)}" ${selected.has(imageHandoffKey(provider, model)) ? 'checked' : ''}><span class="image-model-name">${escapeHtml(model)}</span>${modelCapabilityBadges(provider, model)}</label>`).join('')
       : '<p class="empty-inline">没有符合筛选条件的模型</p>';
 }
 
@@ -657,6 +691,8 @@ function renderImageHandoffSettings() {
   $('#image-handoff-mode').classList.toggle('warning', mode === 'disabled');
   const provider = $('#imageHandoffProvider').value;
   const discovered = discoveredImageModels.get(provider);
+  $('#select-recommended-image-models').disabled = !discovered || !config[`${provider}ModelCapabilities`];
+  $('#select-recommended-image-models').title = `按内置 OpenCode ${provider === 'go' ? 'Go' : 'Zen'} 模态表添加当前结果中的文本模型`;
   $('#image-handoff-status').textContent = discovered
     ? `已缓存 ${provider.toUpperCase()} 的 ${discovered.length} 个模型 · 已选择 ${imageHandoffModels.length} 个`
     : `已配置 ${imageHandoffModels.length} 个模型 · 尚未拉取 ${provider.toUpperCase()} 模型`;
@@ -791,13 +827,13 @@ function renderExamples() {
   $('#claude-example').textContent = command('/zen/v1/messages', 'x-api-key: YOUR_TOKEN', { model: 'claude-haiku-4-5', max_tokens: 1024, messages: [{ role: 'user', content: '你好' }] });
   $('#responses-example').textContent = command('/zen/v1/responses', 'Authorization: Bearer YOUR_TOKEN', { model: 'gpt-5.6-terra', input: '你好' });
   $('#chat-example').textContent = command('/go/v1/chat/completions', 'Authorization: Bearer YOUR_TOKEN', { model: 'kimi-k2.6', messages: [{ role: 'user', content: '你好' }] });
-  $('#gemini-example').textContent = command('/v1beta/models/kimi-k2.6:generateContent', 'x-goog-api-key: YOUR_TOKEN', { contents: [{ role: 'user', parts: [{ text: '你好' }] }] });
-  $('#opencode-example').textContent = JSON.stringify({
-    provider: {
-      bridgeZen: { npm: '@ai-sdk/openai-compatible', options: { baseURL: `${root}/zen/v1`, apiKey: '{env:OPENCODE_BRIDGE_TOKEN}' }, models: { 'gpt-5.6-terra': {} } },
-      bridgeGo: { npm: '@ai-sdk/openai-compatible', options: { baseURL: `${root}/go/v1`, apiKey: '{env:OPENCODE_BRIDGE_TOKEN}' }, models: { 'kimi-k2.7-code': {} } }
-    }
-  }, null, 2);
+  $('#gemini-example').textContent = command('/zen/v1/models/gemini-3.6-flash:generateContent', 'x-goog-api-key: YOUR_TOKEN', { contents: [{ role: 'user', parts: [{ text: '你好' }] }] });
+  $('#opencode-example').textContent = JSON.stringify(createOpenCodeConfig(root, config.goModelCapabilities, config.imageHandoffModels, {
+    availableProviders: ['zen', 'go'].filter((provider) => config[`${provider}Configured`] === true),
+    defaultProvider: config.defaultProvider,
+    imageHandoffTransport: config.imageHandoffTransport,
+    zenCapabilities: config.zenModelCapabilities
+  }), null, 2);
 }
 
 const titles = { overview: '运行概览', settings: '连接设置', routes: '模型路由', prompts: '提示词规则', clients: '访问令牌', stats: '用量统计', logs: '请求记录', guide: '接入指南' };
@@ -849,7 +885,7 @@ $('#settings-form').addEventListener('submit', async (event) => {
     const payload = configPayload({
       defaultProvider: $('#defaultProvider').value,
       clientToken: $('#clientToken').value,
-      requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes,
+      requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), upstreamStreamIdleTimeoutMs: Number($('#upstreamStreamIdleTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes,
       ...keepAliveOverrides
     });
     if ($('#proxyUrl').value.trim()) payload.proxyUrl = $('#proxyUrl').value.trim();
@@ -866,6 +902,7 @@ function configPayload(overrides = {}) {
     requestLogLimit: config.requestLogLimit,
     persistLogs: Boolean(config.persistLogs),
     upstreamTimeoutMs: config.upstreamTimeoutMs,
+    upstreamStreamIdleTimeoutMs: config.upstreamStreamIdleTimeoutMs,
     maxConcurrentRequests: config.maxConcurrentRequests,
     ...(!config.urlManagedByEnvironment ? { keepAliveUrl: config.keepAliveUrl || '' } : {}),
     ...(!config.intervalManagedByEnvironment ? { keepAliveIntervalSeconds: config.keepAliveIntervalSeconds || 60 } : {}),
@@ -914,6 +951,27 @@ $('#imageHandoffProvider').addEventListener('change', () => {
 });
 
 $('#imageHandoffSearch').addEventListener('input', renderImageHandoffModelList);
+
+$('#select-recommended-image-models').addEventListener('click', () => {
+  const provider = $('#imageHandoffProvider').value;
+  const recommended = visibleImageHandoffModels().filter((model) => modelCapability(provider, model)?.imageInput === false);
+  if (!recommended.length) return toast('当前结果中没有能力表确认的纯文本模型');
+  const byKey = new Map(imageHandoffModels.map((entry) => [imageHandoffKey(entry.provider, entry.model), entry]));
+  let added = 0;
+  for (const model of recommended) {
+    if (byKey.size >= 500) break;
+    const key = imageHandoffKey(provider, model);
+    if (byKey.has(key)) continue;
+    byKey.set(key, { provider, model });
+    added++;
+  }
+  if (!added) return toast('当前建议文本模型均已选择');
+  imageHandoffModels = [...byKey.values()].sort((left, right) => left.provider.localeCompare(right.provider) || left.model.localeCompare(right.model));
+  markConfigDirty('images');
+  renderSelectedImageHandoffModels();
+  renderImageHandoffModelList();
+  $('#image-handoff-status').textContent = `已添加 ${added} 个建议文本模型，尚未保存`;
+});
 
 $('#load-image-handoff-models').addEventListener('click', async (event) => {
   const provider = $('#imageHandoffProvider').value;

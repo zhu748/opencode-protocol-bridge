@@ -18,7 +18,7 @@ async function rawHttpRequest(port, request) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 }, async () => {
+test('服务可启动并提供健康检查与管理页面', { timeout: 30_000 }, async () => {
   const port = 20_000 + Math.floor(Math.random() * 10_000);
   const configFile = resolve(import.meta.dirname, `../data/smoke-${randomUUID()}.json`);
   const child = spawn(process.execPath, ['src/server.js'], {
@@ -153,6 +153,10 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     const invalidUtf8Setup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: Buffer.concat([Buffer.from('{"password":"'), Buffer.from([0xff]), Buffer.from('"}')]) });
     assert.equal(invalidUtf8Setup.status, 400);
     assert.deepEqual(await invalidUtf8Setup.json(), { error: 'JSON 格式无效' });
+    const deeplyNestedSetupBody = `${'{"x":'.repeat(257)}0${'}'.repeat(257)}`;
+    const deeplyNestedSetup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: deeplyNestedSetupBody });
+    assert.equal(deeplyNestedSetup.status, 400);
+    assert.match((await deeplyNestedSetup.json()).error, /JSON 嵌套深度不能超过 256 层/);
     const invalidSetup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'abc-12' }) });
     assert.equal(invalidSetup.status, 400);
     const setup = await fetch(`http://127.0.0.1:${port}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'testpassword123' }) });
@@ -174,6 +178,15 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.ok(connectionStatus.activeHttpRequests >= 1);
     assert.equal(connectionStatus.maxHttpConnections, 256);
     assert.equal(connectionStatus.streamWriteTimeoutMs, 30_000);
+    assert.equal(connectionStatus.sseHeartbeatMs, 15_000);
+    assert.equal(connectionStatus.activeInferenceRequests, 0);
+    assert.equal(connectionStatus.activeStreamingRequests, 0);
+    assert.equal(connectionStatus.activeUpstreamWaitRequests, 0);
+    assert.equal(connectionStatus.activeEstablishedStreams, 0);
+    assert.equal(connectionStatus.activeStreamWrites, 0);
+    assert.equal(connectionStatus.oldestActiveInferenceMs, 0);
+    assert.equal(connectionStatus.longestActiveStreamSilenceMs, 0);
+    assert.equal(connectionStatus.activeStreamHeartbeats, 0);
     const wrongStatusMethod = await fetch(`http://127.0.0.1:${port}/api/status`, { method: 'POST', headers: { cookie } });
     assert.equal(wrongStatusMethod.status, 405);
     assert.equal(wrongStatusMethod.headers.get('allow'), 'GET');
@@ -197,11 +210,14 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     assert.doesNotMatch(JSON.stringify(redactedConfig), new RegExp(setupBody.clientToken));
     assert.equal(redactedConfig.encryptionEnabled, true);
     assert.equal(redactedConfig.persistLogs, false);
+    assert.equal(redactedConfig.upstreamStreamIdleTimeoutMs, 300000);
     assert.equal(redactedConfig.promptRewriteRules.length, 3);
     assert.equal(redactedConfig.promptRewriteDefaults.length, 3);
     assert.equal(redactedConfig.zenProxyUrl, '');
     assert.equal(redactedConfig.goProxyUrl, '');
     assert.equal(redactedConfig.zenProxyConfigured, false);
+    assert.equal(typeof redactedConfig.zenConfigured, 'boolean');
+    assert.equal(typeof redactedConfig.goConfigured, 'boolean');
     assert.match(redactedConfig.revision, /^[a-f0-9]{32}$/);
     assert.equal(redactedConfigResponse.headers.get('etag'), `"${redactedConfig.revision}"`);
 
@@ -279,6 +295,9 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     const invalidNumericSetting = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, requestLogLimit: 10.5 }) });
     assert.equal(invalidNumericSetting.status, 400);
     assert.match((await invalidNumericSetting.json()).error, /整数/);
+    const invalidStreamIdleTimeout = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, upstreamStreamIdleTimeoutMs: 999 }) });
+    assert.equal(invalidStreamIdleTimeout.status, 400);
+    assert.match((await invalidStreamIdleTimeout.json()).error, /0 或 1000–3600000/);
     const invalidKeepAlive = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, keepAliveUrl: 'file:///tmp/healthz' }) });
     assert.equal(invalidKeepAlive.status, 400);
     const enabledKeepAlive = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, keepAliveUrl: `http://127.0.0.1:${port}/healthz`, keepAliveIntervalSeconds: 5 }) });
@@ -365,9 +384,87 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 10_000 },
     const malformedClaude = await fetch(`http://127.0.0.1:${port}/go/v1/messages`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': setupBody.clientToken }, body: '{broken' });
     assert.equal(malformedClaude.status, 400);
     assert.deepEqual(await malformedClaude.json(), { type: 'error', error: { type: 'invalid_request_error', message: 'JSON 格式无效' } });
+    const excessiveJsonNodes = await fetch(`http://127.0.0.1:${port}/go/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': setupBody.clientToken },
+      body: JSON.stringify({ model: 'x', input: Array(250_000).fill(0) })
+    });
+    assert.equal(excessiveJsonNodes.status, 413);
+    assert.match((await excessiveJsonNodes.json()).error.message, /JSON 结构不能超过 250000 个值/);
+    for (const [path, request] of [
+      ['/go/v1/messages', { model: 'x', stream: 'false', max_tokens: 1, messages: [] }],
+      ['/go/v1/responses', { model: 'x', stream: 1, input: 'test' }],
+      ['/go/v1/chat/completions', { model: 'x', stream: null, messages: [] }]
+    ]) {
+      const invalidStream = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${setupBody.clientToken}` },
+        body: JSON.stringify(request)
+      });
+      assert.equal(invalidStream.status, 400);
+      assert.match(JSON.stringify(await invalidStream.json()), /stream 必须是布尔值/);
+    }
+    for (const [path, request, message] of [
+      ['/go/v1/messages', {
+        model: 'x', max_tokens: 1, messages: [{ role: 'user', content: 'test' }],
+        tools: [{ name: 'run', input_schema: { type: 'object' } }],
+        tool_choice: { type: 'auto', disable_parallel_tool_use: 'false' }
+      }, /disable_parallel_tool_use 必须是布尔值/],
+      ['/go/v1/responses', {
+        model: 'x', input: 'test', parallel_tool_calls: 1,
+        tools: [{ type: 'function', name: 'run', parameters: { type: 'object' } }]
+      }, /parallel_tool_calls 必须是布尔值/],
+      ['/go/v1/chat/completions', {
+        model: 'gpt-test', messages: [{ role: 'user', content: 'test' }], logprobs: 'true'
+      }, /logprobs 必须是布尔值/],
+      ['/go/v1/responses', {
+        model: 'x', input: 'test', max_output_tokens: 0
+      }, /max_output_tokens/],
+      ['/go/v1/chat/completions', {
+        model: 'gpt-test', messages: [{ role: 'user', content: 'test' }], tool_choice: 1
+      }, /Chat tool_choice 必须是对象/],
+      ['/go/v1/messages', {
+        model: 'x', max_tokens: 1, messages: { role: 'user', content: 'test' }
+      }, /Claude messages 必须是数组/],
+      ['/go/v1/responses', {
+        model: 'x', input: { role: 'user', content: 'test' }
+      }, /Responses input 必须是字符串或输入项数组/],
+      ['/go/v1/chat/completions', {
+        model: 'gpt-test', messages: [{ role: 'user', content: 'test' }], stop: 1
+      }, /Chat stop 必须是字符串或字符串数组/],
+      ['/go/v1/chat/completions', {
+        model: 'gpt-test', messages: [{ role: 'user', content: 'test' }], metadata: { nested: { value: 'x' } }
+      }, /Responses metadata\.nested.*字符串/],
+      ['/go/v1/chat/completions', {
+        model: 'gpt-test', messages: [{ role: 'assistant', content: null, tool_calls: [null] }]
+      }, /tool_calls\[0\] 必须是对象/],
+      ['/go/v1/chat/completions', {
+        model: 'gpt-test', messages: [{ role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'run', arguments: '{bad' } }] }]
+      }, /function\.arguments 必须是对象/],
+      ['/go/v1/responses', {
+        model: 'x', input: [{ type: 'function_call', name: 'run', arguments: '{}' }]
+      }, /function_call\.call_id\/id 必须是非空字符串/]
+    ]) {
+      const invalidCrossProtocolControl = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${setupBody.clientToken}` },
+        body: JSON.stringify(request)
+      });
+      assert.equal(invalidCrossProtocolControl.status, 400);
+      assert.match(JSON.stringify(await invalidCrossProtocolControl.json()), message);
+    }
+    const geminiReservedFields = await fetch(`http://127.0.0.1:${port}/go/v1beta/models/x:generateContent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-goog-api-key': setupBody.clientToken },
+      body: JSON.stringify({ model: 'other', stream: true, contents: [{ role: 'user', parts: [{ text: 'test' }] }] })
+    });
+    assert.equal(geminiReservedFields.status, 400);
+    assert.match(JSON.stringify(await geminiReservedFields.json()), /由 URL 决定的字段：model, stream/);
     const oversizedModel = await fetch(`http://127.0.0.1:${port}/v1/responses`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${setupBody.clientToken}` }, body: JSON.stringify({ model: 'x'.repeat(257), input: 'test' }) });
     assert.equal(oversizedModel.status, 400);
     assert.match((await oversizedModel.json()).error.message, /1–256/);
+    const controlCharacterModel = await fetch(`http://127.0.0.1:${port}/v1/responses`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${setupBody.clientToken}` }, body: JSON.stringify({ model: 'bad\nmodel', input: 'test' }) });
+    assert.equal(controlCharacterModel.status, 400);
+    assert.match((await controlCharacterModel.json()).error.message, /控制字符/);
     const emptyPrefixedModel = await fetch(`http://127.0.0.1:${port}/v1/responses`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${setupBody.clientToken}` }, body: JSON.stringify({ model: 'opencode-go/', input: 'test' }) });
     assert.equal(emptyPrefixedModel.status, 400);
     assert.match((await emptyPrefixedModel.json()).error.message, /上游模型名不能为空/);
@@ -543,13 +640,26 @@ test('HTTP 总连接上限会拒绝额外连接并在连接关闭后恢复', { t
   }
 });
 
-test('流式上游中途断开会向客户端发送协议错误并写入失败日志', { timeout: 10_000 }, async () => {
+test('流式上游中途断开会向客户端发送协议错误并写入失败日志', { timeout: 15_000 }, async () => {
   let upstreamCalls = 0;
   let resolveDelayedRequest;
   const delayedRequest = new Promise((resolveRequest) => { resolveDelayedRequest = resolveRequest; });
+  let resolveStreamingBodyClosed;
+  const streamingBodyClosed = new Promise((resolveClosed) => { resolveStreamingBodyClosed = resolveClosed; });
+  let resolveIdleBodyClosed;
+  const idleBodyClosed = new Promise((resolveClosed) => { resolveIdleBodyClosed = resolveClosed; });
+  let responseUpstreamCalls = 0;
+  let resolveCrossProtocolBodyClosed;
+  const crossProtocolBodyClosed = new Promise((resolveClosed) => { resolveCrossProtocolBodyClosed = resolveClosed; });
   const upstream = createHttpServer((req, res) => {
     if (req.url === '/responses') {
+      responseUpstreamCalls++;
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+      if (responseUpstreamCalls === 2) {
+        res.flushHeaders();
+        res.once('close', resolveCrossProtocolBodyClosed);
+        return;
+      }
       res.write(`event: response.created\ndata: ${JSON.stringify({
         type: 'response.created', sequence_number: 12,
         response: { id: 'resp_broken', object: 'response', status: 'in_progress', model: 'response-stream', output: [] }
@@ -566,21 +676,33 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
       return;
     }
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+    if (upstreamCalls === 8) {
+      res.flushHeaders();
+      res.once('close', resolveStreamingBodyClosed);
+      return;
+    }
+    const streamId = upstreamCalls === 3 ? 'chat_recovered'
+      : (upstreamCalls === 4 || upstreamCalls === 6) ? 'chat_media'
+        : 'chat_broken';
     res.write(`data: ${JSON.stringify({
-      id: 'chat_broken', model: 'deepseek-v4-flash',
+      id: streamId, model: 'deepseek-v4-flash',
       choices: [{ index: 0, delta: { role: 'assistant', content: 'partial' }, finish_reason: null }]
     })}\n\n`);
+    if (upstreamCalls === 9) {
+      res.once('close', resolveIdleBodyClosed);
+      return;
+    }
     if (upstreamCalls <= 2) setImmediate(() => res.destroy());
     else if (upstreamCalls === 4 || upstreamCalls === 6) {
       res.end(`data: ${JSON.stringify({
-        id: 'chat_media', model: 'deepseek-v4-flash',
+        id: streamId, model: 'deepseek-v4-flash',
         choices: [{ index: 0, delta: { content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/x.png' } }] }, finish_reason: null }]
       })}\n\n`);
     }
     else if (upstreamCalls === 5) res.end();
     else {
       res.end(`data: ${JSON.stringify({
-        id: 'chat_recovered', model: 'deepseek-v4-flash',
+        id: streamId, model: 'deepseek-v4-flash',
         choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
         usage: { prompt_tokens: 3, completion_tokens: 1 }
       })}\n\ndata: [DONE]\n\n`);
@@ -598,6 +720,7 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     CONFIG_ENCRYPTION_KEY: 'stream-failure-master-key',
     OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
     OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_BRIDGE_SSE_HEARTBEAT_MS: '1000',
     OPENCODE_ZEN_KEY_1: 'zen-stream-key',
     OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
   });
@@ -724,6 +847,132 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     assert.equal(canceledStats.summary.requests, 8);
     assert.equal(canceledStats.summary.errors, 7);
     assert.equal(canceledStats.credentialHealth[0].consecutiveFailures, 2);
+
+    const streamingCancellation = new AbortController();
+    const streamingResponse = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', signal: AbortSignal.any([streamingCancellation.signal, AbortSignal.timeout(2_000)]),
+      headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, messages: [{ role: 'user', content: 'cancel after headers before first event' }] })
+    });
+    assert.equal(streamingResponse.status, 200);
+    assert.equal(streamingResponse.headers.get('x-accel-buffering'), 'no');
+    const streamingReader = streamingResponse.body.getReader();
+    const directHeartbeat = await Promise.race([
+      streamingReader.read(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('同协议静默 SSE 未按时发送心跳')), 2_000))
+    ]);
+    assert.equal(Buffer.from(directHeartbeat.value).toString('utf8'), ': opencode-bridge keep-alive\n\n');
+    const directRuntime = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(directRuntime.activeInferenceRequests, 1);
+    assert.equal(directRuntime.activeStreamingRequests, 1);
+    assert.equal(directRuntime.activeUpstreamWaitRequests, 0);
+    assert.equal(directRuntime.activeEstablishedStreams, 1);
+    assert.equal(directRuntime.activeStreamWrites, 0);
+    assert.ok(directRuntime.oldestActiveInferenceMs >= directRuntime.longestActiveStreamSilenceMs);
+    assert.ok(directRuntime.longestActiveStreamSilenceMs >= 900);
+    assert.equal(directRuntime.activeStreamHeartbeats, 1);
+    streamingCancellation.abort();
+    await assert.rejects(() => streamingReader.read(), (error) => error.name === 'AbortError');
+    await Promise.race([
+      streamingBodyClosed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('客户端断开后上游 SSE 正文连接未及时关闭')), 1_000))
+    ]);
+    let streamingCanceledStats;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      streamingCanceledStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+      if (streamingCanceledStats.summary.requests === 9) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    assert.equal(streamingCanceledStats.summary.requests, 9);
+    assert.equal(streamingCanceledStats.summary.errors, 8);
+    assert.equal(streamingCanceledStats.credentialHealth[0].consecutiveFailures, 2);
+
+    const crossFlushConfig = await fetch(`http://127.0.0.1:${port}/api/config`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({
+        defaultProvider: 'zen',
+        modelRoutes: {
+          'response-stream': { protocol: 'responses' },
+          'cross-flush': { protocol: 'responses' }
+        }
+      })
+    });
+    assert.equal(crossFlushConfig.status, 200);
+    const crossCancellation = new AbortController();
+    const crossFlushResponse = await fetch(`http://127.0.0.1:${port}/zen/v1/messages`, {
+      method: 'POST', signal: AbortSignal.any([crossCancellation.signal, AbortSignal.timeout(2_000)]),
+      headers: { 'content-type': 'application/json', 'x-api-key': 'Api123' },
+      body: JSON.stringify({ model: 'cross-flush', stream: true, max_tokens: 16, messages: [{ role: 'user', content: 'cancel translated stream before first event' }] })
+    });
+    assert.equal(crossFlushResponse.status, 200);
+    assert.equal(crossFlushResponse.headers.get('x-accel-buffering'), 'no');
+    const crossReader = crossFlushResponse.body.getReader();
+    const heartbeatChunk = await Promise.race([
+      crossReader.read(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('跨协议静默 SSE 未按时发送心跳')), 2_000))
+    ]);
+    assert.equal(Buffer.from(heartbeatChunk.value).toString('utf8'), ': opencode-bridge keep-alive\n\n');
+    const crossRuntime = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(crossRuntime.activeInferenceRequests, 1);
+    assert.equal(crossRuntime.activeStreamingRequests, 1);
+    assert.equal(crossRuntime.activeEstablishedStreams, 1);
+    assert.ok(crossRuntime.longestActiveStreamSilenceMs >= 900);
+    assert.equal(crossRuntime.activeStreamHeartbeats, 1);
+    crossCancellation.abort();
+    await assert.rejects(() => crossReader.read(), (error) => error.name === 'AbortError');
+    await Promise.race([
+      crossProtocolBodyClosed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('跨协议客户端在首事件前断开后，上游 SSE 未及时关闭')), 1_000))
+    ]);
+    let crossCanceledStats;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      crossCanceledStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+      if (crossCanceledStats.summary.requests === 10) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    assert.equal(crossCanceledStats.summary.requests, 10);
+    assert.equal(crossCanceledStats.summary.errors, 9);
+    assert.equal(crossCanceledStats.credentialHealth[0].consecutiveFailures, 2);
+
+    const idleConfig = await fetch(`http://127.0.0.1:${port}/api/config`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({
+        defaultProvider: 'zen',
+        modelRoutes: {
+          'response-stream': { protocol: 'responses' },
+          'cross-flush': { protocol: 'responses' }
+        },
+        upstreamStreamIdleTimeoutMs: 1_000
+      })
+    });
+    assert.equal(idleConfig.status, 200);
+    assert.equal((await idleConfig.json()).upstreamStreamIdleTimeoutMs, 1_000);
+    const idleResponse = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, messages: [{ role: 'user', content: 'stall after first chunk' }] })
+    });
+    assert.equal(idleResponse.status, 200);
+    const idleText = await idleResponse.text();
+    assert.match(idleText, /"code":"upstream_stream_idle_timeout"/);
+    assert.match(idleText, /data: \[DONE\]/);
+    await Promise.race([
+      idleBodyClosed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('上游流空闲超时后 SSE 正文连接未及时关闭')), 1_000))
+    ]);
+    const idleStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(idleStats.summary.requests, 11);
+    assert.equal(idleStats.summary.errors, 10);
+    assert.equal(idleStats.credentialHealth[0].consecutiveFailures, 3);
+    const runtime = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(runtime.activeRequests, 0);
+    assert.equal(runtime.activeInferenceRequests, 0);
+    assert.equal(runtime.activeStreamingRequests, 0);
+    assert.equal(runtime.activeUpstreamWaitRequests, 0);
+    assert.equal(runtime.activeEstablishedStreams, 0);
+    assert.equal(runtime.activeStreamWrites, 0);
+    assert.equal(runtime.oldestActiveInferenceMs, 0);
+    assert.equal(runtime.longestActiveStreamSilenceMs, 0);
+    assert.equal(runtime.activeStreamHeartbeats, 0);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});
@@ -736,22 +985,39 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
 test('非流式上游正文断开会累计 Key 网络失败并进入冷却', { timeout: 10_000 }, async () => {
   let upstreamCalls = 0;
   let markDelayedBodyStarted;
+  let markDelayedErrorBodyStarted;
   const delayedBodyStarted = new Promise((resolveStarted) => { markDelayedBodyStarted = resolveStarted; });
+  const delayedErrorBodyStarted = new Promise((resolveStarted) => { markDelayedErrorBodyStarted = resolveStarted; });
   const upstream = createHttpServer((req, res) => {
     upstreamCalls++;
-    res.writeHead(200, { 'content-type': 'application/json' });
     if (upstreamCalls <= 3) {
+      res.writeHead(200, { 'content-type': 'application/json' });
       res.write('{"id":"chat_partial"');
       return setTimeout(() => res.destroy(), 20);
     }
     if (upstreamCalls === 4) {
+      res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({
         id: 'chat_recovered', model: 'deepseek-v4-flash',
         choices: [{ index: 0, message: { role: 'assistant', content: 'done' }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 2, completion_tokens: 1 }
       }));
     }
-    if (upstreamCalls === 5) return res.end('{"broken":');
+    if (upstreamCalls === 5) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end('{"broken":');
+    }
+    if (upstreamCalls === 7) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.write('{"error":{"message":"delayed error body"');
+      markDelayedErrorBodyStarted();
+      const delayedErrorResponse = setTimeout(() => {
+        if (!res.destroyed) res.end('}}');
+      }, 1_000);
+      res.once('close', () => clearTimeout(delayedErrorResponse));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
     res.write('{"id":"chat_delayed"');
     markDelayedBodyStarted();
     const delayedResponse = setTimeout(() => {
@@ -853,10 +1119,30 @@ test('非流式上游正文断开会累计 Key 网络失败并进入冷却', { t
     const canceledLog = canceledLogs.find((item) => item.status === 499);
     assert.ok(canceledLog);
     assert.match(canceledLog.error, /读取上游响应时断开/);
+    assert.equal(canceledLog.errorCode, 'client_closed');
     const canceledStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
     assert.equal(canceledStats.credentialHealth[0].state, 'healthy');
     assert.equal(canceledStats.credentialHealth[0].consecutiveFailures, 0);
     assert.equal(upstreamCalls, 6);
+
+    const errorCancellation = new AbortController();
+    const canceledErrorRequest = fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', signal: errorCancellation.signal,
+      headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'cancel error body' }] })
+    });
+    await delayedErrorBodyStarted;
+    errorCancellation.abort();
+    await assert.rejects(canceledErrorRequest, (error) => error.name === 'AbortError');
+    for (let attempt = 0; attempt < 20; attempt++) {
+      canceledLogs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+      if (canceledLogs.some((item) => item.status === 499 && /上游错误响应/.test(item.error))) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    const canceledErrorLog = canceledLogs.find((item) => item.status === 499 && /上游错误响应/.test(item.error));
+    assert.ok(canceledErrorLog);
+    assert.equal(canceledErrorLog.errorCode, 'client_closed');
+    assert.equal(upstreamCalls, 7);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});
@@ -1266,6 +1552,11 @@ test('模型发现共享全局和客户端并发上限且取消后释放名额',
     assert.equal(upstreamCalls, 2);
     const busyStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
     assert.equal(busyStatus.activeRequests, 2);
+    assert.equal(busyStatus.activeInferenceRequests, 1);
+    assert.equal(busyStatus.activeStreamingRequests, 0);
+    assert.equal(busyStatus.activeUpstreamWaitRequests, 1);
+    assert.equal(busyStatus.activeEstablishedStreams, 0);
+    assert.ok(busyStatus.oldestActiveInferenceMs >= 0);
 
     namedController.abort();
     primaryController.abort();
@@ -1290,10 +1581,116 @@ test('模型发现共享全局和客户端并发上限且取消后释放名额',
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
     assert.equal(idleStatus.activeRequests, 0);
+    assert.equal(idleStatus.activeInferenceRequests, 0);
     const recovered = await fetch(`http://127.0.0.1:${port}/zen/v1/models`, { headers: { authorization: 'Bearer Api123' } });
     assert.equal(recovered.status, 200);
     assert.deepEqual((await recovered.json()).data.map((model) => model.id), ['gpt-test']);
     assert.equal(upstreamCalls, 3);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
+    upstream.closeAllConnections();
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('并发模型发现合并上游请求且单个客户端取消相互隔离', { timeout: 10_000 }, async () => {
+  let upstreamCalls = 0;
+  let heldResponse;
+  let heldResponseClosed = false;
+  let resolveFirstRequest;
+  const firstRequest = new Promise((resolveRequest) => { resolveFirstRequest = resolveRequest; });
+  const modelBody = JSON.stringify({ object: 'list', data: [{ id: 'gpt-shared', object: 'model' }] });
+  const upstream = createHttpServer((_req, res) => {
+    upstreamCalls++;
+    if (upstreamCalls === 1) {
+      heldResponse = res;
+      res.once('close', () => { heldResponseClosed = true; });
+      resolveFirstRequest();
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(modelBody);
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/model-shared-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'model-shared-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123',
+    OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_ZEN_KEY: 'zen-shared-key',
+    OPENCODE_ZEN_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const configured = await fetch(`http://127.0.0.1:${port}/api/config`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, maxConcurrentRequests: 4 })
+    });
+    assert.equal(configured.status, 200);
+
+    const firstController = new AbortController();
+    const first = fetch(`http://127.0.0.1:${port}/zen/v1/models`, {
+      headers: { authorization: 'Bearer Api123' }, signal: firstController.signal
+    });
+    await firstRequest;
+    const second = fetch(`http://127.0.0.1:${port}/zen/v1/models`, { headers: { authorization: 'Bearer Api123' } });
+
+    let sharedStatus;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      sharedStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+      if (sharedStatus.activeRequests === 2 && sharedStatus.activeSharedModelDiscoveries === 1) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    assert.equal(sharedStatus.activeRequests, 2);
+    assert.equal(sharedStatus.activeSharedModelDiscoveries, 1);
+    assert.equal(upstreamCalls, 1);
+
+    firstController.abort();
+    await assert.rejects(first, (error) => error?.name === 'AbortError');
+    for (let attempt = 0; attempt < 20; attempt++) {
+      sharedStatus = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+      if (sharedStatus.activeRequests === 1) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    assert.equal(sharedStatus.activeRequests, 1);
+    assert.equal(sharedStatus.activeSharedModelDiscoveries, 1);
+    assert.equal(heldResponseClosed, false);
+
+    heldResponse.writeHead(200, { 'content-type': 'application/json' });
+    heldResponse.end(modelBody);
+    const secondResponse = await second;
+    assert.equal(secondResponse.status, 200);
+    assert.deepEqual((await secondResponse.json()).data.map((model) => model.id), ['gpt-shared']);
+    assert.equal(upstreamCalls, 1);
+
+    const afterCompletion = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(afterCompletion.activeSharedModelDiscoveries, 0);
+    const fresh = await fetch(`http://127.0.0.1:${port}/zen/v1/models`, { headers: { authorization: 'Bearer Api123' } });
+    assert.equal(fresh.status, 200);
+    assert.equal(upstreamCalls, 2);
   } finally {
     if (child.exitCode === null) {
       child.kill();
@@ -2134,6 +2531,170 @@ test('上游限流与追踪响应头会安全透传到同协议、跨协议和�
     assert.deepEqual(logs.map((item) => item.upstreamRequestId), ['upstream-go', 'upstream-zen']);
     assert.deepEqual(logs.map((item) => item.retryAfter), ['7', '7']);
     assert.doesNotMatch(JSON.stringify(logs), /upstream-cookie/);
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('Responses compact 仅向原生 Responses 上游透传并保留 compaction 项', { timeout: 10_000 }, async () => {
+  let received;
+  let upstreamCalls = 0;
+  const compaction = {
+    id: 'cmp_server', type: 'compaction', encrypted_content: 'opaque-server-compaction', created_by: 'server'
+  };
+  const upstream = createHttpServer((req, res) => {
+    upstreamCalls++;
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      received = { url: req.url, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'resp_compact', object: 'response', model: received.body.model, status: 'completed',
+        output: [compaction], usage: { input_tokens: 1000, output_tokens: 0 }
+      }));
+    });
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/responses-compact-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'responses-compact-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123', OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_GO_KEY: 'go-responses-compact-key', OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+
+    const body = { model: 'gpt-5.6-luna', input: [{ role: 'user', content: 'long context' }] };
+    const response = await fetch(`http://127.0.0.1:${port}/go/v1/responses/compact`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify(body)
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).output, [compaction]);
+    assert.deepEqual(received, { url: '/responses/compact', body });
+
+    const wrongProtocol = await fetch(`http://127.0.0.1:${port}/go/v1/responses/compact`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', input: 'context' })
+    });
+    assert.equal(wrongProtocol.status, 400);
+    assert.match((await wrongProtocol.json()).error.message, /只能透传到原生 Responses 模型/);
+
+    const streamed = await fetch(`http://127.0.0.1:${port}/go/v1/responses/compact`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ ...body, stream: true })
+    });
+    assert.equal(streamed.status, 400);
+    assert.match((await streamed.json()).error.message, /仅支持非流式请求/);
+    assert.equal(upstreamCalls, 1);
+
+    const wrongMethod = await fetch(`http://127.0.0.1:${port}/go/v1/responses/compact`);
+    assert.equal(wrongMethod.status, 405);
+    assert.equal(wrongMethod.headers.get('allow'), 'POST');
+  } finally {
+    child.kill();
+    await once(child, 'exit').catch(() => {});
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('Claude 新版响应元数据在同协议透传，跨协议通过响应头和日志精确标记', { timeout: 10_000 }, async () => {
+  const upstream = createHttpServer((req, res) => {
+    const response = {
+      id: 'msg_response_metadata', type: 'message', role: 'assistant', model: 'minimax-m2.5',
+      content: [{ type: 'text', text: '受限说明' }], stop_reason: 'refusal', stop_sequence: null,
+      container: { id: 'container_1' }, context_management: { applied_edits: [] }, diagnostics: { cache: { status: 'miss' } },
+      stop_details: { type: 'refusal', category: 'general_harms', explanation: 'policy', fallback_credit_token: 'opaque-token' },
+      usage: {
+        input_tokens: 12, output_tokens: 3, cache_creation_input_tokens: 7,
+        cache_creation: { ephemeral_5m_input_tokens: 5, ephemeral_1h_input_tokens: 2 },
+        fallback_credit: { status: 'not_eligible' }, inference_geo: 'us',
+        iterations: [{ type: 'message', input_tokens: 12, output_tokens: 3 }],
+        server_tool_use: { web_search_requests: 1 }, service_tier: 'priority'
+      }
+    };
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(response));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const configFile = resolve(import.meta.dirname, `../data/response-metadata-${randomUUID()}.json`);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (/^OPENCODE_(ZEN|GO)_(KEY|KEYS|PROXY_URL)/.test(name)) delete env[name];
+  Object.assign(env, {
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile,
+    CONFIG_ENCRYPTION_KEY: 'response-metadata-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123', OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_GO_KEY: 'go-response-metadata-key', OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  });
+  const child = spawn(process.execPath, ['src/server.js'], {
+    cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  try {
+    await Promise.race([
+      new Promise((resolveStarted) => child.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(child, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+
+    const sameProtocol = await fetch(`http://127.0.0.1:${port}/go/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'Api123' },
+      body: JSON.stringify({ model: 'minimax-m2.5', max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] })
+    });
+    assert.equal(sameProtocol.status, 200);
+    assert.equal(sameProtocol.headers.get('x-opencode-response-degradations'), null);
+    assert.equal((await sameProtocol.json()).stop_details.fallback_credit_token, 'opaque-token');
+
+    const crossProtocol = await fetch(`http://127.0.0.1:${port}/go/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'minimax-m2.5', input: 'ping' })
+    });
+    assert.equal(crossProtocol.status, 200);
+    assert.equal(crossProtocol.headers.get('x-opencode-response-degradations'), [
+      'claude_container', 'claude_context_management', 'claude_diagnostics', 'claude_stop_details',
+      'claude_cache_creation_ttl', 'claude_fallback_credit', 'claude_inference_geo',
+      'claude_iterations', 'claude_server_tool_use', 'claude_usage_service_tier'
+    ].join(','));
+    const translated = await crossProtocol.json();
+    assert.equal(translated.output[0].content[0].type, 'refusal');
+    assert.equal(translated.usage.input_tokens_details.cache_write_tokens, 7);
+    assert.equal('stop_details' in translated, false);
+
+    const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const logs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(logs.length, 2);
+    assert.equal(logs[0].cacheCreationInputTokens, 7);
+    assert.equal(logs[0].cacheCreation5mInputTokens, 5);
+    assert.equal(logs[0].cacheCreation1hInputTokens, 2);
+    assert.match(logs[0].responseDegradations, /claude_stop_details/);
+    assert.equal(logs[1].responseDegradations, undefined);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});

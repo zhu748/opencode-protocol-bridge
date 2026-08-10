@@ -98,12 +98,13 @@ export function proxyDispatcher(proxyUrl) {
   return dispatchers.get(normalized);
 }
 
-export async function proxyDispatcherForUrl(proxyUrl) {
+export async function proxyDispatcherForUrl(proxyUrl, { signal } = {}) {
+  signal?.throwIfAborted();
   const normalized = normalizeProxyUrl(proxyUrl);
   if (!normalized) return undefined;
   const protocol = protocolOfProxyUrl(normalized);
   if (!isManagedTunnelProxyProtocol(protocol)) return proxyDispatcher(normalized);
-  const entry = await managedTunnel(normalized);
+  const entry = await managedTunnel(normalized, signal);
   if (!entry.dispatcher) {
     entry.baseDispatcher = createProxyDispatcher(entry.localProxyUrl);
     entry.dispatcher = createManagedTunnelDispatcher(entry, entry.baseDispatcher);
@@ -159,10 +160,19 @@ function closeOldestDispatcher() {
   Promise.resolve(dispatcher.close()).catch(() => {});
 }
 
-async function managedTunnel(proxyUrl) {
+async function managedTunnel(proxyUrl, signal) {
   let entry = managedTunnels.get(proxyUrl);
   if (!entry) entry = await createManagedTunnelEntry(proxyUrl);
-  await entry.ready;
+  entry.startupWaiters += 1;
+  let canceled = false;
+  try { await abortableWait(entry.ready, signal); }
+  catch (error) {
+    canceled = signal?.aborted === true;
+    throw error;
+  } finally {
+    entry.startupWaiters = Math.max(0, entry.startupWaiters - 1);
+    if (canceled) await cancelUnusedStartingManagedTunnel(entry);
+  }
   ensureManagedTunnelOpen(entry);
   touchManagedTunnel(entry);
   return entry;
@@ -180,7 +190,7 @@ function createManagedTunnelEntry(proxyUrl) {
     const entry = {
       proxyUrl, createdAt: Date.now(), localProxyUrl: '', process: null, tempDir: '', stderr: '',
       ready: null, dispatcher: null, baseDispatcher: null, activeRequests: 0,
-      lastUsedAt: Date.now(), starting: true, closing: false, cleanupQueue: Promise.resolve()
+      startupWaiters: 0, lastUsedAt: Date.now(), starting: true, closing: false, cleanupQueue: Promise.resolve()
     };
     entry.ready = startManagedTunnel(entry).catch((error) => {
       if (managedTunnels.get(proxyUrl) === entry) managedTunnels.delete(proxyUrl);
@@ -190,6 +200,33 @@ function createManagedTunnelEntry(proxyUrl) {
     managedTunnels.set(proxyUrl, entry);
     ensureManagedTunnelSweepTimer();
     return entry;
+  });
+}
+
+function abortableWait(promise, signal) {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+  return new Promise((resolveWait, rejectWait) => {
+    const onAbort = () => {
+      cleanup();
+      rejectWait(signal.reason || new DOMException('The operation was aborted', 'AbortError'));
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => { cleanup(); resolveWait(value); },
+      (error) => { cleanup(); rejectWait(error); }
+    );
+  });
+}
+
+function cancelUnusedStartingManagedTunnel(entry) {
+  return enqueueManagedTunnelMutation(async () => {
+    if (!entry.starting || entry.startupWaiters > 0 || entry.activeRequests > 0
+      || managedTunnels.get(entry.proxyUrl) !== entry) return;
+    managedTunnels.delete(entry.proxyUrl);
+    await closeManagedTunnel(entry, { force: true });
+    stopManagedTunnelSweepTimerIfEmpty();
   });
 }
 

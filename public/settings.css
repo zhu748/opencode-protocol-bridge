@@ -246,6 +246,27 @@
   margin: 0;
 }
 
+.image-model-name {
+  color: var(--text-secondary);
+}
+
+.model-capability {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-style: normal;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  opacity: .78;
+}
+
+.model-capability.protocol-responses { color: var(--lime); }
+.model-capability.protocol-claude { color: var(--purple); }
+.model-capability.protocol-chat { color: var(--orange); }
+.model-capability.protocol-gemini { color: #70c9ff; }
+.model-capability.vision { color: var(--lime); }
+.model-capability.text-only { color: var(--muted); }
+.model-capability.unknown { color: var(--muted); }
+
 /* Provider Key Credential Pool */
 .provider-credential-list {
   display: grid;
@@ -698,6 +719,7 @@
 .log-upstream-id,
 .log-retry-after,
 .log-key-attempts,
+.log-response-degradations,
 .log-timing {
   display: block;
   overflow: hidden;
@@ -707,6 +729,12 @@
   font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.log-response-degradations {
+  color: var(--orange);
+  max-width: 280px;
+  overflow-wrap: anywhere;
 }
 
 .log-upstream-id {

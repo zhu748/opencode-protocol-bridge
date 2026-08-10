@@ -222,6 +222,94 @@ test('关闭正在启动的托管隧道不会遗留子进程或临时配置', as
   }
 });
 
+test('最后一个等待者取消会关闭正在启动的托管隧道', async () => {
+  const temporary = await mkdtemp(join(tmpdir(), 'opencode-bridge-managed-abort-'));
+  const pidPath = join(temporary, 'pid.txt');
+  const proxyUrl = `vless://${TEST_UUID}@abort.example.com:443?type=tcp`;
+  const previousSingBox = process.env.OPENCODE_BRIDGE_SING_BOX_PATH;
+  const previousPidOut = process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_PID_OUT;
+  const previousListenDelay = process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_LISTEN_DELAY_MS;
+  process.env.OPENCODE_BRIDGE_SING_BOX_PATH = fileURLToPath(new URL('../test-fixtures/fake-sing-box.mjs', import.meta.url));
+  process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_PID_OUT = pidPath;
+  process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_LISTEN_DELAY_MS = '5000';
+  const controller = new AbortController();
+  try {
+    const pending = proxyDispatcherForUrl(proxyUrl, { signal: controller.signal });
+    await waitFor(async () => Number(await readFile(pidPath, 'utf8').catch(() => '0')) > 0, 3000);
+    const pid = Number(await readFile(pidPath, 'utf8'));
+    controller.abort(Object.assign(new Error('客户端已断开'), { code: 'CLIENT_CLOSED' }));
+    await assert.rejects(pending, (error) => error.code === 'CLIENT_CLOSED');
+    await waitFor(async () => !processAlive(pid) && (await managedTempDirectories(proxyUrl)).length === 0, 3000);
+  } finally {
+    restoreEnvironment('OPENCODE_BRIDGE_SING_BOX_PATH', previousSingBox);
+    restoreEnvironment('OPENCODE_BRIDGE_FAKE_SING_BOX_PID_OUT', previousPidOut);
+    restoreEnvironment('OPENCODE_BRIDGE_FAKE_SING_BOX_LISTEN_DELAY_MS', previousListenDelay);
+    await closeProxyDispatchers({ force: true });
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('共享隧道仍有等待者时单个取消不会关闭启动进程', async () => {
+  const temporary = await mkdtemp(join(tmpdir(), 'opencode-bridge-managed-shared-abort-'));
+  const pidPath = join(temporary, 'pid.txt');
+  const proxyUrl = `vless://${TEST_UUID}@shared-abort.example.com:443?type=tcp`;
+  const previousSingBox = process.env.OPENCODE_BRIDGE_SING_BOX_PATH;
+  const previousPidOut = process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_PID_OUT;
+  const previousListenDelay = process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_LISTEN_DELAY_MS;
+  process.env.OPENCODE_BRIDGE_SING_BOX_PATH = fileURLToPath(new URL('../test-fixtures/fake-sing-box.mjs', import.meta.url));
+  process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_PID_OUT = pidPath;
+  process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_LISTEN_DELAY_MS = '250';
+  const controller = new AbortController();
+  try {
+    const canceled = proxyDispatcherForUrl(proxyUrl, { signal: controller.signal });
+    const retained = proxyDispatcherForUrl(proxyUrl);
+    await waitFor(async () => Number(await readFile(pidPath, 'utf8').catch(() => '0')) > 0, 3000);
+    const pid = Number(await readFile(pidPath, 'utf8'));
+    controller.abort(Object.assign(new Error('客户端已断开'), { code: 'CLIENT_CLOSED' }));
+    await assert.rejects(canceled, (error) => error.code === 'CLIENT_CLOSED');
+    assert.ok(await retained);
+    assert.equal(processAlive(pid), true);
+  } finally {
+    restoreEnvironment('OPENCODE_BRIDGE_SING_BOX_PATH', previousSingBox);
+    restoreEnvironment('OPENCODE_BRIDGE_FAKE_SING_BOX_PID_OUT', previousPidOut);
+    restoreEnvironment('OPENCODE_BRIDGE_FAKE_SING_BOX_LISTEN_DELAY_MS', previousListenDelay);
+    await closeProxyDispatchers({ force: true });
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('上游超时覆盖托管隧道启动阶段并清理未就绪进程', async () => {
+  const temporary = await mkdtemp(join(tmpdir(), 'opencode-bridge-managed-timeout-'));
+  const pidPath = join(temporary, 'pid.txt');
+  const proxyUrl = `vless://${TEST_UUID}@timeout.example.com:443?type=tcp`;
+  const previousBase = process.env.OPENCODE_ZEN_BASE_URL;
+  const previousSingBox = process.env.OPENCODE_BRIDGE_SING_BOX_PATH;
+  const previousPidOut = process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_PID_OUT;
+  const previousListenDelay = process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_LISTEN_DELAY_MS;
+  process.env.OPENCODE_ZEN_BASE_URL = 'http://127.0.0.1:1';
+  process.env.OPENCODE_BRIDGE_SING_BOX_PATH = fileURLToPath(new URL('../test-fixtures/fake-sing-box.mjs', import.meta.url));
+  process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_PID_OUT = pidPath;
+  process.env.OPENCODE_BRIDGE_FAKE_SING_BOX_LISTEN_DELAY_MS = '5000';
+  const started = Date.now();
+  try {
+    await assert.rejects(
+      listModels({ provider: 'zen', apiKey: 'test-key', proxyUrl, timeoutMs: 150 }),
+      (error) => error.name === 'TimeoutError'
+    );
+    assert.ok(Date.now() - started < 2000, '超时不应等待托管隧道自身的 8 秒就绪上限');
+    const pid = Number(await readFile(pidPath, 'utf8').catch(() => '0'));
+    if (pid) await waitFor(() => !processAlive(pid), 3000);
+    await waitFor(async () => (await managedTempDirectories(proxyUrl)).length === 0, 3000);
+  } finally {
+    restoreEnvironment('OPENCODE_ZEN_BASE_URL', previousBase);
+    restoreEnvironment('OPENCODE_BRIDGE_SING_BOX_PATH', previousSingBox);
+    restoreEnvironment('OPENCODE_BRIDGE_FAKE_SING_BOX_PID_OUT', previousPidOut);
+    restoreEnvironment('OPENCODE_BRIDGE_FAKE_SING_BOX_LISTEN_DELAY_MS', previousListenDelay);
+    await closeProxyDispatchers({ force: true });
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test('sing-box 启动错误不会泄露代理凭据或临时配置路径', async () => {
   const proxyUrl = `tuic://${TEST_UUID}:super-secret@example.com:443?sni=example.com`;
   const previousSingBox = process.env.OPENCODE_BRIDGE_SING_BOX_PATH;

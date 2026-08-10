@@ -1,7 +1,7 @@
 export const MAX_REQUEST_TARGET_BYTES = 8 * 1024;
 export const MAX_QUERY_PARAMETERS = 64;
 
-const SINGLETON_QUERY_PARAMETERS = new Set(['provider', 'window']);
+const SINGLETON_QUERY_PARAMETERS = new Set(['provider', 'window', 'beta']);
 
 function requestTargetError(message, status = 400) {
   return Object.assign(new Error(message), { status });

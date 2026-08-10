@@ -8,6 +8,7 @@ const DEFAULTS = {
   maxCooldownMs: 5 * 60 * 1000,
   maxStates: 256
 };
+const identityCache = new WeakMap();
 
 export class CredentialHealthTracker {
   constructor(options = {}) {
@@ -17,14 +18,17 @@ export class CredentialHealthTracker {
     this.cursors = new Map();
   }
 
-  select(provider, credentials) {
+  select(provider, credentials, excludedCredentialIds = null) {
     if (!credentials.length) return { credential: null, reason: 'unconfigured', retryAfterMs: 0 };
     const now = this.now();
     const start = (this.cursors.get(provider) || 0) % credentials.length;
     let retryAfterMs = Infinity;
+    let considered = 0;
     for (let offset = 0; offset < credentials.length; offset++) {
       const index = (start + offset) % credentials.length;
       const credential = credentials[index];
+      if (excludedCredentialIds?.has(credential.credentialId)) continue;
+      considered++;
       const key = identity(provider, credential);
       const state = this.states.get(key);
       if (!state || (!state.probeInFlight && state.cooldownUntil <= now)) {
@@ -34,6 +38,7 @@ export class CredentialHealthTracker {
       }
       retryAfterMs = Math.min(retryAfterMs, state.probeInFlight ? 1000 : state.cooldownUntil - now);
     }
+    if (!considered) return { credential: null, reason: 'exhausted', retryAfterMs: 0 };
     return { credential: null, reason: 'cooldown', retryAfterMs: Math.max(1, Math.ceil(retryAfterMs)) };
   }
 
@@ -123,9 +128,15 @@ export class CredentialHealthTracker {
 
   trim() {
     while (this.states.size > this.options.maxStates) {
-      const oldest = [...this.states.entries()].sort((left, right) => left[1].touchedAt - right[1].touchedAt)[0];
-      if (!oldest) break;
-      this.states.delete(oldest[0]);
+      let oldestKey;
+      let oldestTouchedAt = Infinity;
+      for (const [key, state] of this.states) {
+        if (oldestKey !== undefined && state.touchedAt >= oldestTouchedAt) continue;
+        oldestKey = key;
+        oldestTouchedAt = state.touchedAt;
+      }
+      if (oldestKey === undefined) break;
+      this.states.delete(oldestKey);
     }
   }
 }
@@ -139,8 +150,17 @@ export function credentialDisplayName(provider, credentialId = '', credentialLab
 }
 
 function identity(provider, credential) {
-  const fingerprint = createHash('sha256').update(`${String(credential.apiKey || '')}\0${String(credential.proxyUrl || '')}`).digest('hex').slice(0, 16);
-  return `${provider}:${credential.credentialId || 'unknown'}:${fingerprint}`;
+  const apiKey = credential.apiKey || '';
+  const proxyUrl = credential.proxyUrl || '';
+  const credentialId = credential.credentialId || 'unknown';
+  const cached = identityCache.get(credential);
+  if (cached?.provider === provider && cached.apiKey === apiKey && cached.proxyUrl === proxyUrl && cached.credentialId === credentialId) {
+    return cached.identity;
+  }
+  const fingerprint = createHash('sha256').update(`${String(apiKey)}\0${String(proxyUrl)}`).digest('hex').slice(0, 16);
+  const value = `${provider}:${credentialId}:${fingerprint}`;
+  identityCache.set(credential, { provider, apiKey, proxyUrl, credentialId, identity: value });
+  return value;
 }
 
 function boundedRetryAfter(value, now, fallback, maximum) {

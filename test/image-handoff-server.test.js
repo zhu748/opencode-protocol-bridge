@@ -22,11 +22,20 @@ async function waitForHealth(port, child) {
 
 test('远程桥接会提供短时图片 URL 并限制慢速附件下载', { timeout: 20_000 }, async () => {
   const upstreamBodies = [];
+  const upstreamPaths = [];
   const upstream = createHttpServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     upstreamBodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    upstreamPaths.push(req.url);
     res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url === '/messages') {
+      return res.end(JSON.stringify({
+        id: 'msg_remote_image', type: 'message', role: 'assistant', model: 'minimax-m2.7',
+        content: [{ type: 'text', text: '准备调用视觉技能' }], stop_reason: 'end_turn',
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }));
+    }
     res.end(JSON.stringify({
       id: 'chat_remote_image', model: 'deepseek-v4-flash',
       choices: [{ message: { role: 'assistant', content: '准备调用视觉技能' }, finish_reason: 'stop' }],
@@ -72,7 +81,7 @@ test('远程桥接会提供短时图片 URL 并限制慢速附件下载', { time
     const serialized = JSON.stringify(upstreamBodies.at(-1));
     const imageUrl = serialized.match(/http:\/\/127\.0\.0\.1:\d+\/_bridge\/images\/[a-f0-9]{64}/)?.[0];
     assert.ok(imageUrl);
-    assert.match(serialized, /下载到 Claude Code 本机临时文件.*vision 技能/);
+    assert.match(serialized, /下载到客户端本机临时文件.*vision 技能/);
     assert.doesNotMatch(serialized, /image_url|aGVsbG8=/);
 
     const image = await fetch(imageUrl);
@@ -84,6 +93,47 @@ test('远程桥接会提供短时图片 URL 并限制慢速附件下载', { time
     const imageHead = await fetch(imageUrl, { method: 'HEAD' });
     assert.equal(imageHead.status, 200);
     assert.equal(imageHead.headers.get('content-length'), '5');
+
+    const responsesImage = await fetch(`http://127.0.0.1:${port}/go/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({
+        model: 'deepseek-v4-flash',
+        input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'data:image/png;base64,cmVzcG9uc2Vz' }] }]
+      })
+    });
+    assert.equal(responsesImage.status, 200);
+    await responsesImage.json();
+    assert.equal(upstreamPaths.at(-1), '/chat/completions');
+    assert.match(JSON.stringify(upstreamBodies.at(-1)), /远程图片附件.*vision 技能/);
+    assert.doesNotMatch(JSON.stringify(upstreamBodies.at(-1)), /cmVzcG9uc2Vz/);
+
+    const geminiImage = await fetch(`http://127.0.0.1:${port}/go/v1beta/models/deepseek-v4-flash:generateContent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-goog-api-key': 'Api123' },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'image/png', data: 'Z2VtaW5p' } }] }] })
+    });
+    assert.equal(geminiImage.status, 200);
+    await geminiImage.json();
+    assert.equal(upstreamPaths.at(-1), '/chat/completions');
+    assert.match(JSON.stringify(upstreamBodies.at(-1)), /远程图片附件.*图片识别工具/);
+    assert.doesNotMatch(JSON.stringify(upstreamBodies.at(-1)), /Z2VtaW5p/);
+
+    const claudeNative = await fetch(`http://127.0.0.1:${port}/go/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'Api123' },
+      body: JSON.stringify({
+        model: 'minimax-m2.7', max_tokens: 32,
+        messages: [{ role: 'user', content: [{
+          type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'bmF0aXZlLWNsYXVkZQ==' }
+        }] }]
+      })
+    });
+    assert.equal(claudeNative.status, 200);
+    await claudeNative.json();
+    assert.equal(upstreamPaths.at(-1), '/messages');
+    assert.match(JSON.stringify(upstreamBodies.at(-1)), /远程图片附件.*vision 技能/);
+    assert.doesNotMatch(JSON.stringify(upstreamBodies.at(-1)), /bmF0aXZlLWNsYXVkZQ==/);
 
     const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })

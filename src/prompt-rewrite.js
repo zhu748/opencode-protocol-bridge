@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 export const MAX_PROMPT_BYTES = 1024 * 1024;
 export const MAX_PROMPT_RULES = 50;
 export const MAX_REWRITTEN_PROMPT_BYTES = 10 * 1024 * 1024;
+const CLAUDE_MID_TURN_USER_PREFIX = 'The user sent a new message while you were working:';
 
 const OLD_CLAUDE_CODE_PROMOTION = `You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.
 
@@ -132,12 +133,52 @@ export function rewriteClaudeSystem(system, rules) {
       return block;
     });
   } else {
-    const result = applyPromptRules(typeof system === 'string' ? system : '', rules);
-    rewritten = result.text;
+    const result = applyPromptRules(claudeSystemBlockText(system), rules);
+    rewritten = system && typeof system === 'object' && !Array.isArray(system)
+      ? { ...system, text: result.text }
+      : result.text;
     mergeApplied(applied, result.applied);
     mergeRuleResults(ruleResults, result.ruleResults);
   }
   return { system: rewritten, original, final: systemText(rewritten), applied, ruleResults };
+}
+
+export function rewriteClaudeRequestSystems(body, rules) {
+  const topLevel = rewriteClaudeSystem(body?.system, rules);
+  const applied = [];
+  const ruleResults = [];
+  const originals = [];
+  const finals = [];
+  mergeRewriteResult(topLevel, applied, ruleResults, originals, finals);
+  let messageSystemCount = 0;
+  let messageUserSteeringCount = 0;
+  const messages = Array.isArray(body?.messages) ? body.messages.map((message) => {
+    if (!message || !['system', 'developer'].includes(message.role)) return message;
+    if (isClaudeMidTurnUserMessage(message)) {
+      messageUserSteeringCount++;
+      return message;
+    }
+    messageSystemCount++;
+    const result = rewriteClaudeSystem(message.content, rules);
+    mergeRewriteResult(result, applied, ruleResults, originals, finals);
+    return { ...message, content: result.system };
+  }) : body?.messages;
+  return {
+    body: { ...body, system: topLevel.system, ...(messages !== undefined ? { messages } : {}) },
+    original: originals.filter(Boolean).join('\n'),
+    final: finals.filter(Boolean).join('\n'),
+    topLevelOriginal: topLevel.original,
+    topLevelFinal: topLevel.final,
+    messageSystemCount,
+    messageUserSteeringCount,
+    applied,
+    ruleResults
+  };
+}
+
+export function isClaudeMidTurnUserMessage(message) {
+  if (!message || !['system', 'developer'].includes(message.role)) return false;
+  return systemText(message.content).trimStart().startsWith(CLAUDE_MID_TURN_USER_PREFIX);
 }
 
 export function promptSnapshotText(text) {
@@ -150,8 +191,7 @@ export function promptSnapshotText(text) {
 }
 
 function systemText(system) {
-  if (typeof system === 'string') return system;
-  return Array.isArray(system) ? system.map(claudeSystemBlockText).filter(Boolean).join('\n') : '';
+  return Array.isArray(system) ? system.map(claudeSystemBlockText).filter(Boolean).join('\n') : claudeSystemBlockText(system);
 }
 
 function mergeApplied(target, entries) {
@@ -172,4 +212,11 @@ function mergeRuleResults(target, entries) {
     existing.count += entry.count;
     if (entry.status === 'applied') existing.status = 'applied';
   }
+}
+
+function mergeRewriteResult(result, applied, ruleResults, originals, finals) {
+  originals.push(result.original);
+  finals.push(result.final);
+  mergeApplied(applied, result.applied);
+  mergeRuleResults(ruleResults, result.ruleResults);
 }

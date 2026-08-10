@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { readdir } from 'node:fs/promises';
-import { relative, resolve } from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
+import { extname, relative, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const SOURCE_ROOTS = ['src', 'public', 'scripts', 'test-fixtures'];
@@ -22,7 +22,17 @@ const files = (await Promise.all(SOURCE_ROOTS.map((directory) => sourceFiles(res
 
 let failures = 0;
 for (const file of files) {
-  const result = spawnSync(process.execPath, ['--check', file], { cwd: ROOT, encoding: 'utf8' });
+  const source = await readFile(file, 'utf8').catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (source === null) continue;
+  const inputType = extname(file).toLowerCase() === '.cjs' ? 'commonjs' : 'module';
+  const result = spawnSync(process.execPath, ['--check', `--input-type=${inputType}`, '-'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    input: source
+  });
   if (result.error) throw result.error;
   if (result.status === 0) continue;
   failures++;

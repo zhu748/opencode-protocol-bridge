@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ImageHandoffStore, imageHandoffStorageOptions, localImageHandoffEnabled, normalizeImageHandoffPublicUrl } from '../src/image-handoff.js';
+import { ImageHandoffStore, imageHandoffStorageOptions, localImageHandoffEnabled, normalizeImageHandoffPublicUrl, resolveImageHandoffPublicUrl } from '../src/image-handoff.js';
 import { prepareUpstreamRequest } from '../src/adapters.js';
 
 test('本地监听默认开启图片交接，远程监听默认关闭且允许显式覆盖', () => {
@@ -21,13 +21,14 @@ test('已选择模型的 Claude 图片会落入进程目录并替换为 vision �
     model: 'alias',
     messages: [{ role: 'user', content: [
       { type: 'text', text: '看看图片' },
-      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } }
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' }, cache_control: { type: 'ephemeral' } }
     ] }]
   };
   try {
     const prepared = await store.prepareClaudeRequest(original, true);
     const handoff = prepared.messages[0].content[1];
     assert.equal(handoff.type, 'text');
+    assert.deepEqual(handoff.cache_control, { type: 'ephemeral' });
     assert.match(handoff.text, /本地图片附件：.*\.png.*vision 技能/);
     const filePath = handoff.text.match(/本地图片附件：(.*?)。/)[1];
     assert.equal(await readFile(filePath, 'utf8'), 'hello');
@@ -51,6 +52,81 @@ test('关闭图片交接时保留原请求，由协议适配层执行普通文�
   const body = { messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } }] }] };
   assert.equal(await store.prepareClaudeRequest(body, true), body);
   await store.close();
+});
+
+test('Claude URL 图片直接转换为可下载的 vision 交接指令', async () => {
+  const store = new ImageHandoffStore({ enabled: true });
+  try {
+    const body = {
+      messages: [{ role: 'user', content: [{
+        type: 'image', source: { type: 'url', url: 'https://example.com/image.png?token=test' }
+      }] }]
+    };
+    const prepared = await store.prepareClaudeRequest(body, true);
+    assert.match(prepared.messages[0].content[0].text, /https:\/\/example\.com\/image\.png\?token=test/);
+    assert.match(prepared.messages[0].content[0].text, /vision 技能或图片识别工具/);
+    assert.equal(store.savedFiles.size, 0);
+  } finally {
+    await store.close();
+  }
+});
+
+test('Responses、Chat 与 Gemini base64 图片共用落盘交接', async () => {
+  const baseDirectory = await mkdtemp(join(tmpdir(), 'bridge-multi-protocol-image-test-'));
+  const store = new ImageHandoffStore({ baseDirectory });
+  try {
+    const responses = await store.prepareRequest({
+      input: [{ role: 'user', content: [{
+        type: 'input_image', image_url: 'data:image/png;base64,aGVsbG8=',
+        prompt_cache_breakpoint: { mode: 'explicit' }
+      }] }]
+    }, 'responses', true);
+    assert.equal(responses.input[0].content[0].type, 'input_text');
+    assert.deepEqual(responses.input[0].content[0].prompt_cache_breakpoint, { mode: 'explicit' });
+    assert.match(responses.input[0].content[0].text, /本地图片附件：.*\.png/);
+
+    const chat = await store.prepareRequest({
+      messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,aGVsbG8=' } }] }]
+    }, 'chat', true);
+    assert.equal(chat.messages[0].content[0].type, 'text');
+    assert.match(chat.messages[0].content[0].text, /vision 技能或图片识别工具/);
+
+    const gemini = await store.prepareRequest({
+      contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' } }] }]
+    }, 'gemini', true);
+    assert.match(gemini.contents[0].parts[0].text, /本地图片附件/);
+    assert.equal(store.savedFiles.size, 1, '相同图片应跨协议按内容哈希去重');
+    const filePath = [...store.savedFiles.keys()][0];
+    assert.equal(await readFile(filePath, 'utf8'), 'hello');
+  } finally {
+    await store.close();
+    await rm(baseDirectory, { recursive: true, force: true });
+  }
+});
+
+test('客户端取消会中止排队中的图片交接且不遗留待发布引用', async () => {
+  const baseDirectory = await mkdtemp(join(tmpdir(), 'bridge-image-abort-test-'));
+  const store = new ImageHandoffStore({ baseDirectory, publicBaseUrl: 'https://bridge.example.com' });
+  let releaseQueue;
+  store.saveQueue = new Promise((resolveQueue) => { releaseQueue = resolveQueue; });
+  const controller = new AbortController();
+  try {
+    const preparing = store.prepareRequest({
+      messages: [{ role: 'user', content: [{
+        type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' }
+      }] }]
+    }, 'claude', true, { signal: controller.signal });
+    controller.abort(Object.assign(new Error('客户端已断开'), { code: 'CLIENT_CLOSED' }));
+    releaseQueue();
+    await assert.rejects(preparing, (error) => error.code === 'CLIENT_CLOSED');
+    assert.equal(store.savedFiles.size, 0);
+    assert.equal(store.pendingPublications.size, 0);
+    assert.equal(store.totalBytes, 0);
+  } finally {
+    releaseQueue?.();
+    await store.close();
+    await rm(baseDirectory, { recursive: true, force: true });
+  }
 });
 
 test('远程图片交接生成短时随机 URL 并拒绝过期令牌', async () => {
@@ -234,6 +310,26 @@ test('远程图片公网基址必须是安全可解析的 HTTP(S) URL', () => {
   assert.throws(() => normalizeImageHandoffPublicUrl('javascript:alert(1)'), /HTTP\(S\)/);
   assert.throws(() => normalizeImageHandoffPublicUrl('https://user:pass@bridge.example.com'), /不含认证/);
   assert.throws(() => normalizeImageHandoffPublicUrl('http://bridge.example.com'), /必须使用 HTTPS/);
+});
+
+test('Render Web Service 默认从受限外部主机名启用远程图片交接', () => {
+  assert.equal(resolveImageHandoffPublicUrl({
+    RENDER_EXTERNAL_HOSTNAME: 'My-Bridge.onrender.com'
+  }), 'https://my-bridge.onrender.com');
+  assert.equal(resolveImageHandoffPublicUrl({
+    RENDER_EXTERNAL_HOSTNAME: 'my-bridge.onrender.com',
+    OPENCODE_BRIDGE_IMAGE_HANDOFF: 'false'
+  }), '');
+  assert.equal(resolveImageHandoffPublicUrl({
+    RENDER_EXTERNAL_HOSTNAME: 'attacker.example.com'
+  }), '');
+  assert.equal(resolveImageHandoffPublicUrl({
+    RENDER_EXTERNAL_HOSTNAME: 'bridge.onrender.com/path'
+  }), '');
+  assert.equal(resolveImageHandoffPublicUrl({
+    RENDER_EXTERNAL_HOSTNAME: 'ignored.onrender.com',
+    OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL: 'https://custom.example.com/base/'
+  }), 'https://custom.example.com/base');
 });
 
 async function waitFor(predicate, timeoutMs) {

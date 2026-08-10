@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyPromptRules, DEFAULT_PROMPT_REWRITE_RULES, MAX_PROMPT_BYTES, migratePromptRules, normalizePromptRules, promptSnapshotText, rewriteClaudeSystem } from '../src/prompt-rewrite.js';
+import { applyPromptRules, DEFAULT_PROMPT_REWRITE_RULES, MAX_PROMPT_BYTES, migratePromptRules, normalizePromptRules, promptSnapshotText, rewriteClaudeRequestSystems, rewriteClaudeSystem } from '../src/prompt-rewrite.js';
 
 test('默认规则保留 Claude Code 身份说明，删除模型与 Fast mode 推广并替换安全测试提示', () => {
   const original = `x-anthropic-billing-header: demo
@@ -77,6 +77,49 @@ test('Claude system 数组保持块结构和 cache_control', () => {
   assert.equal(result.system[1].text, '再次新文');
   assert.equal(result.applied[0].count, 2);
   assert.deepEqual(result.ruleResults.map((item) => [item.status, item.count]), [['applied', 2]]);
+});
+
+test('Claude 单对象 system 的快照、替换和块属性保持一致', () => {
+  const result = rewriteClaudeSystem(
+    { type: 'text', text: '单对象原文', cache_control: { type: 'ephemeral' } },
+    [{ id: 'replace', name: '替换', enabled: true, find: '原文', replace: '新文' }]
+  );
+  assert.equal(result.original, '单对象原文');
+  assert.equal(result.final, '单对象新文');
+  assert.equal(result.system.text, '单对象新文');
+  assert.deepEqual(result.system.cache_control, { type: 'ephemeral' });
+});
+
+test('Claude 顶层和会话中途 system 使用同一规则与快照口径', () => {
+  const result = rewriteClaudeRequestSystems({
+    system: '顶层原文',
+    messages: [
+      { role: 'user', content: '问题' },
+      { role: 'system', content: [{ type: 'text', text: '中途原文', cache_control: { type: 'ephemeral' } }] },
+      { role: 'developer', content: '兼容原文' }
+    ]
+  }, [{ id: 'replace', name: '替换', enabled: true, find: '原文', replace: '新文' }]);
+  assert.equal(result.original, '顶层原文\n中途原文\n兼容原文');
+  assert.equal(result.final, '顶层新文\n中途新文\n兼容新文');
+  assert.equal(result.messageSystemCount, 2);
+  assert.equal(result.body.messages[1].content[0].text, '中途新文');
+  assert.deepEqual(result.body.messages[1].content[0].cache_control, { type: 'ephemeral' });
+  assert.equal(result.applied[0].count, 3);
+  assert.deepEqual(result.ruleResults.map((item) => [item.status, item.count]), [['applied', 3]]);
+});
+
+test('Claude Code 运行中用户引导不作为系统提示词改写或统计', () => {
+  const steering = 'The user sent a new message while you were working:\n中途原文\n\nAddress the message above as you continue this turn.';
+  const result = rewriteClaudeRequestSystems({
+    system: '顶层原文',
+    messages: [{ role: 'user', content: '任务' }, { role: 'system', content: [{ type: 'text', text: steering }] }]
+  }, [{ id: 'replace', name: '替换', enabled: true, find: '原文', replace: '新文' }]);
+  assert.equal(result.original, '顶层原文');
+  assert.equal(result.final, '顶层新文');
+  assert.equal(result.messageSystemCount, 0);
+  assert.equal(result.messageUserSteeringCount, 1);
+  assert.equal(result.body.messages[1].content[0].text, steering);
+  assert.equal(result.applied[0].count, 1);
 });
 
 test('Claude system 快照和规则会覆盖所有实际转发的文本块', () => {

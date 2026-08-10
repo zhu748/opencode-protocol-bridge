@@ -34,10 +34,14 @@ export class RequestLogStore {
     try {
       const parsed = JSON.parse(await readUtf8FileLimited(this.file, MAX_LOG_FILE_BYTES, '日志文件'));
       if (!Array.isArray(parsed)) throw new Error('日志文件根节点不是数组');
-      const merged = [...this.items, ...parsed.map(sanitizeEntry)];
-      this.items = [...new Map(merged.map((item) => [item.requestId || `${item.time}:${Math.random()}`, item])).values()]
-        .sort((left, right) => String(right.time).localeCompare(String(left.time)))
-        .slice(0, 1000);
+      const merged = new Map();
+      const addItem = (item) => { merged.set(item.requestId || Symbol(), item); };
+      for (const item of this.items) addItem(item);
+      for (const entry of parsed) addItem(sanitizeEntry(entry));
+      const items = [...merged.values()];
+      items.sort((left, right) => String(right.time).localeCompare(String(left.time)));
+      if (items.length > 1000) items.length = 1000;
+      this.items = items;
     } catch (error) {
       if (error.code !== 'ENOENT') diagnostics.push(`无法读取持久化日志：${error.message}`);
     } finally {
@@ -72,6 +76,11 @@ export class RequestLogStore {
 
   list(limit = 100) {
     return this.items.slice(0, normalizeLimit(limit));
+  }
+
+  *values(limit = 100) {
+    const length = Math.min(this.items.length, Math.trunc(normalizeLimit(limit)));
+    for (let index = 0; index < length; index++) yield this.items[index];
   }
 
   async configure(options = {}) {
@@ -111,10 +120,11 @@ export class RequestLogStore {
   }
 
   async #persist() {
-    const snapshot = structuredClone(this.items);
+    // JSON.stringify 在进入异步写队列前完成，这个字符串本身就是不可变快照。
+    const snapshot = `${JSON.stringify(this.items, null, 2)}\n`;
     this.writeQueue = this.writeQueue.catch(() => {}).then(async () => {
       await mkdir(dirname(this.file), { recursive: true });
-      await atomicWriteFile(this.file, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+      await atomicWriteFile(this.file, snapshot, { encoding: 'utf8', mode: 0o600 });
     });
     try { await this.writeQueue; this.lastError = ''; }
     catch (error) {
@@ -136,7 +146,7 @@ function sanitizeEntry(entry) {
     return Math.max(-maximum, Math.min(maximum, Math.trunc(parsed)));
   };
   const nonNegative = (value, maximum) => Math.max(0, number(value, maximum));
-  return {
+  const sanitized = {
     time: text(entry.time, 64),
     requestId: text(entry.requestId, 64),
     clientId: text(entry.clientId, 64),
@@ -149,19 +159,38 @@ function sanitizeEntry(entry) {
     credentialAttempts: Math.max(1, nonNegative(entry.credentialAttempts, 1000) || 1),
     upstreamRequestId: text(entry.upstreamRequestId, 256),
     retryAfter: text(entry.retryAfter, 128),
-    protocol: text(entry.protocol, 64),
+    // Compatibility labels can contain several independent adaptations. Keep
+    // the complete bounded label so the management UI does not hide the cause.
+    protocol: text(entry.protocol, 256),
     status: nonNegative(entry.status, 999),
     duration: nonNegative(entry.duration),
-    ...(entry.upstreamWaitMs !== undefined ? { upstreamWaitMs: nonNegative(entry.upstreamWaitMs) } : {}),
-    ...(entry.upstreamBodyMs !== undefined ? { upstreamBodyMs: nonNegative(entry.upstreamBodyMs) } : {}),
-    stream: Boolean(entry.stream),
-    ...(entry.inputTokens !== undefined ? { inputTokens: nonNegative(entry.inputTokens) } : {}),
-    ...(entry.outputTokens !== undefined ? { outputTokens: nonNegative(entry.outputTokens) } : {}),
-    ...(typeof entry.inputTokensIncludeCache === 'boolean' ? { inputTokensIncludeCache: entry.inputTokensIncludeCache } : {}),
-    ...(entry.cachedInputTokens ? { cachedInputTokens: nonNegative(entry.cachedInputTokens) } : {}),
-    ...(entry.cacheCreationInputTokens ? { cacheCreationInputTokens: nonNegative(entry.cacheCreationInputTokens) } : {}),
-    ...(entry.reasoningTokens ? { reasoningTokens: nonNegative(entry.reasoningTokens) } : {}),
-    ...(entry.errorCode ? { errorCode: text(entry.errorCode, 64) } : {}),
-    ...(entry.error ? { error: text(entry.error, 500) } : {})
+    stream: Boolean(entry.stream)
   };
+  const upstreamWaitMs = entry.upstreamWaitMs;
+  const upstreamBodyMs = entry.upstreamBodyMs;
+  const inputTokens = entry.inputTokens;
+  const outputTokens = entry.outputTokens;
+  const inputTokensIncludeCache = entry.inputTokensIncludeCache;
+  const cachedInputTokens = entry.cachedInputTokens;
+  const cacheCreationInputTokens = entry.cacheCreationInputTokens;
+  const cacheCreation5mInputTokens = entry.cacheCreation5mInputTokens;
+  const cacheCreation1hInputTokens = entry.cacheCreation1hInputTokens;
+  const reasoningTokens = entry.reasoningTokens;
+  const responseDegradations = entry.responseDegradations;
+  const errorCode = entry.errorCode;
+  const error = entry.error;
+  if (upstreamWaitMs !== undefined) sanitized.upstreamWaitMs = nonNegative(upstreamWaitMs);
+  if (upstreamBodyMs !== undefined) sanitized.upstreamBodyMs = nonNegative(upstreamBodyMs);
+  if (inputTokens !== undefined) sanitized.inputTokens = nonNegative(inputTokens);
+  if (outputTokens !== undefined) sanitized.outputTokens = nonNegative(outputTokens);
+  if (typeof inputTokensIncludeCache === 'boolean') sanitized.inputTokensIncludeCache = inputTokensIncludeCache;
+  if (cachedInputTokens) sanitized.cachedInputTokens = nonNegative(cachedInputTokens);
+  if (cacheCreationInputTokens) sanitized.cacheCreationInputTokens = nonNegative(cacheCreationInputTokens);
+  if (cacheCreation5mInputTokens) sanitized.cacheCreation5mInputTokens = nonNegative(cacheCreation5mInputTokens);
+  if (cacheCreation1hInputTokens) sanitized.cacheCreation1hInputTokens = nonNegative(cacheCreation1hInputTokens);
+  if (reasoningTokens) sanitized.reasoningTokens = nonNegative(reasoningTokens);
+  if (responseDegradations) sanitized.responseDegradations = text(responseDegradations, 512);
+  if (errorCode) sanitized.errorCode = text(errorCode, 64);
+  if (error) sanitized.error = text(error, 500);
+  return sanitized;
 }

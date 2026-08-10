@@ -18,7 +18,10 @@ export async function readUtf8FileLimited(file, maxBytes, label = '文件') {
       total += bytesRead;
       if (total > maxBytes) throw fileTooLarge(label, maxBytes);
     }
-    return Buffer.concat(chunks, total).toString('utf8');
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total)); }
+    catch {
+      throw Object.assign(new Error(`${label}不是有效的 UTF-8 文件`), { code: 'FILE_INVALID_UTF8' });
+    }
   } finally {
     await handle.close();
   }

@@ -52,3 +52,25 @@ export function normalizeUpstreamHttpError(text, status, { secrets = [] } = {}) 
     code: safeToken(nested?.code ?? root?.code, 'upstream_http_error', secrets)
   };
 }
+
+export function normalizeUpstreamStreamError(value, { secrets = [] } = {}) {
+  const root = value && !Array.isArray(value) && typeof value === 'object' ? value : null;
+  const nested = root?.error && !Array.isArray(root.error) && typeof root.error === 'object'
+    ? root.error
+    : null;
+  const source = nested || root;
+  const message = safeMessage(
+    typeof value === 'string' ? value : source?.message,
+    'OpenCode 上游流式响应失败',
+    secrets
+  );
+  const type = safeToken(source?.type, 'upstream_error', secrets);
+  const code = safeToken(source?.code, null, secrets);
+  const param = source?.param === null ? null : safeToken(source?.param, null, secrets);
+  return {
+    message,
+    type,
+    ...(code ? { code } : {}),
+    ...(source?.param !== undefined ? { param } : {})
+  };
+}

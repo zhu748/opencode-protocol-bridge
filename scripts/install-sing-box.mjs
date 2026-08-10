@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { chmod, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
@@ -54,7 +54,7 @@ async function main() {
     await download(downloadUrl, archivePath);
     await verifyArchiveSha256(archivePath, expectedSha256);
     await verifyArchiveEntries(archivePath);
-    await run('tar', archiveArgs(asset, archivePath, extractDirectory));
+    await run('tar', archiveArgs(asset, asset, extractDirectory), { cwd: temporaryDirectory });
     const extracted = await findExecutable(extractDirectory, executableName);
     await cp(extracted, stagedExecutable, { force: true });
     if (process.platform !== 'win32') await chmod(stagedExecutable, 0o755);
@@ -95,9 +95,6 @@ function detectLinuxFlavor() {
 
 function archiveArgs(asset, source, destination) {
   const flags = asset.endsWith('.zip') ? ['-xf'] : ['-xzf'];
-  if (process.platform === 'win32') {
-    return ['--force-local', ...flags, source.replaceAll('\\', '/'), '-C', destination.replaceAll('\\', '/')];
-  }
   return [...flags, source, '-C', destination];
 }
 
@@ -151,10 +148,9 @@ async function verifyArchiveSha256(path, expected) {
 }
 
 async function verifyArchiveEntries(path) {
-  const args = process.platform === 'win32'
-    ? ['--force-local', '-tf', path.replaceAll('\\', '/')]
-    : ['-tf', path];
-  const { stdout } = await run('tar', args, { capture: true });
+  // 让 -f 使用工作目录中的相对文件名，既避免 GNU tar 在 Windows
+  // 将盘符冒号误认成远程主机，也无需 bsdtar 不支持的 --force-local。
+  const { stdout } = await run('tar', ['-tf', basename(path)], { capture: true, cwd: dirname(path) });
   for (const entry of stdout.split(/\r?\n/).filter(Boolean)) {
     const normalized = entry.replace(/\\/g, '/');
     if (normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized) || normalized.split('/').includes('..')) {
@@ -168,9 +164,9 @@ async function executableVersion(executable) {
   return stdout.match(/sing-box version\s+([^\s]+)/i)?.[1]?.replace(/^v/i, '') || '';
 }
 
-function run(command, args, { capture = false } = {}) {
+function run(command, args, { capture = false, cwd } = {}) {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, args, { stdio: ['ignore', capture ? 'pipe' : 'inherit', 'pipe'], windowsHide: true });
+    const child = spawn(command, args, { cwd, stdio: ['ignore', capture ? 'pipe' : 'inherit', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', (chunk) => { stdout = `${stdout}${chunk.toString('utf8')}`.slice(-1024 * 1024); });

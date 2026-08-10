@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { resolve } from 'node:path';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 test('Go quick 冒烟先验证模型，再完成 Responses 与统计闭环', { timeout: 15_000 }, async () => {
   const requests = [];
@@ -27,6 +29,7 @@ test('Go quick 冒烟先验证模型，再完成 Responses 与统计闭环', { t
   });
   upstream.listen(0, '127.0.0.1');
   await once(upstream, 'listening');
+  const temporaryParent = await mkdtemp(join(tmpdir(), 'opencode-bridge-live-go-test-'));
 
   const env = { ...process.env };
   for (const name of Object.keys(env)) if (/^OPENCODE_(?:ZEN|GO)_(?:KEY|KEYS|KEY_\d+|PROXY_URL|PROXY_URLS|PROXY_URL_\d+)$/.test(name)) delete env[name];
@@ -34,7 +37,10 @@ test('Go quick 冒烟先验证模型，再完成 Responses 与统计闭环', { t
     OPENCODE_GO_KEY: 'unit-test-go-key',
     OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`,
     OPENCODE_LIVE_PROFILE: 'quick',
-    OPENCODE_LIVE_TIMEOUT_MS: '10000'
+    OPENCODE_LIVE_TIMEOUT_MS: '10000',
+    TMP: temporaryParent,
+    TEMP: temporaryParent,
+    TMPDIR: temporaryParent
   });
   const child = spawn(process.execPath, ['scripts/live-go-smoke.mjs'], {
     cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
@@ -60,9 +66,11 @@ test('Go quick 冒烟先验证模型，再完成 Responses 与统计闭环', { t
     assert.ok(requests.every((item) => item.authorization === 'Bearer unit-test-go-key'));
     assert.equal(requests[1].body.model, 'deepseek-v4-flash');
     assert.doesNotMatch(`${stdout}${stderr}`, /unit-test-go-key/);
+    assert.deepEqual(await readdir(temporaryParent), []);
   } finally {
     if (child.exitCode === null) child.kill();
     upstream.close();
     await once(upstream, 'close').catch(() => {});
+    await rm(temporaryParent, { recursive: true, force: true });
   }
 });

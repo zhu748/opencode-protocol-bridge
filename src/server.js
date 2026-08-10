@@ -5,21 +5,27 @@ import { stat } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from './auth.js';
 import { loadConfig, saveConfig, updateConfig, publicConfig, configRevision, normalizeImageHandoffModels, normalizeModelRoutes, ROOT } from './config.js';
-import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, hasHostedResponsesWebSearch, hasUsageData } from './adapters.js';
-import { callUpstream, closeDirectUpstreamDispatcher, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJson, readResponseText, upstreamConnectionFailure } from './upstream.js';
+import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiToolNameAliases, hasGeminiGoogleSearch, hasHostedResponsesWebSearch, responsesToolAdaptations, claudeToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations, hasUsageData, reasoningRequestAdaptations, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations } from './adapters.js';
+import { callUpstream, closeDirectUpstreamDispatcher, discardUpstreamResponse, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJsonPayload, readResponseText, upstreamConnectionFailure, withStreamIdleTimeout } from './upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, singBoxRuntimeStatus } from './proxy.js';
 import { KeepAliveService, normalizeKeepAliveUrl, resolveKeepAliveConfig } from './keep-alive.js';
-import { configuredProviderCredentials, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
+import { configuredProviderCredentials, createProviderCredentialResolver, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
 import { CredentialHealthTracker } from './credential-health.js';
-import { createSseObserver, translateSse } from './stream.js';
+import { createSseObserver, sanitizeSseErrorStream, translateSse, withSseHeartbeat } from './stream.js';
 import { RequestLogStore } from './request-log.js';
-import { aggregateRequestStats } from './stats.js';
-import { applyPromptRules, claudeSystemBlockText, MAX_PROMPT_BYTES, normalizePromptRules, promptSnapshotText, rewriteClaudeSystem } from './prompt-rewrite.js';
-import { ImageHandoffStore, imageHandoffStorageOptions, localImageHandoffEnabled } from './image-handoff.js';
+import { aggregateRequestStats, summarizeRequestStatus } from './stats.js';
+import { applyPromptRules, claudeSystemBlockText, isClaudeMidTurnUserMessage, MAX_PROMPT_BYTES, normalizePromptRules, promptSnapshotText, rewriteClaudeRequestSystems } from './prompt-rewrite.js';
+import { ImageHandoffStore, imageHandoffStorageOptions, localImageHandoffEnabled, resolveImageHandoffPublicUrl } from './image-handoff.js';
 import { canonicalStaticRoot, ifNoneMatchMatches, resolveStaticFile } from './static-files.js';
 import { writeResponseBuffer, writeResponseChunk, writeResponseStream } from './response-write.js';
 import { parseRequestTarget } from './request-target.js';
-import { normalizeUpstreamHttpError } from './upstream-error.js';
+import { normalizeUpstreamHttpError, normalizeUpstreamStreamError } from './upstream-error.js';
+import { estimateClaudeInputTokens } from './token-count.js';
+import { createReasoningStateScope, ReasoningStateStore } from './reasoning-state-store.js';
+import { normalizeRequestedModel } from './model-capabilities.js';
+import { clientAbortController, clientAbortSignal } from './request-abort.js';
+import { assertJsonComplexity } from './json-complexity.js';
+import { SharedOperationPool } from './shared-operation.js';
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
@@ -34,11 +40,15 @@ const MAX_HTTP_CONNECTIONS = Number(process.env.OPENCODE_BRIDGE_MAX_HTTP_CONNECT
 if (!Number.isInteger(MAX_HTTP_CONNECTIONS) || MAX_HTTP_CONNECTIONS < 1 || MAX_HTTP_CONNECTIONS > 10_000) throw new Error('OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS 必须是 1–10000 之间的整数');
 const STREAM_WRITE_TIMEOUT_MS = Number(process.env.OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS || 30_000);
 if (!Number.isInteger(STREAM_WRITE_TIMEOUT_MS) || STREAM_WRITE_TIMEOUT_MS < 100 || STREAM_WRITE_TIMEOUT_MS > 300_000) throw new Error('OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS 必须是 100–300000 之间的整数');
+const SSE_HEARTBEAT_MS = Number(process.env.OPENCODE_BRIDGE_SSE_HEARTBEAT_MS || 15_000);
+if (!Number.isInteger(SSE_HEARTBEAT_MS) || (SSE_HEARTBEAT_MS !== 0 && (SSE_HEARTBEAT_MS < 1_000 || SSE_HEARTBEAT_MS > 60_000))) throw new Error('OPENCODE_BRIDGE_SSE_HEARTBEAT_MS 必须是 0 或 1000–60000 之间的整数');
 const MAX_HTTP_HEADER_BYTES = 16 * 1024;
 const MAX_HTTP_HEADERS = 128;
 const MAX_REQUESTS_PER_SOCKET = 1000;
 const MAX_MODEL_COUNT = 5000;
 const JSON_BACKPRESSURE_THRESHOLD_BYTES = 64 * 1024;
+const MAX_TOKEN_COUNT_REQUESTS = 8;
+const MAX_CLIENT_TOKEN_COUNT_REQUESTS = 4;
 const CONNECTIONS_CHECKING_INTERVAL_MS = 1000;
 const SINGLETON_REQUEST_HEADERS = new Set([
   'authorization', 'x-api-key', 'x-goog-api-key', 'cookie', 'host', 'origin', 'sec-fetch-site',
@@ -54,7 +64,8 @@ const PUBLIC = join(ROOT, 'public');
 const PUBLIC_ROOT = await canonicalStaticRoot(PUBLIC);
 const requestLogs = new RequestLogStore(process.env.LOG_FILE || resolve(ROOT, 'data', 'request-logs.json'));
 const keepAlive = new KeepAliveService();
-const imageHandoffPublicUrl = process.env.OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL || '';
+const sharedModelDiscoveries = new SharedOperationPool();
+const imageHandoffPublicUrl = resolveImageHandoffPublicUrl(process.env);
 const imageHandoff = new ImageHandoffStore({
   enabled: localImageHandoffEnabled(HOST, process.env.OPENCODE_BRIDGE_IMAGE_HANDOFF),
   publicBaseUrl: imageHandoffPublicUrl,
@@ -68,13 +79,18 @@ let activeAdminModelDiscoveries = 0;
 let activePublicRequests = 0;
 let activeHttpRequests = 0;
 let activeHttpConnections = 0;
+let activeTokenCountRequests = 0;
 const activeClientRequests = new Map();
+const activeClientTokenCountRequests = new Map();
+const activeInferenceRecords = new Map();
 let recentClaudePrompt = null;
 const environmentCredentialPools = {
   zen: environmentProviderCredentials(process.env, 'zen'),
   go: environmentProviderCredentials(process.env, 'go')
 };
+const resolveProviderCredentials = createProviderCredentialResolver(environmentCredentialPools);
 const credentialHealth = new CredentialHealthTracker();
+const reasoningStates = new ReasoningStateStore();
 
 function requestProtocol(req) {
   if (req.socket.encrypted) return 'https';
@@ -89,8 +105,7 @@ function sessionCookie(req, token, maxAge = 86400) {
   return `bridge_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
 
-const json = (res, status, data, headers = {}) => {
-  const payload = Buffer.from(JSON.stringify(data));
+const jsonPayload = (res, status, payload, headers = {}) => {
   if (res.req && !res.req.complete && !['GET', 'HEAD'].includes(res.req.method)) {
     res.req.resume();
     res.setHeader('connection', 'close');
@@ -100,6 +115,8 @@ const json = (res, status, data, headers = {}) => {
   if (payload.length <= JSON_BACKPRESSURE_THRESHOLD_BYTES) return res.end(payload);
   return writeResponseBuffer(res, payload, STREAM_WRITE_TIMEOUT_MS);
 };
+
+const json = (res, status, data, headers = {}) => jsonPayload(res, status, Buffer.from(JSON.stringify(data)), headers);
 
 function protocolError(res, status, protocol, message, type = 'invalid_request_error', headers = {}, code = null) {
   if (protocol === 'claude') return json(res, status, { type: 'error', error: { type, message } }, headers);
@@ -133,7 +150,9 @@ function upstreamFailureStatus(error) {
 function upstreamOperationFailure(error) {
   const responseCodes = {
     UPSTREAM_BODY_TOO_LARGE: 'upstream_response_too_large',
+    UPSTREAM_INVALID_UTF8: 'upstream_invalid_utf8',
     UPSTREAM_INVALID_JSON: 'upstream_invalid_json',
+    UPSTREAM_JSON_TOO_COMPLEX: 'upstream_response_too_complex',
     UPSTREAM_INVALID_RESPONSE: 'upstream_invalid_response'
   };
   return {
@@ -146,38 +165,20 @@ function upstreamOperationFailure(error) {
 function streamFailure(error, res, abort) {
   const clientClosed = ['CLIENT_CLOSED', 'CLIENT_WRITE_TIMEOUT'].includes(error?.code)
     || (abort.signal.aborted && !res.writableEnded);
-  const credentialNeutral = ['UPSTREAM_SSE_EVENT_TOO_LARGE', 'UPSTREAM_UNSUPPORTED_STREAM_CONTENT'].includes(error?.code);
+  const credentialNeutral = ['UPSTREAM_SSE_EVENT_TOO_LARGE', 'UPSTREAM_JSON_TOO_COMPLEX', 'UPSTREAM_UNSUPPORTED_STREAM_CONTENT'].includes(error?.code);
+  const streamCodes = {
+    UPSTREAM_INVALID_UTF8: 'upstream_invalid_utf8',
+    UPSTREAM_JSON_TOO_COMPLEX: 'upstream_response_too_complex'
+  };
   const networkFailure = isUpstreamConnectionError(error) ? upstreamConnectionFailure(error) : null;
   return clientClosed
     ? { status: 499, message: error?.code === 'CLIENT_WRITE_TIMEOUT' ? error.message : '客户端在流式响应完成前断开', penalizeCredential: false }
     : {
         status: networkFailure?.status || upstreamFailureStatus(error),
         message: networkFailure?.message || error?.message || String(error),
-        code: networkFailure?.code || 'upstream_error',
+        code: networkFailure?.code || streamCodes[error?.code] || 'upstream_error',
         penalizeCredential: !credentialNeutral
       };
-}
-
-function clientAbortSignal(req, res) {
-  const controller = new AbortController();
-  const cleanup = () => {
-    req.off('aborted', abort);
-    res.off('close', onClose);
-    res.off('finish', cleanup);
-  };
-  const abort = () => {
-    cleanup();
-    controller.abort(Object.assign(new Error('客户端已断开'), { code: 'CLIENT_CLOSED' }));
-  };
-  const onClose = () => {
-    if (!res.writableEnded) abort();
-    else cleanup();
-  };
-  req.once('aborted', abort);
-  res.once('close', onClose);
-  res.once('finish', cleanup);
-  if (req.aborted || res.destroyed) abort();
-  return controller.signal;
 }
 
 function isIncompleteSseError(error) {
@@ -189,6 +190,11 @@ function compatibilityHeaders(req, incomingProtocol, targetProtocol) {
   if (targetProtocol === 'claude') return Object.fromEntries(['anthropic-version', 'anthropic-beta']
     .flatMap((name) => typeof req.headers[name] === 'string' ? [[name, req.headers[name]]] : []));
   return typeof req.headers['openai-beta'] === 'string' ? { 'openai-beta': req.headers['openai-beta'] } : {};
+}
+
+function usesAnthropicBetaEndpoint(url, incomingProtocol, targetProtocol) {
+  return incomingProtocol === 'claude' && targetProtocol === 'claude'
+    && url.searchParams.get('beta') === 'true';
 }
 
 function requestBodyTooLarge(req, limit) {
@@ -226,12 +232,14 @@ async function bodyJson(req, limit = MAX_ADMIN_REQUEST_BYTES) {
     }
     throw error;
   }
-  try {
-    const body = JSON.parse(JSON_DECODER.decode(Buffer.concat(chunks, size)) || '{}');
-    if (!body || Array.isArray(body) || typeof body !== 'object') throw new Error();
-    return body;
-  }
+  let body;
+  try { body = JSON.parse(JSON_DECODER.decode(Buffer.concat(chunks, size)) || '{}'); }
   catch { throw Object.assign(new Error('JSON 格式无效'), { status: 400 }); }
+  if (!body || Array.isArray(body) || typeof body !== 'object') {
+    throw Object.assign(new Error('JSON 格式无效'), { status: 400 });
+  }
+  assertJsonComplexity(body, { depthStatus: 400, nodesStatus: 413 });
+  return body;
 }
 
 function formatSizeLimit(bytes) {
@@ -265,8 +273,89 @@ function boundedInteger(value, label, minimum, maximum, fallback) {
   return value;
 }
 
+function boundedZeroOrInteger(value, label, minimum, maximum, fallback) {
+  if (value === undefined) return fallback;
+  if (value === 0) return 0;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < minimum || value > maximum) {
+    throw Object.assign(new Error(`${label}必须是 0 或 ${minimum}–${maximum} 的整数`), { status: 400 });
+  }
+  return value;
+}
+
 function validAlphaNumericSecret(value) {
   return typeof value === 'string' && /^[A-Za-z0-9]{6,256}$/.test(value);
+}
+
+function beginActiveInference(requestId, startedAt = Date.now()) {
+  const record = {
+    startedAt,
+    stream: false,
+    stage: 'reading_request',
+    streamStartedAt: 0,
+    lastUpstreamDataAt: 0,
+    heartbeats: 0
+  };
+  activeInferenceRecords.set(requestId, record);
+  let finished = false;
+  return {
+    configure({ stream }) {
+      if (finished) return;
+      record.stream = stream === true;
+      record.stage = 'preparing';
+    },
+    stage(value) {
+      if (finished) return;
+      record.stage = value;
+      if (value === 'streaming' && !record.streamStartedAt) {
+        record.streamStartedAt = Date.now();
+        record.lastUpstreamDataAt = 0;
+      }
+    },
+    upstreamChunk() {
+      if (!finished) record.lastUpstreamDataAt = Date.now();
+    },
+    heartbeat() {
+      if (finished) return;
+      record.heartbeats = Math.min(Number.MAX_SAFE_INTEGER, record.heartbeats + 1);
+    },
+    finish() {
+      if (finished) return;
+      finished = true;
+      activeInferenceRecords.delete(requestId);
+    }
+  };
+}
+
+function activeInferenceSnapshot(now = Date.now()) {
+  let activeStreamingRequests = 0;
+  let activeUpstreamWaitRequests = 0;
+  let activeEstablishedStreams = 0;
+  let activeStreamWrites = 0;
+  let oldestActiveInferenceMs = 0;
+  let longestActiveStreamSilenceMs = 0;
+  let activeStreamHeartbeats = 0;
+  for (const record of activeInferenceRecords.values()) {
+    if (record.stream) activeStreamingRequests++;
+    if (record.stage === 'waiting_upstream') activeUpstreamWaitRequests++;
+    if (record.stage === 'streaming' || record.stage === 'writing_stream') {
+      activeEstablishedStreams++;
+      if (record.stage === 'writing_stream') activeStreamWrites++;
+      const silenceStartedAt = record.lastUpstreamDataAt || record.streamStartedAt;
+      longestActiveStreamSilenceMs = Math.max(longestActiveStreamSilenceMs, Math.max(0, now - silenceStartedAt));
+      activeStreamHeartbeats = Math.min(Number.MAX_SAFE_INTEGER, activeStreamHeartbeats + record.heartbeats);
+    }
+    oldestActiveInferenceMs = Math.max(oldestActiveInferenceMs, Math.max(0, now - record.startedAt));
+  }
+  return {
+    activeInferenceRequests: activeInferenceRecords.size,
+    activeStreamingRequests,
+    activeUpstreamWaitRequests,
+    activeEstablishedStreams,
+    activeStreamWrites,
+    oldestActiveInferenceMs,
+    longestActiveStreamSilenceMs,
+    activeStreamHeartbeats
+  };
 }
 
 function randomClientToken() {
@@ -317,7 +406,7 @@ function serviceReady(config) {
 }
 
 function providerCredentials(config, provider) {
-  return configuredProviderCredentials(config, provider, environmentCredentialPools[provider]);
+  return resolveProviderCredentials(config, provider);
 }
 
 function selectProviderCredential(config, provider) {
@@ -378,6 +467,7 @@ async function readModelResponse(response, label) {
     throw Object.assign(new Error(`${label}格式无效`), { code: 'UPSTREAM_INVALID_JSON' });
   }
   if (!response.ok) return modelUpstreamErrorBody(response.status);
+  assertJsonComplexity(parsed, { label, code: 'UPSTREAM_JSON_TOO_COMPLEX' });
   if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object' || !Array.isArray(parsed.data)) {
     throw Object.assign(new Error(`${label}结构无效：缺少 data 数组`), { code: 'UPSTREAM_INVALID_RESPONSE' });
   }
@@ -413,8 +503,7 @@ async function listModelsWithCredentialFailover(config, provider, signal, { labe
       }
       const failure = upstreamConnectionFailure(error);
       credentialHealth.recordNetworkFailure(provider, credential, failure.status);
-      const remaining = credentials.filter((item) => !attemptedIds.has(item.credentialId));
-      const replacement = remaining.length ? credentialHealth.select(provider, remaining).credential : null;
+      const replacement = credentialHealth.select(provider, credentials, attemptedIds).credential;
       if (replacement) {
         credential = replacement;
         continue;
@@ -427,10 +516,9 @@ async function listModelsWithCredentialFailover(config, provider, signal, { labe
       recordCredentialResponse(provider, credential, response);
       responseRecorded = true;
       if (attempts < credentials.length) {
-        const remaining = credentials.filter((item) => !attemptedIds.has(item.credentialId));
-        const replacement = remaining.length ? credentialHealth.select(provider, remaining).credential : null;
+        const replacement = credentialHealth.select(provider, credentials, attemptedIds).credential;
         if (replacement) {
-          await response.body?.cancel().catch(() => {});
+          await discardUpstreamResponse(response).catch(() => {});
           credential = replacement;
           continue;
         }
@@ -448,10 +536,9 @@ async function listModelsWithCredentialFailover(config, provider, signal, { labe
       if (networkFailure && !responseRecorded) credentialHealth.recordNetworkFailure(provider, credential, networkFailure.status);
       else if (!responseRecorded) credentialHealth.releaseProbe(provider, credential);
       if (networkFailure) {
-        const remaining = credentials.filter((item) => !attemptedIds.has(item.credentialId));
-        const replacement = remaining.length ? credentialHealth.select(provider, remaining).credential : null;
+        const replacement = credentialHealth.select(provider, credentials, attemptedIds).credential;
         if (replacement) {
-          await response.body?.cancel().catch(() => {});
+          await discardUpstreamResponse(response).catch(() => {});
           credential = replacement;
           continue;
         }
@@ -463,6 +550,13 @@ async function listModelsWithCredentialFailover(config, provider, signal, { labe
     return { response, body, credential, attempts, selection: null };
   }
   return { response: null, credential: null, attempts, selection: { reason: 'unconfigured', retryAfterMs: 0 } };
+}
+
+function discoverModels(config, provider, signal) {
+  const key = `${configRevision(config)}:${provider}`;
+  return sharedModelDiscoveries.run(key, signal, (sharedSignal) => listModelsWithCredentialFailover(
+    config, provider, sharedSignal, { label: `${provider.toUpperCase()} 模型列表` }
+  ));
 }
 
 function credentialHealthSnapshot(config) {
@@ -523,6 +617,8 @@ async function runtimePublicConfig(config) {
   return {
     ...base,
     ...effectiveKeepAlive,
+    zenConfigured: providerCredentials(config, 'zen').length > 0,
+    goConfigured: providerCredentials(config, 'go').length > 0,
     zenEnvironmentKeyCount: environmentCredentialPools.zen.length,
     goEnvironmentKeyCount: environmentCredentialPools.go.length,
     zenEnvironmentCredentials: environmentCredentials('zen'),
@@ -819,6 +915,7 @@ async function adminApiOperation(req, res, url, config) {
     updated.promptRewriteRules = promptRewriteRules;
     updated.requestLogLimit = boundedInteger(next.requestLogLimit, '日志保留条数', 10, 1000, config.requestLogLimit);
     updated.upstreamTimeoutMs = boundedInteger(next.upstreamTimeoutMs, '上游超时', 1000, 600000, config.upstreamTimeoutMs);
+    updated.upstreamStreamIdleTimeoutMs = boundedZeroOrInteger(next.upstreamStreamIdleTimeoutMs, '上游流空闲超时', 1000, 3600000, config.upstreamStreamIdleTimeoutMs);
     updated.maxConcurrentRequests = boundedInteger(next.maxConcurrentRequests, '最大并发请求', 1, 1000, config.maxConcurrentRequests);
     if (Object.hasOwn(next, 'keepAliveUrl') && typeof next.keepAliveUrl !== 'string') return json(res, 400, { error: '保活 URL 必须是字符串' });
     try { updated.keepAliveUrl = Object.hasOwn(next, 'keepAliveUrl') ? normalizeKeepAliveUrl(next.keepAliveUrl) : config.keepAliveUrl; }
@@ -932,26 +1029,30 @@ async function adminApiOperation(req, res, url, config) {
   }
   if (url.pathname === '/api/stats' && req.method === 'GET') {
     await requestLogs.ensureLoaded({ limit: config.requestLogLimit, persist: config.persistLogs });
-    const stats = aggregateRequestStats(requestLogs.list(config.requestLogLimit), url.searchParams.get('window') || 'all');
+    const stats = aggregateRequestStats(requestLogs.values(config.requestLogLimit), url.searchParams.get('window') || 'all');
     return json(res, 200, { ...stats, credentialHealth: credentialHealthSnapshot(config) });
   }
   if (url.pathname === '/api/status' && req.method === 'GET') {
     await requestLogs.ensureLoaded({ limit: config.requestLogLimit, persist: config.persistLogs });
-    const logs = requestLogs.list(config.requestLogLimit);
-    const summary = aggregateRequestStats(logs).summary;
+    const logs = requestLogs.values(config.requestLogLimit);
+    const summary = summarizeRequestStatus(logs);
     const memory = process.memoryUsage();
+    const activeInference = activeInferenceSnapshot();
     return json(res, 200, {
       uptime: Math.floor(process.uptime()), requests: summary.requests, success: summary.success,
       ready: serviceReady(config),
       activeRequests: activePublicRequests,
+      ...activeInference,
       activeHttpConnections,
       activeHttpRequests,
       maxHttpConnections: MAX_HTTP_CONNECTIONS,
       streamWriteTimeoutMs: STREAM_WRITE_TIMEOUT_MS,
+      sseHeartbeatMs: SSE_HEARTBEAT_MS,
       activeAdminMutations,
       maxAdminMutations: MAX_ADMIN_MUTATIONS,
       activeAdminModelDiscoveries,
       maxAdminModelDiscoveries: MAX_ADMIN_MODEL_DISCOVERIES,
+      activeSharedModelDiscoveries: sharedModelDiscoveries.size,
       successRate: summary.successRate,
       averageDuration: summary.averageDurationMs,
       averageUpstreamWait: summary.averageUpstreamWaitMs,
@@ -974,7 +1075,7 @@ async function adminApiOperation(req, res, url, config) {
       const provider = requestedProvider === 'go' ? 'go' : 'zen';
       const signal = clientAbortSignal(req, res);
       try {
-        const result = await listModelsWithCredentialFailover(config, provider, signal);
+        const result = await discoverModels(config, provider, signal);
         if (!result.response) {
           applyCredentialRetryHeader(res, result.selection);
           return await json(res, result.selection.reason === 'cooldown' ? 503 : 400, { error: credentialUnavailableMessage(provider, result.selection) });
@@ -1064,33 +1165,109 @@ function imageHandoffEnabledForRoute(config, route) {
 }
 
 function upstreamSystemText(body, protocol) {
-  if (protocol === 'responses') return typeof body.instructions === 'string' ? body.instructions : '';
+  if (protocol === 'gemini') {
+    return (Array.isArray(body.systemInstruction?.parts) ? body.systemInstruction.parts : [])
+      .map((part) => typeof part?.text === 'string' ? part.text : '')
+      .filter(Boolean).join('\n');
+  }
+  if (protocol === 'responses') {
+    const instructions = typeof body.instructions === 'string' ? body.instructions : Array.isArray(body.instructions)
+      ? body.instructions.map((item) => messageContentText(item?.content ?? item)).filter(Boolean).join('\n')
+      : '';
+    const messages = (Array.isArray(body.input) ? body.input : [])
+      .filter((message) => ['system', 'developer'].includes(message?.role))
+      .map((message) => messageContentText(message.content)).filter(Boolean);
+    return [instructions, ...messages].filter(Boolean).join('\n');
+  }
   if (protocol === 'claude') {
-    if (typeof body.system === 'string') return body.system;
-    return Array.isArray(body.system) ? body.system.map(claudeSystemBlockText).filter(Boolean).join('\n') : '';
+    const system = Array.isArray(body.system)
+      ? body.system.map(claudeSystemBlockText).filter(Boolean).join('\n')
+      : claudeSystemBlockText(body.system);
+    const messages = (Array.isArray(body.messages) ? body.messages : [])
+      .filter((message) => ['system', 'developer'].includes(message?.role) && !isClaudeMidTurnUserMessage(message))
+      .map((message) => messageContentText(message.content)).filter(Boolean);
+    return [system, ...messages].filter(Boolean).join('\n');
   }
   return (Array.isArray(body.messages) ? body.messages : [])
     .filter((message) => ['system', 'developer'].includes(message?.role))
-    .map((message) => typeof message.content === 'string' ? message.content : Array.isArray(message.content) ? message.content.map((part) => part?.text || part?.refusal || '').join('') : '')
+    .map((message) => messageContentText(message.content))
     .filter(Boolean).join('\n');
 }
 
+async function countClaudeTokens(req, res) {
+  const body = await bodyJson(req, MAX_PROXY_REQUEST_BYTES);
+  try {
+    const inputTokens = estimateClaudeInputTokens(body);
+    return json(res, 200, { input_tokens: inputTokens }, { 'x-opencode-token-count': 'estimated' });
+  } catch (error) {
+    return protocolError(res, error.status || 400, 'claude', error.message);
+  }
+}
+
+function messageContentText(content) {
+  if (typeof content === 'string') return content;
+  if (content && !Array.isArray(content) && typeof content === 'object' && typeof content.text === 'string') return content.text;
+  return Array.isArray(content) ? content.map((part) => part?.text || part?.refusal || '').join('') : '';
+}
+
 function responsesOutputOptions(body, protocol) {
+  if (protocol === 'gemini') return { geminiToolAliases: geminiToolNameAliases(body) };
   if (protocol !== 'responses') return {};
+  const tools = [...(Array.isArray(body.tools) ? body.tools : [])];
+  const toolKeys = new Set(tools.map((tool) => `${tool?.type || 'function'}\n${tool?.name || tool?.execution || ''}`));
+  for (const item of Array.isArray(body.input) ? body.input : []) {
+    if (item?.type !== 'tool_search_output' || !Array.isArray(item.tools)) continue;
+    for (const tool of item.tools) {
+      const key = `${tool?.type || 'function'}\n${tool?.name || tool?.execution || ''}`;
+      if (toolKeys.has(key)) continue;
+      toolKeys.add(key);
+      tools.push(tool);
+    }
+  }
   return {
     parallelToolCalls: typeof body.parallel_tool_calls === 'boolean' ? body.parallel_tool_calls : true,
     toolChoice: body.tool_choice ?? 'auto',
-    tools: Array.isArray(body.tools) ? body.tools : []
+    tools,
+    includeObfuscation: body.stream_options?.include_obfuscation !== false,
+    instructions: body.instructions ?? null,
+    metadata: body.metadata,
+    temperature: body.temperature,
+    topP: body.top_p,
+    background: body.background ?? false,
+    maxOutputTokens: body.max_output_tokens,
+    reasoning: body.reasoning,
+    store: body.store ?? false,
+    text: body.text,
+    truncation: body.truncation ?? 'disabled',
+    user: body.user,
+    safetyIdentifier: body.safety_identifier,
+    promptCacheKey: body.prompt_cache_key,
+    promptCacheRetention: body.prompt_cache_retention
   };
 }
 
-async function proxyRequest(req, res, url, config, client, forcedProvider, requestId) {
+function chatOutputOptions(body, protocol) {
+  if (protocol !== 'chat') return {};
+  return {
+    includeUsage: body.stream_options?.include_usage === true,
+    includeObfuscation: body.stream_options?.include_obfuscation !== false
+  };
+}
+
+async function proxyRequest(req, res, url, config, client, forcedProvider, requestId, activity) {
+  const abort = clientAbortController(req, res);
   const incomingProtocol = detectProtocol(url.pathname);
-  if (!incomingProtocol) return protocolError(res, 404, 'chat', '仅支持 messages、responses、chat/completions 和 Gemini generateContent 端点');
+  if (!incomingProtocol) return protocolError(res, 404, 'chat', '仅支持 messages、responses、responses/compact、chat/completions 和 Gemini generateContent 端点');
   if (!client) return protocolError(res, 401, incomingProtocol, '访问令牌无效', 'authentication_error');
   const started = Date.now();
   let body = await bodyJson(req, MAX_PROXY_REQUEST_BYTES);
+  if (abort.signal.aborted) return;
+  const responsesCompact = incomingProtocol === 'responses' && url.pathname.endsWith('/responses/compact');
   if (incomingProtocol === 'gemini') {
+    const reservedFields = ['model', 'stream'].filter((field) => Object.hasOwn(body, field));
+    if (reservedFields.length) {
+      return protocolError(res, 400, incomingProtocol, `Gemini 请求正文不能包含由 URL 决定的字段：${reservedFields.join(', ')}`);
+    }
     const scope = publicApiScope(url.pathname);
     let endpoint;
     try { endpoint = scope && geminiEndpoint(url.pathname, scope.base); }
@@ -1098,28 +1275,74 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     if (!endpoint) return protocolError(res, 404, incomingProtocol, 'Gemini 端点格式无效');
     body = { ...body, model: endpoint.model, stream: endpoint.stream };
   }
-  if (typeof body.model !== 'string' || !body.model.trim() || body.model.length > 256) return protocolError(res, 400, incomingProtocol, 'model 必须是长度 1–256 的非空字符串');
+  try { body = { ...body, model: normalizeRequestedModel(body.model) }; }
+  catch (error) { return protocolError(res, 400, incomingProtocol, error.message); }
+  if (body.stream !== undefined && typeof body.stream !== 'boolean') return protocolError(res, 400, incomingProtocol, 'stream 必须是布尔值');
+  if (responsesCompact && body.stream === true) return protocolError(res, 400, incomingProtocol, 'Responses compact 仅支持非流式请求');
+  const stream = body.stream === true;
+  activity.configure({ stream });
   let promptRewrite;
   if (incomingProtocol === 'claude') {
-    promptRewrite = rewriteClaudeSystem(body.system, config.promptRewriteRules || []);
-    body.system = promptRewrite.system;
+    promptRewrite = rewriteClaudeRequestSystems(body, config.promptRewriteRules || []);
+    body = promptRewrite.body;
   }
   const route = resolveRoute(body.model, config, forcedProvider);
-  const responseOptions = responsesOutputOptions(body, incomingProtocol);
-  const webSearchDegraded = incomingProtocol === 'responses' && route.protocol !== 'responses' && hasHostedResponsesWebSearch(body.tools);
   if (!route.upstreamModel) return protocolError(res, 400, incomingProtocol, '上游模型名不能为空');
-  const imageHandoffEnabled = imageHandoffEnabledForRoute(config, route);
-  let upstreamBody;
+  if (responsesCompact && route.protocol !== 'responses') {
+    return protocolError(res, 400, incomingProtocol, 'Responses compact 只能透传到原生 Responses 模型；请将该模型路由设为 responses');
+  }
+  const reasoningStateScope = createReasoningStateScope(client.id || client.name || 'client', body.model, route);
+  const responseOptions = responsesOutputOptions(body, incomingProtocol);
+  const chatOptions = chatOutputOptions(body, incomingProtocol);
+  const webSearchDegraded = incomingProtocol === 'responses' && !['responses', 'gemini'].includes(route.protocol) && hasHostedResponsesWebSearch(body.tools);
+  const allowResponsesWebSearch = incomingProtocol === 'gemini' && route.protocol === 'responses' && hasGeminiGoogleSearch(body);
+  const toolAdaptations = incomingProtocol === route.protocol ? []
+    : incomingProtocol === 'responses' ? responsesToolAdaptations(body.tools, body.input, body.tool_choice)
+      : incomingProtocol === 'claude' ? claudeToolAdaptations(body.tools, body.messages, stream, route.protocol)
+        : incomingProtocol === 'gemini' ? geminiToolAdaptations(body, route.protocol)
+          : [];
+  if (incomingProtocol === 'responses' && route.protocol === 'gemini' && hasHostedResponsesWebSearch(body.tools)) {
+    toolAdaptations.push('responses_web_search_to_gemini_google_search');
+  }
+  let inputDegradations;
   try {
-    if (incomingProtocol === 'claude' && route.protocol === 'chat' && imageHandoffEnabled) {
-      body = await imageHandoff.prepareClaudeRequest(body, true);
-    }
-    upstreamBody = prepareUpstreamRequest(body, incomingProtocol, route.protocol, route.upstreamModel, { toolChoiceFallback: route.toolChoiceFallback, imageHandoffEnabled });
+    inputDegradations = inputRequestDegradations(body, incomingProtocol, route.protocol);
   } catch (error) {
     return protocolError(res, error.status || 400, incomingProtocol, error.message, error.type || 'invalid_request_error');
   }
+  const imageHandoffEnabled = !responsesCompact && imageHandoffEnabledForRoute(config, route);
+  let upstreamBody;
+  let conversionBody = body;
+  try {
+    if (imageHandoffEnabled) body = await imageHandoff.prepareRequest(body, incomingProtocol, true, { signal: abort.signal });
+    conversionBody = incomingProtocol !== route.protocol
+      ? reasoningStates.inject(body, incomingProtocol, route.protocol, reasoningStateScope)
+      : body;
+    upstreamBody = prepareUpstreamRequest(conversionBody, incomingProtocol, route.protocol, route.upstreamModel, { toolChoiceFallback: route.toolChoiceFallback, imageHandoffEnabled });
+  } catch (error) {
+    if (abort.signal.aborted) return;
+    return protocolError(res, error.status || 400, incomingProtocol, error.message, error.type || 'invalid_request_error');
+  }
+  if (abort.signal.aborted) return;
+  const reasoningAdaptations = reasoningRequestAdaptations(conversionBody, incomingProtocol, route.protocol, route.upstreamModel);
+  const contextAdaptations = contextRequestAdaptations(body, incomingProtocol, route.protocol);
+  const serviceAdaptations = serviceRequestAdaptations(body, incomingProtocol, route.protocol);
+  const generationAdaptations = generationRequestAdaptations(body, incomingProtocol, route.protocol);
+  const cacheAdaptations = incomingProtocol === route.protocol ? []
+    : incomingProtocol === 'claude' ? claudeCacheAdaptations(body, route.protocol, route.upstreamModel)
+      : incomingProtocol === 'responses' ? responsesCacheAdaptations(body, route.protocol, route.upstreamModel)
+        : incomingProtocol === 'chat' ? chatCacheAdaptations(body, route.protocol, route.upstreamModel)
+          : [];
   if (webSearchDegraded) res.setHeader('x-opencode-tool-degradations', 'web_search');
-  const selection = selectProviderCredential(config, route.provider);
+  if (toolAdaptations.length) res.setHeader('x-opencode-tool-adaptations', toolAdaptations.join(','));
+  if (inputDegradations.length) res.setHeader('x-opencode-input-degradations', inputDegradations.join(','));
+  if (reasoningAdaptations.length) res.setHeader('x-opencode-reasoning-adaptations', reasoningAdaptations.join(','));
+  if (contextAdaptations.length) res.setHeader('x-opencode-context-adaptations', contextAdaptations.join(','));
+  if (serviceAdaptations.length) res.setHeader('x-opencode-service-adaptations', serviceAdaptations.join(','));
+  if (generationAdaptations.length) res.setHeader('x-opencode-generation-adaptations', generationAdaptations.join(','));
+  if (cacheAdaptations.length) res.setHeader('x-opencode-cache-adaptations', cacheAdaptations.join(','));
+  const credentials = providerCredentials(config, route.provider);
+  const selection = credentialHealth.select(route.provider, credentials);
   let credential = selection.credential;
   if (!credential) {
     applyCredentialRetryHeader(res, selection);
@@ -1134,40 +1357,72 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       original: original.text, final: final.text,
       originalBytes: Buffer.byteLength(promptRewrite.original), finalBytes: Buffer.byteLength(finalText),
       originalTruncated: original.truncated, finalTruncated: final.truncated,
+      topLevelOriginalBytes: Buffer.byteLength(promptRewrite.topLevelOriginal),
+      topLevelFinalBytes: Buffer.byteLength(promptRewrite.topLevelFinal),
+      messageSystemCount: promptRewrite.messageSystemCount,
+      messageUserSteeringCount: promptRewrite.messageUserSteeringCount,
       applied: promptRewrite.applied,
       ruleResults: promptRewrite.ruleResults
     };
   }
   const compatibilityLabels = [
     ...(route.toolChoiceFallback ? [`${route.toolChoiceFallback} tool choice`] : []),
-    ...(webSearchDegraded ? ['web_search unavailable'] : [])
+    ...(webSearchDegraded ? ['web_search unavailable'] : []),
+    ...toolAdaptations.map((kind) => `${kind} adapted`),
+    ...(inputDegradations.includes('encrypted_reasoning') ? ['reasoning degraded'] : []),
+    ...(inputDegradations.includes('responses_compaction_state') ? ['responses compaction state degraded'] : []),
+    ...(inputDegradations.includes('gemini_thought_signature') ? ['gemini thought signature degraded'] : []),
+    ...(inputDegradations.includes('claude_thinking_signature') ? ['claude thinking signature degraded'] : []),
+    ...(inputDegradations.includes('claude_redacted_thinking') ? ['claude redacted thinking degraded'] : []),
+    ...(inputDegradations.includes('chat_reasoning_state') ? ['chat reasoning state degraded'] : []),
+    ...(inputDegradations.includes('responses_client_metadata') ? ['responses client metadata dropped'] : []),
+    ...(inputDegradations.includes('responses_item_metadata') ? ['responses item metadata degraded'] : []),
+    ...reasoningAdaptations.map((kind) => `${kind} adapted`),
+    ...contextAdaptations.map((kind) => `${kind} adapted`),
+    ...serviceAdaptations.map((kind) => `${kind} adapted`),
+    ...generationAdaptations.map((kind) => `${kind} adapted`),
+    ...cacheAdaptations.map((kind) => `${kind} adapted`)
   ];
   const protocolLabel = `${incomingProtocol} → ${route.protocol}${compatibilityLabels.length ? ` (${compatibilityLabels.join(', ')})` : ''}`;
   let upstreamMetadata = {};
   let credentialAttempts = 0;
   let upstreamWaitMs = 0;
   let upstreamBodyStartedAt = 0;
+  let responseDegradations = [];
+  const rememberResponseDegradations = (values) => {
+    responseDegradations = [...new Set([...responseDegradations, ...values])];
+  };
   const writeLog = (entry) => addLog({
     requestId, clientId: client?.id, clientName: client?.name,
     model: body.model, upstreamModel: route.upstreamModel, provider: route.provider, credentialId: credential.credentialId, credentialLabel: credential.credentialLabel, protocol: protocolLabel,
     credentialAttempts, duration: Date.now() - started, ...upstreamMetadata, ...entry,
+    ...(responseDegradations.length ? { responseDegradations: responseDegradations.join(',') } : {}),
     ...(credentialAttempts ? { upstreamWaitMs } : {}),
     ...(upstreamBodyStartedAt ? { upstreamBodyMs: Math.max(0, Date.now() - upstreamBodyStartedAt) } : {})
   }, config);
-  const abort = new AbortController();
-  res.on('close', () => { if (!res.writableEnded) abort.abort(); });
   let upstream;
-  const maximumCredentialAttempts = providerCredentials(config, route.provider).length;
+  const maximumCredentialAttempts = credentials.length;
   while (credential && credentialAttempts < maximumCredentialAttempts) {
     credentialAttempts++;
     const upstreamAttemptStartedAt = Date.now();
+    activity.stage('waiting_upstream');
     try {
-      upstream = await callUpstream({ provider: route.provider, protocol: route.protocol, ...credential, body: upstreamBody, signal: abort.signal, timeoutMs: config.upstreamTimeoutMs, forwardHeaders: compatibilityHeaders(req, incomingProtocol, route.protocol) });
+      upstream = await callUpstream({
+        provider: route.provider,
+        protocol: route.protocol,
+        ...credential,
+        body: upstreamBody,
+        signal: abort.signal,
+        timeoutMs: config.upstreamTimeoutMs,
+        forwardHeaders: compatibilityHeaders(req, incomingProtocol, route.protocol),
+        anthropicBetaEndpoint: usesAnthropicBetaEndpoint(url, incomingProtocol, route.protocol),
+        operation: responsesCompact ? 'compact' : 'create'
+      });
     } catch (error) {
       upstreamWaitMs += Math.max(0, Date.now() - upstreamAttemptStartedAt);
       if (abort.signal.aborted) {
         credentialHealth.releaseProbe(route.provider, credential);
-        await writeLog({ status: 499, error: '客户端在收到上游响应前断开' });
+        await writeLog({ status: 499, error: '客户端在收到上游响应前断开', errorCode: 'client_closed' });
         return;
       }
       const failure = upstreamConnectionFailure(error);
@@ -1177,11 +1432,12 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       return protocolError(res, failure.status, incomingProtocol, failure.message, 'upstream_error', {}, failure.code);
     }
     upstreamWaitMs += Math.max(0, Date.now() - upstreamAttemptStartedAt);
+    activity.stage('reading_upstream_body');
     if (!upstream.ok) recordCredentialResponse(route.provider, credential, upstream);
     if (![401, 403, 429].includes(upstream.status) || credentialAttempts >= maximumCredentialAttempts) break;
-    const replacement = selectProviderCredential(config, route.provider).credential;
+    const replacement = credentialHealth.select(route.provider, credentials).credential;
     if (!replacement) break;
-    await upstream.body?.cancel().catch(() => {});
+    await discardUpstreamResponse(upstream).catch(() => {});
     credential = replacement;
   }
   if (credentialAttempts > 1) res.setHeader('x-opencode-key-attempts', String(credentialAttempts));
@@ -1191,76 +1447,123 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     let text;
     try { text = await readResponseText(upstream, MAX_UPSTREAM_ERROR_BYTES, '上游错误响应'); }
     catch (error) {
+      if (abort.signal.aborted) {
+        await writeLog({ status: 499, stream, error: '客户端在读取上游错误响应时断开', errorCode: 'client_closed' });
+        return;
+      }
       const failure = upstreamOperationFailure(error);
-      await writeLog({ status: failure.status, stream: Boolean(body.stream), error: failure.message, errorCode: failure.code });
+      await writeLog({ status: failure.status, stream, error: failure.message, errorCode: failure.code });
       return protocolError(res, failure.status, incomingProtocol, failure.message, 'upstream_error', {}, failure.code);
     }
     const failure = normalizeUpstreamHttpError(text, upstream.status, {
       secrets: [credential.apiKey, credential.proxyUrl]
     });
-    await writeLog({ status: failure.status, stream: Boolean(body.stream), error: failure.message, errorCode: failure.code });
+    await writeLog({ status: failure.status, stream, error: failure.message, errorCode: failure.code });
     return protocolError(res, failure.status, incomingProtocol, failure.message, failure.type, {}, failure.code);
   }
   const upstreamContentType = upstream.headers.get('content-type') || '';
-  if (body.stream && !/^text\/event-stream(?:\s*;|$)/i.test(upstreamContentType)) {
-    await upstream.body?.cancel().catch(() => {});
+  if (stream && !/^text\/event-stream(?:\s*;|$)/i.test(upstreamContentType)) {
+    await discardUpstreamResponse(upstream).catch(() => {});
     const received = upstreamContentType ? `收到 ${upstreamContentType.slice(0, 128)}` : '缺少 Content-Type';
     const message = `上游流式响应格式无效：${received}`;
     credentialHealth.recordNetworkFailure(route.provider, credential, 502);
     await writeLog({ status: 502, stream: true, error: message });
     return protocolError(res, 502, incomingProtocol, message, 'upstream_error');
   }
-  if (body.stream && incomingProtocol === route.protocol) {
+  if (stream) activity.stage('streaming');
+  const sanitizeStreamError = (error) => normalizeUpstreamStreamError(error, {
+    secrets: [credential.apiKey, credential.proxyUrl]
+  });
+  if (stream && incomingProtocol === route.protocol) {
+    const upstreamStream = withStreamIdleTimeout(upstream.body, config.upstreamStreamIdleTimeoutMs, activity.upstreamChunk);
     const observer = createSseObserver(route.protocol, body.model);
-    res.writeHead(upstream.status, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store, no-transform', connection: 'keep-alive' });
+    res.writeHead(upstream.status, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store, no-transform',
+      'x-accel-buffering': 'no',
+      connection: 'keep-alive'
+    });
+    res.flushHeaders();
     try {
-      for await (const chunk of upstream.body || []) {
-        observer.write(chunk);
+      const sanitizedStream = sanitizeSseErrorStream(upstreamStream, route.protocol, sanitizeStreamError, {
+        onData: observer.observe
+      });
+      for await (const chunk of withSseHeartbeat(sanitizedStream, SSE_HEARTBEAT_MS, {
+        onHeartbeat: activity.heartbeat,
+        onCancel: () => abort.abort()
+      })) {
+        activity.stage('writing_stream');
         await writeResponseChunk(res, chunk, STREAM_WRITE_TIMEOUT_MS);
+        activity.stage('streaming');
       }
     } catch (error) {
       const failure = streamFailure(error, res, abort);
+      const safeFailure = sanitizeStreamError({ message: failure.message, code: failure.code });
       const observed = failure.status === 499 ? undefined : observer.end();
       if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
       else credentialHealth.releaseProbe(route.provider, credential);
-      await writeLog({ status: failure.status, stream: true, error: failure.message, errorCode: failure.code });
+      await writeLog({ status: failure.status, stream: true, error: safeFailure.message, errorCode: safeFailure.code || 'upstream_error' });
       if (!res.writableEnded && !res.destroyed) {
-        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message, observed?.nextSequenceNumber, failure.code));
+        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, safeFailure.message, observed?.nextSequenceNumber, safeFailure.code || 'upstream_error'));
         res.end();
       }
       return;
     }
     const observed = observer.end();
+    const observedError = observed.error ? sanitizeStreamError(observed.error) : undefined;
     if (isIncompleteSseError(observed.error)) {
       credentialHealth.recordNetworkFailure(route.provider, credential, 502);
-      if (!res.writableEnded && !res.destroyed) res.write(streamProtocolError(incomingProtocol, observed.error.message, observed.nextSequenceNumber));
+      if (!res.writableEnded && !res.destroyed) res.write(streamProtocolError(incomingProtocol, observedError.message, observed.nextSequenceNumber, observedError.code || 'upstream_error'));
     }
     else if (observed.error) credentialHealth.releaseProbe(route.provider, credential);
     else recordCredentialResponse(route.provider, credential, upstream);
-    await writeLog({ status: observed.error ? 502 : upstream.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', ...(observed.error ? { error: observed.error.message || String(observed.error) } : {}), ...observed.usage });
+    await writeLog({ status: observed.error ? 502 : upstream.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', ...(observedError ? { error: observedError.message, errorCode: observedError.code || observedError.type } : {}), ...observed.usage });
     return res.end();
   }
-  if (body.stream) {
+  if (stream) {
+    const upstreamStream = withStreamIdleTimeout(upstream.body, config.upstreamStreamIdleTimeoutMs, activity.upstreamChunk);
     let streamUsage = {};
     let streamError;
     let responseSequenceNumber = 0;
-    res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store, no-transform', connection: 'keep-alive' });
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store, no-transform',
+      'x-accel-buffering': 'no',
+      connection: 'keep-alive'
+    });
+    res.flushHeaders();
     try {
-      for await (const event of translateSse(upstream, route.protocol, incomingProtocol, body.model, {
+      const translatedStream = translateSse({ body: upstreamStream }, route.protocol, incomingProtocol, body.model, {
         onUsage: (usage) => { streamUsage = usage; },
         onError: (error) => { streamError = error; },
+        onResponseDegradations: rememberResponseDegradations,
+        normalizeError: sanitizeStreamError,
+        onReasoningState: incomingProtocol !== route.protocol
+          ? ({ toolCalls, providerStates }) => reasoningStates.remember(toolCalls, providerStates, reasoningStateScope)
+          : undefined,
         onResponsesSequenceNumber: (nextSequenceNumber) => { responseSequenceNumber = nextSequenceNumber; },
-        responsesOptions: responseOptions
+        responsesOptions: responseOptions,
+        chatOptions,
+        allowResponsesWebSearch,
+        geminiStreamFunctionCallArguments: incomingProtocol === 'gemini'
+          && body.toolConfig?.functionCallingConfig?.streamFunctionCallArguments === true
+      });
+      for await (const event of withSseHeartbeat(translatedStream, SSE_HEARTBEAT_MS, {
+        onHeartbeat: activity.heartbeat,
+        onCancel: () => abort.abort()
       })) {
+        activity.stage('writing_stream');
         await writeResponseChunk(res, event, STREAM_WRITE_TIMEOUT_MS);
+        activity.stage('streaming');
       }
     } catch (error) {
       const failure = streamFailure(error, res, abort);
+      const safeFailure = sanitizeStreamError({ message: failure.message, code: failure.code });
       if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
       else credentialHealth.releaseProbe(route.provider, credential);
-      await writeLog({ status: failure.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', error: failure.message, errorCode: failure.code, ...streamUsage });
+      await writeLog({ status: failure.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', error: safeFailure.message, errorCode: safeFailure.code || 'upstream_error', ...streamUsage });
       if (!res.writableEnded && !res.destroyed) {
-        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message, responseSequenceNumber, failure.code));
+        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, safeFailure.message, responseSequenceNumber, safeFailure.code || 'upstream_error'));
         res.end();
       }
       return;
@@ -1268,15 +1571,26 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     if (isIncompleteSseError(streamError)) credentialHealth.recordNetworkFailure(route.provider, credential, 502);
     else if (streamError) credentialHealth.releaseProbe(route.provider, credential);
     else recordCredentialResponse(route.provider, credential, upstream);
-    await writeLog({ status: streamError ? 502 : upstream.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', ...(streamError ? { error: streamError.message || String(streamError) } : {}), ...streamUsage });
+    await writeLog({
+      status: streamError ? 502 : upstream.status,
+      stream: true,
+      inputTokensIncludeCache: route.protocol !== 'claude',
+      ...(streamError ? { error: streamError.message || String(streamError), errorCode: streamError.code || streamError.type || 'upstream_error' } : {}),
+      ...streamUsage
+    });
     return res.end();
   }
   let upstreamJson;
-  try { upstreamJson = await readResponseJson(upstream); }
+  let upstreamJsonBytes;
+  try {
+    const payload = await readResponseJsonPayload(upstream);
+    upstreamJson = payload.value;
+    upstreamJsonBytes = payload.bytes;
+  }
   catch (error) {
     if (abort.signal.aborted) {
       credentialHealth.releaseProbe(route.provider, credential);
-      await writeLog({ status: 499, stream: false, error: '客户端在读取上游响应时断开' });
+      await writeLog({ status: 499, stream: false, error: '客户端在读取上游响应时断开', errorCode: 'client_closed' });
       return;
     }
     const networkFailure = isUpstreamConnectionError(error) ? upstreamConnectionFailure(error) : null;
@@ -1289,7 +1603,12 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   let normalizedResponse;
   let clientResponse;
   try {
-    normalizedResponse = normalizeResponse(upstreamJson, route.protocol, body.model, { rejectUnknown: incomingProtocol !== route.protocol });
+    normalizedResponse = normalizeResponse(upstreamJson, route.protocol, body.model, {
+      rejectUnknown: incomingProtocol !== route.protocol,
+      allowWebSearchCall: allowResponsesWebSearch
+    });
+    rememberResponseDegradations(responseMetadataDegradations(upstreamJson, route.protocol, incomingProtocol));
+    if (incomingProtocol !== route.protocol) reasoningStates.rememberParts(normalizedResponse.parts, reasoningStateScope);
     clientResponse = incomingProtocol === route.protocol ? upstreamJson : formatResponse(normalizedResponse, incomingProtocol, responseOptions);
   } catch (error) {
     credentialHealth.releaseProbe(route.provider, credential);
@@ -1301,11 +1620,17 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       inputTokens: normalizedResponse.inputTokens, outputTokens: normalizedResponse.outputTokens,
       inputTokensIncludeCache: route.protocol !== 'claude',
       cachedInputTokens: normalizedResponse.cachedInputTokens, cacheCreationInputTokens: normalizedResponse.cacheCreationInputTokens,
+      cacheCreation5mInputTokens: normalizedResponse.cacheCreation5mInputTokens,
+      cacheCreation1hInputTokens: normalizedResponse.cacheCreation1hInputTokens,
       reasoningTokens: normalizedResponse.reasoningTokens
     } : {};
   recordCredentialResponse(route.provider, credential, upstream);
   try {
-    await json(res, upstream.status, clientResponse);
+    activity.stage('writing_response');
+    if (responseDegradations.length) res.setHeader('x-opencode-response-degradations', responseDegradations.join(','));
+    await (incomingProtocol === route.protocol
+      ? jsonPayload(res, upstream.status, upstreamJsonBytes)
+      : json(res, upstream.status, clientResponse));
   } catch (error) {
     if (!['CLIENT_CLOSED', 'CLIENT_WRITE_TIMEOUT'].includes(error?.code)) throw error;
     await writeLog({
@@ -1357,9 +1682,32 @@ async function limitedPublicRequest(req, res, config, protocol, operation) {
   finally { admission.release(); }
 }
 
+async function limitedTokenCountRequest(req, res, config, operation) {
+  const client = authenticateClient(req, config);
+  if (!client) return protocolError(res, 401, 'claude', '访问令牌无效', 'authentication_error');
+  const clientActive = activeClientTokenCountRequests.get(client.id) || 0;
+  if (activeTokenCountRequests >= MAX_TOKEN_COUNT_REQUESTS || clientActive >= MAX_CLIENT_TOKEN_COUNT_REQUESTS) {
+    res.setHeader('retry-after', '1');
+    return protocolError(res, 429, 'claude', 'token 估算请求过于频繁', 'rate_limit_error');
+  }
+  activeTokenCountRequests++;
+  activeClientTokenCountRequests.set(client.id, clientActive + 1);
+  try { return await operation(client); }
+  finally {
+    activeTokenCountRequests--;
+    const remaining = (activeClientTokenCountRequests.get(client.id) || 1) - 1;
+    if (remaining > 0) activeClientTokenCountRequests.set(client.id, remaining);
+    else activeClientTokenCountRequests.delete(client.id);
+  }
+}
+
 async function limitedProxyRequest(req, res, url, config, forcedProvider, requestId) {
   const protocol = detectProtocol(url.pathname) || 'chat';
-  return limitedPublicRequest(req, res, config, protocol, (client) => proxyRequest(req, res, url, config, client, forcedProvider, requestId));
+  return limitedPublicRequest(req, res, config, protocol, async (client) => {
+    const activity = beginActiveInference(requestId);
+    try { return await proxyRequest(req, res, url, config, client, forcedProvider, requestId, activity); }
+    finally { activity.finish(); }
+  });
 }
 
 async function staticFile(req, res, url) {
@@ -1496,7 +1844,7 @@ const server = createServer({
           const provider = apiScope.provider || (goModel ? 'go' : (['zen', 'go'].includes(requestedProvider) ? requestedProvider : config.defaultProvider));
           const upstreamModel = goModel ? requestedModel.slice('opencode-go/'.length) : requestedModel.startsWith('opencode/') ? requestedModel.slice('opencode/'.length) : requestedModel;
           try {
-            const result = await listModelsWithCredentialFailover(config, provider, modelSignal);
+            const result = await discoverModels(config, provider, modelSignal);
             if (!result.response) {
               applyCredentialRetryHeader(res, result.selection);
               return json(res, 503, { error: { message: credentialUnavailableMessage(provider, result.selection), type: result.selection.reason === 'cooldown' ? 'overloaded_error' : 'configuration_error' } });
@@ -1528,7 +1876,7 @@ const server = createServer({
             const configuredProviders = ['zen', 'go'].filter((item) => providerCredentials(config, item).length);
             if (!configuredProviders.length) return json(res, 503, { error: { message: '尚未配置 OpenCode Zen 或 Go 密钥', type: 'configuration_error' } });
             const settled = await Promise.allSettled(configuredProviders.map(async (item) => {
-              const result = await listModelsWithCredentialFailover(config, item, modelSignal, { label: `${item} 模型列表` });
+              const result = await discoverModels(config, item, modelSignal);
               if (!result.response) {
                 throw Object.assign(new Error(credentialUnavailableMessage(item, result.selection)), {
                   provider: item, credentialAttempts: result.attempts, selection: result.selection
@@ -1561,7 +1909,7 @@ const server = createServer({
             return json(res, 200, { object: 'list', data: models, ...(errors.length ? { warnings: errors } : {}) });
           }
           try {
-            const result = await listModelsWithCredentialFailover(config, provider, modelSignal);
+            const result = await discoverModels(config, provider, modelSignal);
             if (!result.response) {
               applyCredentialRetryHeader(res, result.selection);
               return json(res, 503, { error: { message: credentialUnavailableMessage(provider, result.selection), type: result.selection.reason === 'cooldown' ? 'overloaded_error' : 'configuration_error' } });
@@ -1578,7 +1926,12 @@ const server = createServer({
           }
         });
       }
-      if (![`${apiScope.base}/messages`, `${apiScope.base}/responses`, `${apiScope.base}/chat/completions`].includes(url.pathname)) {
+      const countTokensPath = `${apiScope.base}/messages/count_tokens`;
+      if (url.pathname === countTokensPath) {
+        if (req.method !== 'POST') return protocolError(res, 405, 'claude', '该接口仅支持 POST', 'invalid_request_error', { allow: 'POST' });
+        return await limitedTokenCountRequest(req, res, config, () => countClaudeTokens(req, res));
+      }
+      if (![`${apiScope.base}/messages`, `${apiScope.base}/responses`, `${apiScope.base}/responses/compact`, `${apiScope.base}/chat/completions`].includes(url.pathname)) {
         return json(res, 404, { error: '接口不存在' });
       }
       if (req.method !== 'POST') {

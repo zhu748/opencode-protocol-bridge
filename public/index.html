@@ -86,7 +86,8 @@
           </section>
           <label>日志保留条数<input id="requestLogLimit" type="number" min="10" max="1000"></label>
           <label class="check-field"><input id="persistLogs" type="checkbox"><span>持久化请求日志<small>仅保存请求元数据，不保存提示词和响应正文</small></span></label>
-          <label>上游超时（毫秒）<input id="upstreamTimeoutMs" type="number" min="1000" max="600000" step="1000"></label>
+          <label>上游超时（毫秒）<input id="upstreamTimeoutMs" type="number" min="1000" max="600000" step="1000"><small>非流式和错误正文覆盖完整读取；成功流式仅限制连接与响应头</small></label>
+          <label>上游流空闲超时（毫秒）<input id="upstreamStreamIdleTimeoutMs" type="number" min="0" max="3600000" step="1000"><small>连续无数据时终止；每个数据块会重置，0 表示禁用</small></label>
           <label>最大并发请求<input id="maxConcurrentRequests" type="number" min="1" max="1000"></label>
           <div class="form-actions"><button type="button" id="regen-token" class="ghost">重新生成访问令牌</button><button type="submit" class="primary compact">保存设置</button></div>
         </form>
@@ -104,17 +105,17 @@
           </form>
         </section>
         <section class="panel image-handoff-manager">
-          <div class="panel-head"><div><h3>图片附件交接</h3><p>为不接受图片内容块的 Chat 模型开启附件交接。先选择项目中已配置的 Key 拉取模型，再勾选需要启用的模型。</p></div><button id="save-image-handoff" class="primary compact" type="button">保存选择</button></div>
+          <div class="panel-head"><div><h3>图片附件交接</h3><p>为不接受图片内容块的模型开启附件交接，不限上游原生协议。先选择项目中已配置的 Key 拉取模型，再勾选需要启用的模型。</p></div><button id="save-image-handoff" class="primary compact" type="button">保存选择</button></div>
           <div class="image-handoff-toolbar">
             <label>上游<select id="imageHandoffProvider"><option value="go">OpenCode Go</option><option value="zen">OpenCode Zen</option></select></label>
             <label>用于拉取模型的项目 Key<select id="imageHandoffCredential"></select></label>
             <label>筛选模型<input id="imageHandoffSearch" type="search" placeholder="输入模型名"></label>
             <button id="load-image-handoff-models" class="ghost" type="button">拉取模型</button>
           </div>
-          <div class="image-handoff-summary"><span id="image-handoff-mode" class="pill"></span><span id="image-handoff-status">尚未拉取模型</span><span class="client-actions"><button id="select-visible-image-models" class="mini-btn" type="button">选择当前结果</button><button id="clear-provider-image-models" class="mini-btn revoke" type="button">清除当前上游</button></span></div>
+          <div class="image-handoff-summary"><span id="image-handoff-mode" class="pill"></span><span id="image-handoff-status">尚未拉取模型</span><span class="client-actions"><button id="select-recommended-image-models" class="mini-btn" type="button">添加建议文本模型</button><button id="select-visible-image-models" class="mini-btn" type="button">选择当前结果</button><button id="clear-provider-image-models" class="mini-btn revoke" type="button">清除当前上游</button></span></div>
           <div id="image-handoff-selected" class="image-handoff-selected"></div>
           <div id="image-handoff-model-list" class="image-handoff-model-list"><p class="empty-inline">请选择上游和 Key，然后拉取模型列表</p></div>
-          <p class="hint">只影响选中上游的精确模型名。Claude 图片会转成本地路径或短时 URL；直接 Chat 图片会降级为明确文本提示。未选中的模型保持标准图片块透传。</p>
+          <p class="hint">只影响选中上游的精确模型名。Claude、Responses、Chat、Gemini 的 base64/data URL 图片会在发送上游前转成本地路径或短时 URL，HTTP(S) 图片会转成下载与识别指令；交接传输关闭时才降级为明确文本提示。未选中的模型保持标准图片块透传。</p>
         </section>
         <form id="password-form" class="panel inline-form"><div><h3>修改管理密码</h3><p>修改后所有现有登录会话都会失效。</p></div><input id="currentPassword" type="password" placeholder="当前密码" required><input id="newPassword" type="password" minlength="6" maxlength="256" pattern="[A-Za-z0-9]{6,256}" placeholder="6 位以上英文字母或数字" required><button class="ghost" type="submit">修改</button></form>
       </section>
@@ -124,13 +125,13 @@
         <div class="panel route-builder">
           <input id="routeModel" placeholder="客户端模型名，例如 coding-model">
           <select id="routeProvider"><option value="zen">Zen</option><option value="go">Go</option></select>
-          <select id="routeProtocol"><option value="auto">自动协议</option><option value="claude">Claude</option><option value="responses">Responses</option><option value="chat">Chat</option></select>
+          <select id="routeProtocol"><option value="auto">自动协议</option><option value="claude">Claude</option><option value="responses">Responses</option><option value="chat">Chat</option><option value="gemini">Gemini GenerateContent</option></select>
           <select id="routeToolChoice"><option value="">标准工具选择</option><option value="auto">工具选择降级为 auto</option></select>
           <input id="routeUpstream" placeholder="上游模型名（留空则相同）">
           <button id="add-route" class="ghost" type="button">添加到编辑器</button>
         </div>
         <div id="route-list" class="route-list"></div>
-        <div class="panel"><div class="panel-head"><div><h3>路由 JSON</h3><p>protocol 可选 auto / claude / responses / chat；toolChoiceFallback 仅支持 auto</p></div><button id="save-routes" class="primary compact">保存路由</button></div><textarea id="modelRoutes" spellcheck="false" rows="18"></textarea><p class="hint">示例：<code>{ "deepseek-free": { "provider": "zen", "protocol": "chat", "upstreamModel": "deepseek-v4-flash-free", "toolChoiceFallback": "auto" } }</code></p></div>
+        <div class="panel"><div class="panel-head"><div><h3>路由 JSON</h3><p>protocol 可选 auto / claude / responses / chat / gemini；toolChoiceFallback 仅支持 auto</p></div><button id="save-routes" class="primary compact">保存路由</button></div><textarea id="modelRoutes" spellcheck="false" rows="18"></textarea><p class="hint">示例：<code>{ "gemini-fast": { "provider": "zen", "protocol": "gemini", "upstreamModel": "gemini-3.6-flash" } }</code></p></div>
       </section>
 
       <section id="prompts" class="view">
@@ -236,7 +237,7 @@
           <article class="panel"><div class="panel-head"><div><span class="tag green">OPENAI</span><h3>Responses API</h3></div><button class="ghost copy-code" data-target="#responses-example" type="button">复制代码</button></div><code>POST /zen/v1/responses</code><pre id="responses-example"></pre></article>
           <article class="panel"><div class="panel-head"><div><span class="tag orange">COMPATIBLE</span><h3>Chat Completions</h3></div><button class="ghost copy-code" data-target="#chat-example" type="button">复制代码</button></div><code>POST /go/v1/chat/completions</code><pre id="chat-example"></pre></article>
           <article class="panel"><div class="panel-head"><div><span class="tag purple">GOOGLE</span><h3>Gemini GenerateContent</h3></div><button class="ghost copy-code" data-target="#gemini-example" type="button">复制代码</button></div><code>POST /v1beta/models/{model}:generateContent</code><pre id="gemini-example"></pre></article>
-          <article class="panel"><div class="panel-head"><div><span class="tag green">OPENCODE</span><h3>opencode.json</h3></div><button class="ghost copy-code" data-target="#opencode-example" type="button">复制代码</button></div><code>@ai-sdk/openai-compatible</code><pre id="opencode-example"></pre></article>
+          <article class="panel"><div class="panel-head"><div><span class="tag green">OPENCODE</span><h3>opencode.json</h3></div><button class="ghost copy-code" data-target="#opencode-example" type="button">复制代码</button></div><code>按模型直连 Responses / Claude / Chat / Gemini</code><pre id="opencode-example"></pre></article>
         </div>
       </section>
       <div id="toast"></div>

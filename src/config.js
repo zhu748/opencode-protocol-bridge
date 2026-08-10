@@ -8,6 +8,7 @@ import { storedProviderCredentialEntries } from './provider-credentials.js';
 import { maskProxyUrl, normalizeProxyUrl } from './proxy.js';
 import { atomicWriteFile, cleanupAtomicTemporary, readUtf8FileLimited } from './file-io.js';
 import { normalizeKeepAliveUrl } from './keep-alive.js';
+import { OPENCODE_GO_MODEL_CAPABILITIES, OPENCODE_GO_TEXT_ONLY_MODELS, OPENCODE_ZEN_MODEL_CAPABILITIES, OPENCODE_ZEN_TEXT_ONLY_MODELS } from './model-capabilities.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CONFIG_FILE = process.env.CONFIG_FILE || resolve(ROOT, 'data', 'config.json');
@@ -15,7 +16,23 @@ const ENCRYPTION_KEY = process.env.CONFIG_ENCRYPTION_KEY || '';
 const MAX_CONFIG_FILE_BYTES = 2 * 1024 * 1024;
 if (ENCRYPTION_KEY && ENCRYPTION_KEY.length < 16) throw new Error('CONFIG_ENCRYPTION_KEY 至少需要 16 个字符');
 
-export const DEFAULT_IMAGE_HANDOFF_MODELS = Object.freeze(['zen', 'go'].flatMap((provider) => [
+const PREVIOUS_DEFAULT_IMAGE_HANDOFF_MODELS = Object.freeze([
+  { provider: 'zen', model: 'deepseek-v4-flash' },
+  { provider: 'zen', model: 'deepseek-v4-flash-free' },
+  ...[
+    'deepseek-v4-flash', 'deepseek-v4-pro', 'glm-5', 'glm-5.1', 'glm-5.2',
+    'hy3', 'hy3-preview', 'mimo-v2-pro', 'mimo-v2.5-pro', 'minimax-m2.5',
+    'minimax-m2.7', 'qwen3.7-max'
+  ].map((model) => ({ provider: 'go', model })),
+  { provider: 'go', model: 'deepseek-v4-flash-free' }
+]);
+
+export const DEFAULT_IMAGE_HANDOFF_MODELS = Object.freeze([
+  ...OPENCODE_ZEN_TEXT_ONLY_MODELS.map((model) => ({ provider: 'zen', model })),
+  ...OPENCODE_GO_TEXT_ONLY_MODELS.map((model) => ({ provider: 'go', model }))
+]);
+
+const LEGACY_DEFAULT_IMAGE_HANDOFF_MODELS = Object.freeze(['zen', 'go'].flatMap((provider) => [
   { provider, model: 'deepseek-v4-flash' },
   { provider, model: 'deepseek-v4-flash-free' }
 ]));
@@ -35,6 +52,17 @@ export function normalizeImageHandoffModels(value = DEFAULT_IMAGE_HANDOFF_MODELS
     seen.add(key);
     return { provider, model };
   });
+}
+
+export function migrateImageHandoffDefaults(value) {
+  const normalized = normalizeImageHandoffModels(value);
+  const actual = new Set(normalized.map((entry) => `${entry.provider}\n${entry.model.toLowerCase()}`));
+  const matchesPreset = (preset) => normalized.length === preset.length
+    && preset.every((entry) => actual.has(`${entry.provider}\n${entry.model}`));
+  return [LEGACY_DEFAULT_IMAGE_HANDOFF_MODELS, PREVIOUS_DEFAULT_IMAGE_HANDOFF_MODELS]
+    .some(matchesPreset)
+    ? normalizeImageHandoffModels(DEFAULT_IMAGE_HANDOFF_MODELS)
+    : normalized;
 }
 
 const defaults = {
@@ -57,6 +85,7 @@ const defaults = {
   promptRewriteRules: DEFAULT_PROMPT_REWRITE_RULES,
   requestLogLimit: 100,
   upstreamTimeoutMs: 120000,
+  upstreamStreamIdleTimeoutMs: 300000,
   maxConcurrentRequests: 20,
   persistLogs: false,
   apiClients: []
@@ -79,7 +108,7 @@ export function normalizeModelRoutes(value = {}) {
     const provider = route.provider === undefined || route.provider === '' ? undefined : route.provider;
     const protocol = route.protocol === undefined || route.protocol === '' ? undefined : route.protocol;
     if (provider !== undefined && !['zen', 'go'].includes(provider)) throw configError(`模型 ${model} 的 provider 无效`);
-    if (protocol !== undefined && !['auto', 'claude', 'responses', 'chat'].includes(protocol)) throw configError(`模型 ${model} 的 protocol 无效`);
+    if (protocol !== undefined && !['auto', 'claude', 'responses', 'chat', 'gemini'].includes(protocol)) throw configError(`模型 ${model} 的 protocol 无效`);
     let upstreamModel;
     if (route.upstreamModel !== undefined) {
       if (typeof route.upstreamModel !== 'string') throw configError(`模型 ${model} 的 upstreamModel 无效`);
@@ -122,6 +151,7 @@ export function normalizeStoredConfig(value = {}) {
     promptRewriteRules: normalizeWithConfigError(() => normalizePromptRules(migratePromptRules(source.promptRewriteRules))),
     requestLogLimit: configInteger(source.requestLogLimit, '日志保留条数', 10, 1000),
     upstreamTimeoutMs: configInteger(source.upstreamTimeoutMs, '上游超时', 1000, 600000),
+    upstreamStreamIdleTimeoutMs: configZeroOrInteger(source.upstreamStreamIdleTimeoutMs, '上游流空闲超时', 1000, 3600000),
     maxConcurrentRequests,
     persistLogs: configBoolean(source.persistLogs, '日志持久化开关'),
     apiClients: normalizeApiClients(source.apiClients, maxConcurrentRequests)
@@ -131,6 +161,7 @@ export function normalizeStoredConfig(value = {}) {
 let state;
 let saveQueue = Promise.resolve();
 const revisions = new WeakMap();
+const publicConfigs = new WeakMap();
 
 export function configRevision(config) {
   if (!config || typeof config !== 'object') throw new TypeError('配置快照无效');
@@ -147,7 +178,11 @@ export async function loadConfig() {
   try {
     await cleanupAtomicTemporary(CONFIG_FILE);
     const parsed = JSON.parse(await readUtf8FileLimited(CONFIG_FILE, MAX_CONFIG_FILE_BYTES, '配置文件'));
-    state = normalizeStoredConfig(decryptConfig(parsed, ENCRYPTION_KEY));
+    const decrypted = decryptConfig(parsed, ENCRYPTION_KEY);
+    if (decrypted && !Array.isArray(decrypted) && typeof decrypted === 'object' && Object.hasOwn(decrypted, 'imageHandoffModels')) {
+      decrypted.imageHandoffModels = migrateImageHandoffDefaults(decrypted.imageHandoffModels);
+    }
+    state = normalizeStoredConfig(decrypted);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
     state = normalizeStoredConfig();
@@ -195,23 +230,20 @@ async function persist(snapshot) {
 }
 
 export function publicConfig(config) {
-  const mask = (value) => {
-    if (!value) return '';
-    if (value.length <= 8) return '••••';
-    if (value.length <= 12) return `${value.slice(0, 2)}••••${value.slice(-2)}`;
-    return `${value.slice(0, 4)}••••${value.slice(-4)}`;
-  };
+  const revision = configRevision(config);
+  const cached = publicConfigs.get(config);
+  if (cached) return cached;
   const zenCredentials = storedProviderCredentialEntries(config, 'zen');
   const goCredentials = storedProviderCredentialEntries(config, 'go');
-  return {
-    revision: configRevision(config),
+  const exposed = Object.freeze({
+    revision,
     configured: Boolean(config.password),
     encryptionEnabled: Boolean(ENCRYPTION_KEY),
-    clientToken: mask(config.clientToken),
-    zenKey: mask(zenCredentials[0]?.apiKey || ''),
-    goKey: mask(goCredentials[0]?.apiKey || ''),
-    zenCredentials: zenCredentials.map((entry) => ({ id: entry.id, name: entry.name, apiKey: mask(entry.apiKey), proxyUrl: maskProxyUrl(entry.proxyUrl), proxyConfigured: Boolean(entry.proxyUrl) })),
-    goCredentials: goCredentials.map((entry) => ({ id: entry.id, name: entry.name, apiKey: mask(entry.apiKey), proxyUrl: maskProxyUrl(entry.proxyUrl), proxyConfigured: Boolean(entry.proxyUrl) })),
+    clientToken: maskSecret(config.clientToken),
+    zenKey: maskSecret(zenCredentials[0]?.apiKey || ''),
+    goKey: maskSecret(goCredentials[0]?.apiKey || ''),
+    zenCredentials: publicCredentialEntries(zenCredentials),
+    goCredentials: publicCredentialEntries(goCredentials),
     proxyUrl: maskProxyUrl(config.proxyUrl),
     zenProxyUrl: maskProxyUrl(config.zenProxyUrl),
     goProxyUrl: maskProxyUrl(config.goProxyUrl),
@@ -221,16 +253,46 @@ export function publicConfig(config) {
     keepAliveUrl: config.keepAliveUrl,
     keepAliveIntervalSeconds: config.keepAliveIntervalSeconds,
     defaultProvider: config.defaultProvider,
-    modelRoutes: config.modelRoutes,
-    imageHandoffModels: normalizeImageHandoffModels(config.imageHandoffModels),
-    promptRewriteRules: config.promptRewriteRules,
+    modelRoutes: frozenRecord(config.modelRoutes),
+    imageHandoffModels: frozenRecords(normalizeImageHandoffModels(config.imageHandoffModels)),
+    goModelCapabilities: OPENCODE_GO_MODEL_CAPABILITIES,
+    zenModelCapabilities: OPENCODE_ZEN_MODEL_CAPABILITIES,
+    promptRewriteRules: frozenRecords(config.promptRewriteRules),
     promptRewriteDefaults: DEFAULT_PROMPT_REWRITE_RULES,
     requestLogLimit: config.requestLogLimit,
     upstreamTimeoutMs: config.upstreamTimeoutMs,
+    upstreamStreamIdleTimeoutMs: config.upstreamStreamIdleTimeoutMs,
     maxConcurrentRequests: config.maxConcurrentRequests,
     persistLogs: config.persistLogs,
     clientCount: Array.isArray(config.apiClients) ? config.apiClients.length : 0
-  };
+  });
+  publicConfigs.set(config, exposed);
+  return exposed;
+}
+
+function maskSecret(value) {
+  if (!value) return '';
+  if (value.length <= 8) return '••••';
+  if (value.length <= 12) return `${value.slice(0, 2)}••••${value.slice(-2)}`;
+  return `${value.slice(0, 4)}••••${value.slice(-4)}`;
+}
+
+function publicCredentialEntries(entries) {
+  return Object.freeze(entries.map((entry) => Object.freeze({
+    id: entry.id,
+    name: entry.name,
+    apiKey: maskSecret(entry.apiKey),
+    proxyUrl: maskProxyUrl(entry.proxyUrl),
+    proxyConfigured: Boolean(entry.proxyUrl)
+  })));
+}
+
+function frozenRecords(entries) {
+  return Object.freeze(entries.map((entry) => Object.freeze({ ...entry })));
+}
+
+function frozenRecord(record) {
+  return Object.freeze(Object.fromEntries(Object.entries(record).map(([key, value]) => [key, Object.freeze({ ...value })])));
 }
 
 export { ROOT };
@@ -298,6 +360,12 @@ function nullableConfigString(value, label, maximum) {
 
 function configInteger(value, label, minimum, maximum) {
   if (!Number.isInteger(value) || value < minimum || value > maximum) throw configError(`${label}必须是 ${minimum}–${maximum} 的整数`);
+  return value;
+}
+
+function configZeroOrInteger(value, label, minimum, maximum) {
+  if (value === 0) return 0;
+  if (!Number.isInteger(value) || value < minimum || value > maximum) throw configError(`${label}必须是 0 或 ${minimum}–${maximum} 的整数`);
   return value;
 }
 

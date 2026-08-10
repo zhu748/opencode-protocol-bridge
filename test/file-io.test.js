@@ -15,6 +15,11 @@ test('有界文件读取在精确上限内成功并拒绝额外字节', async ()
       readUtf8FileLimited(file, 5, '测试文件'),
       (error) => error.code === 'FILE_TOO_LARGE' && error.maxBytes === 5 && /测试文件/.test(error.message)
     );
+    await writeFile(file, Uint8Array.from([0x7b, 0x22, 0xc3, 0x28, 0x22, 0x7d]));
+    await assert.rejects(
+      readUtf8FileLimited(file, 6, '测试文件'),
+      (error) => error.code === 'FILE_INVALID_UTF8' && error.message === '测试文件不是有效的 UTF-8 文件'
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

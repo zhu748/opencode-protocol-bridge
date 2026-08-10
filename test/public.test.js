@@ -54,8 +54,14 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /activeAdminMutations/);
   assert.match(script, /activeAdminModelDiscoveries/);
   assert.match(script, /activeHttpConnections/);
+  assert.match(script, /activeInferenceRequests/);
+  assert.match(script, /oldestActiveInferenceMs/);
+  assert.match(script, /longestActiveStreamSilenceMs/);
+  assert.match(script, /activeStreamHeartbeats/);
   assert.match(script, /confirmDiscardConfigDrafts\('退出登录'\)/);
   assert.match(html, /id="config-draft-status"[^>]*aria-live="polite"/);
+  assert.match(html, /id="upstreamStreamIdleTimeoutMs"[^>]*min="0"[^>]*max="3600000"/);
+  assert.match(html, /每个数据块会重置，0 表示禁用/);
   assert.match(settings, /\.config-draft-status\.conflict/);
   assert.match(script, /renderRecentPrompt\(\{\}\)/);
   assert.doesNotMatch(script, /api\('\/api\/config'\), api\('\/api\/logs'\), api\('\/api\/status'\), api\('\/api\/clients'\)/);
@@ -63,6 +69,7 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(html, /id="default-proxy-state"/);
   assert.match(html, /id="test-default-proxy"[^>]*>检测代理<\/button>/);
   assert.match(html, /id="keepAliveUrl"/);
+  assert.match(html, /成功流式仅限制连接与响应头/);
   assert.match(html, /id="set-current-keep-alive"[^>]*>一键设置当前站点<\/button>/);
   assert.match(script, /location\.origin}\/healthz/);
   assert.match(html, /data-proxy-value="mixed:\/\/127\.0\.0\.1:7890"/);
@@ -75,9 +82,13 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(settings, /flex-wrap: wrap/);
   assert.match(html, /id="imageHandoffCredential"/);
   assert.match(html, /id="image-handoff-model-list"/);
+  assert.match(html, /id="select-recommended-image-models"/);
   assert.match(script, /\/api\/models\?provider=/);
   assert.match(script, /credentialId/);
   assert.match(script, /imageHandoffModels/);
+  assert.match(script, /goModelCapabilities/);
+  assert.doesNotMatch(script, /provider !== 'go' \|\| !discovered/);
+  assert.match(script, /modelCapabilityBadges/);
   assert.match(html, /<svg class="cache-meter-graphic" viewBox="0 0 100 12"/);
   assert.match(script, /querySelector\('\.cache-read'\)\.setAttribute\('width'/);
   assert.match(script, /querySelector\('\.cache-uncached'\)\.setAttribute\('x'/);
@@ -92,7 +103,7 @@ test('Render Blueprint 暴露批量 Key、逐项代理、远程图片交接、�
   const blueprint = await readFile(resolve(projectDir, 'render.yaml'), 'utf8');
   assert.match(blueprint, /buildCommand: npm ci --omit=dev --ignore-scripts && npm run install:sing-box/);
   assert.match(blueprint, /healthCheckPath: \/healthz/);
-  for (const name of ['OPENCODE_ZEN_KEYS', 'OPENCODE_GO_KEYS', 'OPENCODE_ZEN_PROXY_URLS', 'OPENCODE_GO_PROXY_URLS', 'OPENCODE_BRIDGE_MAX_ADMIN_MUTATIONS', 'OPENCODE_BRIDGE_MAX_ADMIN_MODEL_DISCOVERIES', 'OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS', 'OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS', 'OPENCODE_BRIDGE_KEEP_ALIVE_URL', 'OPENCODE_BRIDGE_KEEP_ALIVE_INTERVAL_SECONDS', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_MAX_BYTES', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_LOCAL_RETENTION_MS', 'OPENCODE_BRIDGE_SING_BOX_PATH', 'OPENCODE_BRIDGE_SING_BOX_VERSION']) {
+  for (const name of ['OPENCODE_ZEN_KEYS', 'OPENCODE_GO_KEYS', 'OPENCODE_ZEN_PROXY_URLS', 'OPENCODE_GO_PROXY_URLS', 'OPENCODE_BRIDGE_MAX_ADMIN_MUTATIONS', 'OPENCODE_BRIDGE_MAX_ADMIN_MODEL_DISCOVERIES', 'OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS', 'OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS', 'OPENCODE_BRIDGE_SSE_HEARTBEAT_MS', 'OPENCODE_BRIDGE_KEEP_ALIVE_URL', 'OPENCODE_BRIDGE_KEEP_ALIVE_INTERVAL_SECONDS', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_MAX_BYTES', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_LOCAL_RETENTION_MS', 'OPENCODE_BRIDGE_SING_BOX_PATH', 'OPENCODE_BRIDGE_SING_BOX_VERSION']) {
     assert.equal((blueprint.match(new RegExp(`key: ${name}\\b`, 'g')) || []).length, 1, `${name} 应出现一次`);
   }
   assert.match(blueprint, /key: OPENCODE_BRIDGE_KEEP_ALIVE_URL\s+sync: false/);
@@ -118,7 +129,11 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
   assert.equal(lock.packages[''].engines.node, manifest.engines.node);
   assert.equal(manifest.scripts.check, 'node scripts/check-syntax.mjs && node --test');
   for (const directory of ['src', 'public', 'scripts', 'test-fixtures']) assert.match(syntaxChecker, new RegExp(`['"]${directory}['"]`));
-  assert.match(syntaxChecker, /spawnSync\(process\.execPath, \['--check', file\]/);
+  assert.match(syntaxChecker, /readFile\(file, 'utf8'\)/);
+  assert.match(syntaxChecker, /error\.code === 'ENOENT'/);
+  assert.match(syntaxChecker, /extname\(file\).*'\.cjs'.*'commonjs'.*'module'/);
+  assert.match(syntaxChecker, /spawnSync\(process\.execPath, \['--check', `--input-type=\$\{inputType\}`, '-'\]/);
+  assert.match(syntaxChecker, /input: source/);
   assert.doesNotMatch(localLauncher, /Node\.js 20/);
   assert.match(localLauncher, /Node\.js 22\.20\+ or 24\.11\+/);
   assert.match(dockerfile, /^FROM node:24\.18\.1-alpine3\.24$/m);
@@ -154,8 +169,16 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
 test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async () => {
   const spec = JSON.parse(await readFile(resolve(publicDir, 'openapi.json'), 'utf8'));
   assert.equal(spec.openapi, '3.1.0');
-  assert.deepEqual(Object.keys(spec.paths).sort(), ['/chat/completions', '/messages', '/models', '/models/{model}', '/models/{model}:generateContent', '/models/{model}:streamGenerateContent', '/responses']);
+  assert.deepEqual(Object.keys(spec.paths).sort(), ['/chat/completions', '/messages', '/messages/count_tokens', '/models', '/models/{model}', '/models/{model}:generateContent', '/models/{model}:streamGenerateContent', '/responses', '/responses/compact']);
   assert.equal(spec.components.schemas.ModelId.maxLength, 256);
+  assert.equal(spec.components.schemas.OpenAIMetadata.maxProperties, 16);
+  assert.equal(spec.paths['/messages'].post.requestBody.content['application/json'].schema.properties.stop_sequences.items.type, 'string');
+  assert.deepEqual(spec.paths['/messages'].post.requestBody.content['application/json'].schema.properties.speed.enum, ['standard', 'fast', null]);
+  assert.equal(spec.paths['/responses'].post.requestBody.content['application/json'].schema.properties.input.oneOf[1].type, 'array');
+  assert.equal(spec.paths['/responses/compact'].post.requestBody.content['application/json'].schema.properties.input.oneOf[1].type, 'array');
+  assert.match(spec.paths['/responses/compact'].post.description, /协议配置为 responses 且实际实现该扩展/);
+  assert.match(spec.paths['/responses'].post.requestBody.description, /历史工具调用.*关联 ID/);
+  assert.equal(spec.paths['/chat/completions'].post.requestBody.content['application/json'].schema.properties.stop.oneOf[1].maxItems, 4);
   assert.ok(spec.paths['/responses'].post.responses['413']);
   assert.equal(spec.paths['/responses'].post.responses['504'].$ref, '#/components/responses/UpstreamTimeout');
   assert.equal(spec.paths['/models'].get.responses['504'].$ref, '#/components/responses/UpstreamTimeout');
@@ -164,10 +187,50 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.equal(spec.paths['/models/{model}'].get.responses['429'].$ref, '#/components/responses/RateLimited');
   assert.equal(spec.components.headers.LocalRequestId.schema.pattern, '^[a-f0-9]{32}$');
   assert.equal(spec.paths['/messages'].post.responses['200'].headers['x-request-id'].$ref, '#/components/headers/LocalRequestId');
+  assert.deepEqual(spec.components.headers.SseBuffering.schema.enum, ['no']);
+  for (const path of ['/messages', '/responses', '/chat/completions', '/models/{model}:streamGenerateContent']) {
+    assert.equal(spec.paths[path].post.responses['200'].headers['x-accel-buffering'].$ref, '#/components/headers/SseBuffering');
+  }
   assert.equal(spec.paths['/messages'].post.responses['415'].$ref, '#/components/responses/UnsupportedMediaType');
   assert.equal(spec.paths['/messages'].post.responses['200'].headers['x-opencode-key-attempts'].$ref, '#/components/headers/KeyAttempts');
+  assert.equal(spec.paths['/messages/count_tokens'].post.responses['200'].headers['x-opencode-token-count'].$ref, '#/components/headers/TokenCountMode');
+  assert.deepEqual(spec.paths['/messages'].post.parameters[0].schema.enum, ['true']);
+  assert.deepEqual(spec.paths['/messages/count_tokens'].post.parameters[0].schema.enum, ['true']);
   assert.equal(spec.paths['/responses'].post.responses['200'].headers['x-opencode-tool-degradations'].$ref, '#/components/headers/ToolDegradations');
   assert.deepEqual(spec.components.headers.ToolDegradations.schema.enum, ['web_search']);
+  assert.equal(spec.paths['/responses'].post.responses['200'].headers['x-opencode-input-degradations'].$ref, '#/components/headers/InputDegradations');
+  assert.equal(spec.paths['/messages'].post.responses['200'].headers['x-opencode-input-degradations'].$ref, '#/components/headers/InputDegradations');
+  assert.equal(spec.paths['/chat/completions'].post.responses['200'].headers['x-opencode-input-degradations'].$ref, '#/components/headers/InputDegradations');
+  assert.equal(spec.paths['/chat/completions'].post.responses['200'].headers['x-opencode-reasoning-adaptations'].$ref, '#/components/headers/ReasoningAdaptations');
+  assert.equal(spec.paths['/models/{model}:generateContent'].post.responses['200'].headers['x-opencode-input-degradations'].$ref, '#/components/headers/InputDegradations');
+  assert.equal(spec.paths['/models/{model}:streamGenerateContent'].post.responses['200'].headers['x-opencode-input-degradations'].$ref, '#/components/headers/InputDegradations');
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_client_metadata/);
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_item_metadata/);
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_compaction_state/);
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /gemini_thought_signature/);
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /claude_thinking_signature/);
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /claude_redacted_thinking/);
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /claude_compaction_encrypted_content/);
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /chat_reasoning_state/);
+  assert.match(spec.components.headers.ResponseDegradations.schema.pattern, /responses_reasoning_context/);
+  assert.equal(spec.paths['/responses'].post.responses['200'].headers['x-opencode-tool-adaptations'].$ref, '#/components/headers/ToolAdaptations');
+  assert.equal(spec.paths['/models/{model}:generateContent'].post.responses['200'].headers['x-opencode-tool-adaptations'].$ref, '#/components/headers/ToolAdaptations');
+  assert.equal(spec.paths['/models/{model}:streamGenerateContent'].post.responses['200'].headers['x-opencode-tool-adaptations'].$ref, '#/components/headers/ToolAdaptations');
+  assert.deepEqual(spec.components.schemas.GeminiToolConfig.properties.functionCallingConfig.properties.mode.enum, ['AUTO', 'ANY', 'NONE', 'VALIDATED']);
+  assert.equal(spec.components.schemas.GeminiToolConfig.properties.functionCallingConfig.properties.streamFunctionCallArguments.type, 'boolean');
+  assert.match(spec.components.headers.ToolAdaptations.schema.pattern, /gemini_stream_function_args_reencoded/);
+  assert.match(spec.components.headers.ToolAdaptations.schema.pattern, /gemini_google_search_to_web_search/);
+  assert.match(spec.components.headers.ToolAdaptations.schema.pattern, /gemini_function_names_aliased/);
+  assert.match(spec.components.headers.ToolAdaptations.schema.pattern, /gemini_response_schema_to_description/);
+  assert.match(spec.components.headers.ToolAdaptations.schema.pattern, /claude_tool_error_to_content/);
+  assert.match(spec.components.headers.ReasoningAdaptations.schema.pattern, /reasoning_history_to_assistant_text/);
+  for (const path of ['/messages', '/responses', '/chat/completions']) {
+    assert.equal(spec.paths[path].post.responses['200'].headers['x-opencode-service-adaptations'].$ref, '#/components/headers/ServiceAdaptations');
+  }
+  assert.match(spec.components.headers.ServiceAdaptations.schema.pattern, /claude_fast_speed_to_openai_fast_tier/);
+  assert.match(spec.components.headers.ServiceAdaptations.schema.pattern, /openai_default_tier_to_claude_standard_speed/);
+  assert.match(spec.components.headers.ReasoningAdaptations.schema.pattern, /reasoning_history_to_chat_reasoning_content/);
+  assert.equal(spec.components.schemas.GenerateContentRequest.properties.toolConfig.$ref, '#/components/schemas/GeminiToolConfig');
   assert.equal(spec.paths['/models'].get.responses['200'].headers['x-opencode-key-attempts'].$ref, '#/components/headers/KeyAttempts');
   assert.equal(spec.paths['/models'].get.responses['400'].$ref, '#/components/responses/InvalidRequest');
   assert.deepEqual(spec.paths['/models/{model}'].get.parameters.find((parameter) => parameter.name === 'provider').schema.enum, ['zen', 'go']);
@@ -177,7 +240,9 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.equal(spec.components.responses.MethodNotAllowed.headers.Allow.$ref, '#/components/headers/Allow');
   assert.equal(spec.components.securitySchemes.googleApiKeyAuth.name, 'x-goog-api-key');
   assert.ok(spec.paths['/models/{model}:generateContent'].post.responses['200']);
-  for (const [path, method] of [['/models', 'get'], ['/models/{model}', 'get'], ['/messages', 'post'], ['/responses', 'post'], ['/chat/completions', 'post'], ['/models/{model}:generateContent', 'post'], ['/models/{model}:streamGenerateContent', 'post']]) {
+  assert.match(spec.paths['/models/{model}:generateContent'].post.responses['200'].description, /groundingMetadata/);
+  assert.match(spec.paths['/models/{model}:streamGenerateContent'].post.responses['200'].description, /groundingMetadata/);
+  for (const [path, method] of [['/models', 'get'], ['/models/{model}', 'get'], ['/messages', 'post'], ['/messages/count_tokens', 'post'], ['/responses', 'post'], ['/responses/compact', 'post'], ['/chat/completions', 'post'], ['/models/{model}:generateContent', 'post'], ['/models/{model}:streamGenerateContent', 'post']]) {
     assert.equal(spec.paths[path][method].responses['405'].$ref, '#/components/responses/MethodNotAllowed');
   }
   assert.deepEqual(spec.servers.map((server) => server.url), ['/zen/v1', '/go/v1', '/v1']);

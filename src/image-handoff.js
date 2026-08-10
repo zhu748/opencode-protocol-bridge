@@ -13,6 +13,17 @@ const DEFAULT_PUBLIC_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_MAX_BYTES = 256 * 1024 * 1024;
 const DEFAULT_LOCAL_RETENTION_MS = 24 * 60 * 60 * 1000;
 const PUBLIC_IMAGE_PATH = '/_bridge/images/';
+export const UNSUPPORTED_IMAGE_NOTICE = '[图片未发送：当前模型不支持图片输入。]';
+
+export function remoteImageHandoffNotice(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  let url;
+  try { url = new URL(value); }
+  catch { return null; }
+  if (!['http:', 'https:'].includes(url.protocol)) return null;
+  const location = JSON.stringify(url.toString());
+  return `[远程图片附件 URL：${location}。当前模型不能直接读取图片；请先将此 URL 下载到客户端本机临时文件，再调用可用的 vision 技能或图片识别工具分析，不要要求用户再次提供图片或路径。]`;
+}
 
 function storageInteger(value, label, fallback, minimum, maximum) {
   if (value === undefined || String(value).trim() === '') return fallback;
@@ -34,6 +45,27 @@ function decodeImageSource(source) {
   return { data: Buffer.from(encoded, 'base64'), extension };
 }
 
+function imageSourceFromUrl(value) {
+  if (typeof value !== 'string' || !value) return null;
+  const data = /^data:([^;,]+);base64,([\s\S]*)$/i.exec(value);
+  return data
+    ? { type: 'base64', media_type: data[1], data: data[2] }
+    : { type: 'url', url: value };
+}
+
+function requestImageSource(part, protocol) {
+  if (protocol === 'gemini') {
+    const inline = part?.inlineData || part?.inline_data;
+    if (inline && typeof inline.data === 'string') return { type: 'base64', media_type: inline.mimeType || inline.mime_type, data: inline.data };
+    const file = part?.fileData || part?.file_data;
+    return file ? imageSourceFromUrl(file.fileUri || file.file_uri) : null;
+  }
+  if (part?.type === 'image') return part.source || null;
+  if (part?.type === 'image_url') return imageSourceFromUrl(part.image_url?.url || part.image_url);
+  if (part?.type === 'input_image') return imageSourceFromUrl(part.image_url);
+  return null;
+}
+
 export function localImageHandoffEnabled(host, value) {
   if (value !== undefined && String(value).trim() !== '') return /^(?:1|true)$/i.test(String(value).trim());
   return ['127.0.0.1', '::1', 'localhost'].includes(String(host || '').toLowerCase());
@@ -53,6 +85,19 @@ export function normalizeImageHandoffPublicUrl(value) {
   }
   url.pathname = url.pathname.replace(/\/+$/, '');
   return url.toString().replace(/\/$/, '');
+}
+
+export function resolveImageHandoffPublicUrl(env = process.env) {
+  const explicit = String(env.OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL || '').trim();
+  if (explicit) return normalizeImageHandoffPublicUrl(explicit);
+
+  const toggle = String(env.OPENCODE_BRIDGE_IMAGE_HANDOFF || '').trim();
+  if (toggle && !/^(?:1|true)$/i.test(toggle)) return '';
+
+  const renderHostname = String(env.RENDER_EXTERNAL_HOSTNAME || '').trim().toLowerCase();
+  if (!renderHostname || renderHostname.length > 253
+    || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+onrender\.com$/.test(renderHostname)) return '';
+  return `https://${renderHostname}`;
 }
 
 export function imageHandoffStorageOptions(env = process.env) {
@@ -89,11 +134,19 @@ export class ImageHandoffStore {
     this.expiryTimer?.unref();
   }
 
-  async prepareClaudeRequest(body, handoffEnabled) {
-    if (!this.enabled || !handoffEnabled || !Array.isArray(body?.messages)) return body;
+  async prepareClaudeRequest(body, handoffEnabled, options) {
+    return this.prepareRequest(body, 'claude', handoffEnabled, options);
+  }
+
+  async prepareRequest(body, protocol, handoffEnabled, { signal } = {}) {
+    if (!this.enabled || !handoffEnabled) return body;
+    signal?.throwIfAborted();
+    if (protocol === 'gemini') return this.prepareGeminiRequest(body, { signal });
+    const field = protocol === 'responses' ? 'input' : 'messages';
+    if (!['claude', 'responses', 'chat'].includes(protocol) || !Array.isArray(body?.[field])) return body;
     let changed = false;
     const messages = [];
-    for (const message of body.messages) {
+    for (const message of body[field]) {
       if (!Array.isArray(message?.content)) {
         messages.push(message);
         continue;
@@ -101,36 +154,85 @@ export class ImageHandoffStore {
       let messageChanged = false;
       const content = [];
       for (const part of message.content) {
-        if (part?.type !== 'image') {
+        const source = requestImageSource(part, protocol);
+        if (!source) {
           content.push(part);
           continue;
         }
-        const image = decodeImageSource(part.source);
-        if (!image) {
+        const notice = await this.prepareSource(source, { signal });
+        if (!notice) {
           content.push(part);
           continue;
         }
-        const filePath = await this.save(image);
-        const location = this.publicBaseUrl ? this.publish(filePath, part.source.media_type, image.extension) : filePath.replaceAll('\\', '/');
-        content.push({
-          type: 'text',
-          text: this.publicBaseUrl
-            ? `[远程图片附件：${location}（短时有效）。当前模型不能直接读取图片；请先将此 URL 下载到 Claude Code 本机临时文件并保留 .${image.extension} 扩展名，再调用可用的 vision 技能分析，不要要求用户再次提供图片或路径。]`
-            : `[本地图片附件：${location}。当前模型不能直接读取图片；请调用可用的 vision 技能分析此文件，不要要求用户再次提供路径。]`
-        });
+        content.push(protocol === 'responses'
+          ? {
+            type: message.role === 'assistant' ? 'output_text' : 'input_text', text: notice,
+            ...(part.prompt_cache_breakpoint ? { prompt_cache_breakpoint: part.prompt_cache_breakpoint } : {})
+          }
+          : { type: 'text', text: notice, ...(part.cache_control ? { cache_control: part.cache_control } : {}) });
         changed = true;
         messageChanged = true;
       }
       messages.push(messageChanged ? { ...message, content } : message);
     }
-    return changed ? { ...body, messages } : body;
+    return changed ? { ...body, [field]: messages } : body;
   }
 
-  async save({ data, extension }) {
+  async prepareGeminiRequest(body, { signal } = {}) {
+    signal?.throwIfAborted();
+    if (!Array.isArray(body?.contents)) return body;
+    let changed = false;
+    const contents = [];
+    for (const message of body.contents) {
+      if (!Array.isArray(message?.parts)) {
+        contents.push(message);
+        continue;
+      }
+      let messageChanged = false;
+      const parts = [];
+      for (const part of message.parts) {
+        const source = requestImageSource(part, 'gemini');
+        const notice = source ? await this.prepareSource(source, { signal }) : null;
+        if (!notice) {
+          parts.push(part);
+          continue;
+        }
+        parts.push({ text: notice });
+        changed = true;
+        messageChanged = true;
+      }
+      contents.push(messageChanged ? { ...message, parts } : message);
+    }
+    return changed ? { ...body, contents } : body;
+  }
+
+  async prepareSource(source, { signal } = {}) {
+    signal?.throwIfAborted();
+    const remoteNotice = source?.type === 'url' ? remoteImageHandoffNotice(source.url) : null;
+    if (remoteNotice) return remoteNotice;
+    const image = decodeImageSource(source);
+    if (!image) return null;
+    const filePath = await this.save(image, { signal });
+    try { signal?.throwIfAborted(); }
+    catch (error) {
+      if (this.publicBaseUrl) {
+        this.releasePendingPublication(filePath);
+        this.removeExpiredFile(filePath);
+      }
+      throw error;
+    }
+    const location = this.publicBaseUrl ? this.publish(filePath, source.media_type, image.extension) : filePath.replaceAll('\\', '/');
+    return this.publicBaseUrl
+      ? `[远程图片附件：${location}（短时有效）。当前模型不能直接读取图片；请先将此 URL 下载到客户端本机临时文件并保留 .${image.extension} 扩展名，再调用可用的 vision 技能或图片识别工具分析，不要要求用户再次提供图片或路径。]`
+      : `[本地图片附件：${location}。当前模型不能直接读取图片；请调用可用的 vision 技能或图片识别工具分析此文件，不要要求用户再次提供路径。]`;
+  }
+
+  async save({ data, extension }, { signal } = {}) {
+    signal?.throwIfAborted();
     const digest = createHash('sha256').update(data).digest('hex');
     const filePath = resolve(this.directory, `image-${digest}.${extension}`);
     if (this.publicBaseUrl) this.markPendingPublication(filePath);
-    const save = this.saveQueue.then(() => this.saveFile(filePath, data));
+    const save = this.saveQueue.then(() => this.saveFile(filePath, data, signal));
     this.saveQueue = save.catch(() => {});
     return save.catch((error) => {
       if (this.publicBaseUrl) this.releasePendingPublication(filePath);
@@ -138,11 +240,14 @@ export class ImageHandoffStore {
     });
   }
 
-  async saveFile(filePath, data) {
+  async saveFile(filePath, data, signal) {
+    signal?.throwIfAborted();
     const deleting = this.deletingByPath.get(filePath);
     if (deleting) await deleting;
+    signal?.throwIfAborted();
     this.pruneExpiredImages();
     if (this.deletingByPath.size) await Promise.all(this.deletingByPath.values());
+    signal?.throwIfAborted();
 
     const existing = this.savedFiles.get(filePath);
     const nextTotal = this.totalBytes - (existing?.size || 0) + data.length;
@@ -157,7 +262,14 @@ export class ImageHandoffStore {
       return filePath;
     }
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    await writeFile(filePath, data, { mode: 0o600 });
+    signal?.throwIfAborted();
+    try { await writeFile(filePath, data, { mode: 0o600, signal }); }
+    catch (error) {
+      if (signal?.aborted) await unlink(filePath).catch((unlinkError) => {
+        if (unlinkError.code !== 'ENOENT') throw unlinkError;
+      });
+      throw error;
+    }
     this.savedFiles.set(filePath, { size: data.length, lastUsedAt: this.now() });
     this.totalBytes = nextTotal;
     return filePath;

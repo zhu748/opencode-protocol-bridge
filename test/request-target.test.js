@@ -34,6 +34,7 @@ test('查询参数限制数量并拒绝重复的单值参数', () => {
   assert.throws(() => parseRequestTarget(`/health?${excessive}`), { status: 400 });
   assert.throws(() => parseRequestTarget('/v1/models?provider=zen&provider=go'), /provider 不能重复/);
   assert.throws(() => parseRequestTarget('/api/stats?window=24h&window=7d'), /window 不能重复/);
+  assert.throws(() => parseRequestTarget('/v1/messages?beta=true&beta=false'), /beta 不能重复/);
 
   const repeatedUnknown = parseRequestTarget('/health?tag=one&tag=two');
   assert.deepEqual(repeatedUnknown.searchParams.getAll('tag'), ['one', 'two']);

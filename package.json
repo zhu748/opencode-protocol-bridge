@@ -12,6 +12,10 @@
     "audit:signatures": "npm audit signatures",
     "sbom:prod": "npm sbom --omit=dev --sbom-format=cyclonedx",
     "test:live:go": "node scripts/live-go-smoke.mjs",
+    "check:go-catalog": "node scripts/check-go-catalog.mjs",
+    "check:zen-catalog": "node scripts/check-zen-catalog.mjs",
+    "check:catalogs": "npm run check:go-catalog && npm run check:zen-catalog",
+    "test:cli:installed": "node scripts/probe-cli-compat.mjs",
     "rekey": "node scripts/rekey.js",
     "test": "node --test",
     "check": "node scripts/check-syntax.mjs && node --test"
@@ -21,6 +25,6 @@
   },
   "dependencies": {
     "fetch-socks": "^1.3.3",
-    "undici": "^8.9.0"
+    "undici": "^8.10.0"
   }
 }

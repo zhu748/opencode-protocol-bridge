@@ -2,6 +2,22 @@ import { normalizeProxyUrl } from './proxy.js';
 
 export const MAX_PROVIDER_KEYS = 32;
 
+export function createProviderCredentialResolver(environmentPools = {}) {
+  const snapshots = new WeakMap();
+  return (config, provider) => {
+    if (!config || Array.isArray(config) || typeof config !== 'object') throw new TypeError('配置快照必须是对象');
+    let resolved = snapshots.get(config);
+    if (!resolved) {
+      resolved = Object.create(null);
+      snapshots.set(config, resolved);
+    }
+    if (!Object.hasOwn(resolved, provider)) {
+      resolved[provider] = configuredProviderCredentials(config, provider, environmentPools[provider] || []);
+    }
+    return resolved[provider];
+  };
+}
+
 export function environmentProviderCredentials(env, provider) {
   const name = provider === 'go' ? 'GO' : 'ZEN';
   const prefix = `OPENCODE_${name}`;
@@ -41,12 +57,14 @@ export function storedProviderCredentialEntries(config, provider) {
   const field = provider === 'go' ? 'goCredentials' : 'zenCredentials';
   const listed = Array.isArray(config[field]) ? config[field] : [];
   if (listed.length > MAX_PROVIDER_KEYS) throw new Error(`${provider.toUpperCase()} 面板最多支持 ${MAX_PROVIDER_KEYS} 把密钥`);
-  const entries = listed.flatMap((entry, index) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.apiKey !== 'string' || !entry.apiKey.trim()) return [];
+  const entries = [];
+  for (let index = 0; index < listed.length; index++) {
+    const entry = listed[index];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.apiKey !== 'string' || !entry.apiKey.trim()) continue;
     const id = typeof entry.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(entry.id) ? entry.id : `slot-${index + 1}`;
     const name = typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim().slice(0, 64) : `Key ${index + 1}`;
-    return [{ id, name, apiKey: entry.apiKey.trim(), proxyUrl: normalizedProxy(entry.proxyUrl, `${provider.toUpperCase()} ${name} 代理`) }];
-  });
+    entries.push({ id, name, apiKey: entry.apiKey.trim(), proxyUrl: normalizedProxy(entry.proxyUrl, `${provider.toUpperCase()} ${name} 代理`) });
+  }
   if (entries.length) return entries;
   const apiKey = String(provider === 'go' ? config.goKey || '' : config.zenKey || '').trim();
   if (!apiKey) return [];

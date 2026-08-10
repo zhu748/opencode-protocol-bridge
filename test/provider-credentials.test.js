@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { configuredProviderCredentials, environmentProviderCredentials } from '../src/provider-credentials.js';
+import { configuredProviderCredentials, createProviderCredentialResolver, environmentProviderCredentials } from '../src/provider-credentials.js';
 
 test('编号环境变量按序组成多 Key 池并匹配同编号代理', () => {
   const pool = environmentProviderCredentials({
@@ -53,4 +53,46 @@ test('面板多 Key 使用稳定槽位、名称和逐 Key 代理', () => {
     { apiKey: 'key-one', proxyUrl: 'socks5h://one:1080', credentialId: 'config:primary', credentialLabel: '主力套餐' },
     { apiKey: 'key-two', proxyUrl: 'http://default:7890', credentialId: 'config:backup', credentialLabel: '备用套餐' }
   ]);
+});
+
+test('凭据解析器按配置快照和 provider 复用规范化结果', () => {
+  let credentialReads = 0;
+  const zenCredentials = [{
+    id: 'cached', name: '缓存套餐',
+    get apiKey() { credentialReads++; return 'cached-key'; },
+    proxyUrl: ''
+  }];
+  const config = { proxyUrl: '', zenProxyUrl: '', goProxyUrl: '', zenCredentials, goCredentials: [] };
+  const resolveCredentials = createProviderCredentialResolver();
+  const first = resolveCredentials(config, 'zen');
+  const readsAfterFirst = credentialReads;
+  assert.equal(resolveCredentials(config, 'zen'), first);
+  assert.equal(credentialReads, readsAfterFirst);
+  assert.deepEqual(first.map((credential) => credential.credentialId), ['config:cached']);
+
+  const next = { ...config, zenCredentials: [{ id: 'rotated', name: '轮换套餐', apiKey: 'rotated-key', proxyUrl: '' }] };
+  const rotated = resolveCredentials(next, 'zen');
+  assert.notEqual(rotated, first);
+  assert.deepEqual(rotated.map((credential) => credential.credentialId), ['config:rotated']);
+  assert.notEqual(resolveCredentials(config, 'go'), first);
+});
+
+test('面板凭据规范化单遍跳过无效槽位而不使用 flatMap 中间数组', () => {
+  const flatMap = Array.prototype.flatMap;
+  let flatMapCalls = 0;
+  Array.prototype.flatMap = function countedFlatMap(...args) {
+    flatMapCalls++;
+    return Reflect.apply(flatMap, this, args);
+  };
+  let credentials;
+  try {
+    credentials = configuredProviderCredentials({
+      proxyUrl: '', zenProxyUrl: '',
+      zenCredentials: [null, { id: 'valid', name: '有效', apiKey: 'key', proxyUrl: '' }, { apiKey: '' }]
+    }, 'zen');
+  } finally {
+    Array.prototype.flatMap = flatMap;
+  }
+  assert.equal(flatMapCalls, 0);
+  assert.deepEqual(credentials.map((credential) => credential.credentialId), ['config:valid']);
 });

@@ -3,8 +3,11 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
-import { unlink } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+
+const TEMP_PREFIX = 'opencode-bridge-live-go-';
 
 const apiKey = String(process.env.OPENCODE_GO_KEY || '').trim();
 const model = String(process.env.OPENCODE_LIVE_MODEL || 'deepseek-v4-flash').trim();
@@ -15,8 +18,9 @@ if (!apiKey) throw new Error('请通过 OPENCODE_GO_KEY 环境变量提供临时
 
 const root = resolve(import.meta.dirname, '..');
 const port = await freePort();
-const configFile = resolve(root, 'data', `live-go-${randomUUID()}.json`);
-const logFile = resolve(root, 'data', `live-go-log-${randomUUID()}.json`);
+const temporaryDirectory = await mkdtemp(join(tmpdir(), TEMP_PREFIX));
+const configFile = resolve(temporaryDirectory, `config-${randomUUID()}.json`);
+const logFile = resolve(temporaryDirectory, `logs-${randomUUID()}.json`);
 const clientToken = `Live${randomBytes(16).toString('hex')}`;
 const adminPassword = `Admin${randomBytes(12).toString('hex')}`;
 const env = { ...process.env };
@@ -191,8 +195,11 @@ try {
     child.kill('SIGKILL');
     await Promise.race([exit, new Promise((resolveWait) => setTimeout(resolveWait, 1000))]).catch(() => {});
   }
-  await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
-  await unlink(logFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  const resolvedTemporary = resolve(temporaryDirectory);
+  if (dirname(resolvedTemporary) !== resolve(tmpdir()) || !basename(resolvedTemporary).startsWith(TEMP_PREFIX)) {
+    throw new Error(`拒绝清理非在线冒烟临时目录：${resolvedTemporary}`);
+  }
+  await rm(resolvedTemporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }
 
 if (failure) {

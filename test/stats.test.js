@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { aggregateRequestStats } from '../src/stats.js';
+import { aggregateRequestStats, summarizeRequestStatus } from '../src/stats.js';
 
 const now = Date.parse('2026-08-04T12:00:00.000Z');
 const logs = [
@@ -32,6 +32,235 @@ test('统计汇总不会重复计算缓存和推理 token', () => {
   assert.equal(result.byModel[0].averageUpstreamBodyMs, 20);
   assert.equal(result.byCredential[0].name, 'ZEN 环境 #2');
   assert.equal(result.byClient.find((item) => item.name === '主令牌').requests, 1);
+});
+
+test('单次统计汇总复用缓存与凭据字段读取', () => {
+  let cachedInputReads = 0;
+  let cacheCreationReads = 0;
+  let credentialAttemptReads = 0;
+  let upstreamWaitReads = 0;
+  let upstreamBodyReads = 0;
+  let timeReads = 0;
+  const item = {
+    status: 200, duration: 100,
+    provider: 'zen', credentialId: 'environment:1',
+    model: 'model', protocol: 'responses → chat', clientName: 'client',
+    inputTokens: 10, outputTokens: 4, reasoningTokens: 1, inputTokensIncludeCache: true
+  };
+  Object.defineProperty(item, 'cachedInputTokens', {
+    enumerable: true,
+    get() {
+      cachedInputReads++;
+      return 3;
+    }
+  });
+  Object.defineProperty(item, 'cacheCreationInputTokens', {
+    enumerable: true,
+    get() {
+      cacheCreationReads++;
+      return 2;
+    }
+  });
+  Object.defineProperty(item, 'credentialAttempts', {
+    enumerable: true,
+    get() {
+      credentialAttemptReads++;
+      return 2;
+    }
+  });
+  Object.defineProperty(item, 'upstreamWaitMs', {
+    enumerable: true,
+    get() {
+      upstreamWaitReads++;
+      return 70;
+    }
+  });
+  Object.defineProperty(item, 'upstreamBodyMs', {
+    enumerable: true,
+    get() {
+      upstreamBodyReads++;
+      return 20;
+    }
+  });
+  Object.defineProperty(item, 'time', {
+    enumerable: true,
+    get() {
+      timeReads++;
+      return '2026-08-04T11:00:00.000Z';
+    }
+  });
+
+  const result = aggregateRequestStats([item], 'all', now);
+  assert.equal(result.summary.cachedInputTokens, 3);
+  assert.equal(result.summary.cacheCreationInputTokens, 2);
+  assert.equal(result.summary.credentialAttempts, 2);
+  assert.equal(result.summary.failoverRequests, 1);
+  assert.equal(cachedInputReads, 1, '总汇总、时间线和五类分组应共享一次缓存字段规范化');
+  assert.equal(cacheCreationReads, 1, '总汇总、时间线和五类分组应共享一次缓存写入字段规范化');
+  assert.equal(credentialAttemptReads, 1, '总汇总和五类分组应共享一次凭据尝试次数规范化');
+  assert.equal(upstreamWaitReads, 1, '总汇总、时间线和五类分组应共享一次上游等待值规范化');
+  assert.equal(upstreamBodyReads, 1, '总汇总、时间线和五类分组应共享一次上游正文耗时规范化');
+  assert.equal(timeReads, 1, '过滤与时间线应共享一次时间戳读取和解析');
+});
+
+test('状态摘要与完整统计口径一致', () => {
+  const summary = aggregateRequestStats(logs, '24h', now).summary;
+  assert.deepEqual(summarizeRequestStatus(logs, '24h', now), {
+    requests: summary.requests,
+    success: summary.success,
+    successRate: summary.successRate,
+    averageDurationMs: summary.averageDurationMs,
+    upstreamWaitCoverageRate: summary.upstreamWaitCoverageRate,
+    averageUpstreamWaitMs: summary.averageUpstreamWaitMs,
+    upstreamBodyCoverageRate: summary.upstreamBodyCoverageRate,
+    averageUpstreamBodyMs: summary.averageUpstreamBodyMs
+  });
+});
+
+test('状态摘要在大日志下不构建时间线、分组、Token 或 p95 数据', () => {
+  const item = {
+    time: '2026-08-04T11:00:00.000Z',
+    status: 200,
+    duration: 100,
+    upstreamWaitMs: 70,
+    upstreamBodyMs: 20
+  };
+  for (const field of [
+    'provider', 'credentialId', 'credentialLabel', 'upstreamModel', 'model', 'protocol', 'clientName',
+    'inputTokens', 'outputTokens', 'cachedInputTokens', 'cacheCreationInputTokens', 'reasoningTokens',
+    'credentialAttempts', 'stream'
+  ]) {
+    Object.defineProperty(item, field, {
+      get() {
+        throw new Error(`状态摘要不应读取 ${field}`);
+      }
+    });
+  }
+  const source = Array(2048).fill(item);
+  const originalFrom = Array.from;
+  const originalSort = Array.prototype.sort;
+  let arrayFromCalls = 0;
+  let sortCalls = 0;
+  Array.from = (...args) => {
+    arrayFromCalls++;
+    return originalFrom(...args);
+  };
+  Array.prototype.sort = function(...args) {
+    sortCalls++;
+    return originalSort.apply(this, args);
+  };
+  let summary;
+  try {
+    summary = summarizeRequestStatus(source, 'all', now);
+  } finally {
+    Array.from = originalFrom;
+    Array.prototype.sort = originalSort;
+  }
+  assert.equal(summary.requests, 2048);
+  assert.equal(summary.averageDurationMs, 100);
+  assert.equal(arrayFromCalls, 0, '状态摘要不应创建时间线桶');
+  assert.equal(sortCalls, 0, '状态摘要不应为 p95 排序');
+});
+
+test('五类统计分组共享一次日志数组遍历', () => {
+  const source = [...logs];
+  const originalIterator = source[Symbol.iterator].bind(source);
+  let sourceIterations = 0;
+  source[Symbol.iterator] = () => {
+    sourceIterations++;
+    return originalIterator();
+  };
+  source.filter = () => { throw new Error('统计不应分配中间过滤数组'); };
+
+  const result = aggregateRequestStats(source, 'all', now);
+  assert.equal(sourceIterations, 1, '过滤、总汇总、时间线和全部分组应共享一次日志数组遍历');
+  assert.deepEqual(result.byProvider.map((item) => item.name), ['zen', 'go']);
+  assert.equal(result.byCredential[0].name, 'ZEN 环境 #2');
+  assert.equal(result.byModel[0].name, 'deepseek-v4-flash-free');
+  assert.equal(result.byProtocol[0].name, 'claude → chat');
+  assert.equal(result.byClient[0].name, '工作机');
+});
+
+test('完整统计支持无 length 的有界迭代源并正确报告保留数', () => {
+  let iterations = 0;
+  const source = {
+    *[Symbol.iterator]() {
+      iterations++;
+      yield* logs;
+    }
+  };
+  const result = aggregateRequestStats(source, '24h', now);
+  assert.equal(iterations, 1);
+  assert.equal(result.retainedRequests, 3);
+  assert.equal(result.summary.requests, 2);
+  assert.equal(result.summary.totalTokens, 14);
+});
+
+test('分组桶即时累加且完成阶段不再扫描测量对象数组', () => {
+  const originalIterator = Array.prototype[Symbol.iterator];
+  let measurementArrayScans = 0;
+  Array.prototype[Symbol.iterator] = function(...args) {
+    const first = this[0];
+    if (first && typeof first === 'object'
+      && Object.hasOwn(first, 'successful') && Object.hasOwn(first, 'duration')) {
+      measurementArrayScans++;
+    }
+    return originalIterator.apply(this, args);
+  };
+  let result;
+  try {
+    result = aggregateRequestStats(logs, 'all', now);
+  } finally {
+    Array.prototype[Symbol.iterator] = originalIterator;
+  }
+
+  assert.equal(measurementArrayScans, 0);
+  assert.equal(result.byProvider.find((item) => item.name === 'zen').totalTokens, 20);
+  assert.equal(result.byProvider.find((item) => item.name === 'go').errors, 1);
+});
+
+test('高基数分组先截取展示项再计算完整汇总与 p95', () => {
+  const manyGroups = Array.from({ length: 100 }, (_, index) => {
+    const suffix = String(index).padStart(3, '0');
+    return {
+      time: '2026-08-04T11:00:00.000Z',
+      status: 200,
+      duration: index + 1,
+      upstreamWaitMs: index + 2,
+      upstreamBodyMs: index + 3,
+      provider: 'zen',
+      credentialId: `config:key-${suffix}`,
+      credentialLabel: `Key ${suffix}`,
+      upstreamModel: `model-${suffix}`,
+      protocol: `protocol-${suffix}`,
+      clientName: `client-${suffix}`,
+      inputTokens: index + 1,
+      outputTokens: 0,
+      inputTokensIncludeCache: true
+    };
+  });
+  const originalSort = Array.prototype.sort;
+  let sortCalls = 0;
+  Array.prototype.sort = function(...args) {
+    sortCalls++;
+    return originalSort.apply(this, args);
+  };
+  let result;
+  try {
+    result = aggregateRequestStats(manyGroups, 'all', now);
+  } finally {
+    Array.prototype.sort = originalSort;
+  }
+
+  assert.equal(result.byCredential.length, 64);
+  assert.equal(result.byModel.length, 25);
+  assert.equal(result.byProtocol.length, 25);
+  assert.equal(result.byClient.length, 25);
+  assert.equal(result.byModel[0].name, 'model-099');
+  assert.equal(result.byModel.at(-1).name, 'model-075');
+  assert.equal(result.byModel[0].totalTokens, 100);
+  assert.equal(result.byModel[0].p95DurationMs, 100);
+  assert.ok(sortCalls <= 430, `只应完成最终展示的分组，实际排序 ${sortCalls} 次`);
 });
 
 test('统计请求内 Key 自动切换次数', () => {
