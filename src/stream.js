@@ -57,7 +57,6 @@ export async function* withSseHeartbeat(source, intervalMs, options = {}) {
         await new Promise((resolve) => {
           wake = resolve;
           timer = setTimeout(resolve, intervalMs);
-          timer.unref?.();
         });
         wake = undefined;
         clearTimeout(timer);
