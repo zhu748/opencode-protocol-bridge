@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { unlink } from 'node:fs/promises';
-import { claudeWebSearchForChat, executeBridgeWebSearch, withBridgeWebSearchTool } from '../src/bridge-web-search.js';
+import { claudeWebSearchForChat, executeBridgeWebSearch, executeBridgeWebSearchDetailed, withBridgeWebSearchTool } from '../src/bridge-web-search.js';
 import { streamClaudeMessage } from '../src/stream.js';
 
 async function requestBody(req) {
@@ -101,6 +101,19 @@ test('Claude Code 客户端 WebSearch 会映射为内部小写搜索函数', () 
   assert.match(upstream.messages[0].content, /不要输出 DSML/);
   assert.ok(upstream.tools[0].function.parameters.properties.allowed_domains);
   assert.deepEqual(upstream.tool_choice, { type: 'function', function: { name: 'web_search' } });
+
+  const replayed = claudeWebSearchForChat({
+    messages: [{ role: 'assistant', content: [
+      { type: 'server_tool_use', id: 'srvtoolu_bridge', name: 'web_search', input: { query: '北京天气' } },
+      { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_bridge', content: [{
+        type: 'web_search_result', title: '北京天气', url: 'https://weather.example/', encrypted_content: 'bridge_mcp_state'
+      }] },
+      { type: 'text', text: '天气回答' }
+    ] }],
+    tools: [clientTool]
+  });
+  assert.equal(replayed.body.messages[0].content.some((block) => block.type === 'server_tool_use'), false);
+  assert.match(replayed.body.messages[0].content[0].text, /北京天气.*https:\/\/weather\.example\//);
 });
 
 test('桥接 Web Search 通过 Exa MCP 的 tools/call 执行', async (t) => {
@@ -174,7 +187,7 @@ test('自动 Web Search 在 Exa 失败后回退 Parallel 并规范化结构化�
     await Promise.all([once(exa, 'close').catch(() => {}), once(parallel, 'close').catch(() => {})]);
   });
   let selected;
-  const result = await executeBridgeWebSearch({
+  const result = await executeBridgeWebSearchDetailed({
     id: 'fallback', type: 'function', function: { name: 'web_search', arguments: '{"query":"北京天气"}' }
   }, {
     provider: 'auto',
@@ -185,9 +198,12 @@ test('自动 Web Search 在 Exa 失败后回退 Parallel 并规范化结构化�
     onProvider: (value) => { selected = value; }
   });
   assert.equal(selected, 'parallel');
-  assert.doesNotMatch(result, /验证码页面|WEB 应用防火墙/);
-  assert.match(result, /Title: 权威预报/);
-  assert.match(result, /URL: https:\/\/weather\.example/);
+  assert.doesNotMatch(result.content, /验证码页面|WEB 应用防火墙/);
+  assert.match(result.content, /Title: 权威预报/);
+  assert.match(result.content, /URL: https:\/\/weather\.example/);
+  assert.deepEqual(result.results, [{
+    type: 'web_search_result', title: '权威预报', url: 'https://weather.example/', page_age: '2026-08-11'
+  }]);
 });
 
 test('Claude 域名过滤通过 Exa Advanced 原样执行', async (t) => {
@@ -328,8 +344,12 @@ test('Claude Code 的 typed Web Search 可经 Chat 上游完成完整工具循�
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('x-opencode-tool-adaptations'), 'claude_web_search_to_mcp');
     const responseBody = await response.json();
-    assert.equal(responseBody.content[0].text, '北京未来几天以晴到多云为主。');
-    assert.deepEqual(responseBody.usage, { input_tokens: 24, output_tokens: 6 });
+    assert.equal(responseBody.content.find((block) => block.type === 'text').text, '北京未来几天以晴到多云为主。');
+    assert.equal(responseBody.content.filter((block) => block.type === 'server_tool_use').length, 2);
+    assert.equal(responseBody.content.filter((block) => block.type === 'web_search_tool_result').length, 2);
+    assert.deepEqual(responseBody.usage, {
+      input_tokens: 24, output_tokens: 6, server_tool_use: { web_search_requests: 2 }
+    });
     assert.equal(chatRequests.length, 2);
     assert.equal(chatRequests[0].stream, false);
     assert.equal(chatRequests[0].parallel_tool_calls, false);
@@ -366,6 +386,9 @@ test('Claude Code 的 typed Web Search 可经 Chat 上游完成完整工具循�
     assert.match(streamed.headers.get('content-type'), /^text\/event-stream/);
     const streamText = await streamed.text();
     assert.match(streamText, /event: message_start/);
+    assert.match(streamText, /"type":"server_tool_use"/);
+    assert.match(streamText, /"type":"web_search_tool_result"/);
+    assert.match(streamText, /"web_search_requests":2/);
     assert.match(streamText, /北京未来几天以晴到多云为主/);
     assert.match(streamText, /event: message_stop/);
     assert.equal(chatRequests.length, 4);

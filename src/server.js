@@ -12,7 +12,7 @@ import { KeepAliveService, normalizeKeepAliveUrl, resolveKeepAliveConfig } from 
 import { configuredProviderCredentials, createProviderCredentialResolver, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
 import { CredentialHealthTracker } from './credential-health.js';
 import { createSseObserver, sanitizeSseErrorStream, streamClaudeMessage, translateSse, withSseHeartbeat } from './stream.js';
-import { BRIDGE_WEB_SEARCH_NAME, bridgeWebSearchCalls, claudeWebSearchForChat, executeBridgeWebSearch, hasNonBridgeToolCalls, webSearchToolError, withBridgeWebSearchTool } from './bridge-web-search.js';
+import { BRIDGE_WEB_SEARCH_NAME, bridgeWebSearchCalls, claudeWebSearchForChat, executeBridgeWebSearchDetailed, hasNonBridgeToolCalls, webSearchToolError, withBridgeWebSearchTool } from './bridge-web-search.js';
 import { RequestLogStore } from './request-log.js';
 import { aggregateRequestStats, summarizeRequestStatus } from './stats.js';
 import { applyPromptRules, claudeSystemBlockText, isClaudeMidTurnUserMessage, MAX_PROMPT_BYTES, normalizePromptRules, promptSnapshotText, rewriteClaudeRequestSystems } from './prompt-rewrite.js';
@@ -1248,6 +1248,7 @@ async function callChatWithBridgeWebSearch({ provider, credential, body, signal,
   const requestSignal = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
   let current = body;
   let calls = 0;
+  const searches = [];
   const usage = { seen: false };
   try {
     for (let turns = 0; turns < search.maxUses + 3; turns++) {
@@ -1260,54 +1261,63 @@ async function callChatWithBridgeWebSearch({ provider, credential, body, signal,
         timeoutMs,
         forwardHeaders
       });
-      if (!response.ok) return { response, calls };
+      if (!response.ok) return { response, calls, searches };
       let payload;
       try { payload = await readResponseJsonPayload(response); }
       catch (error) {
         return {
           response: bridgeWebSearchFailureResponse(`本地 Web Search 读取 Chat 上游响应失败：${error.message}`, error.code || 'upstream_response_error'),
-          calls
+          calls,
+          searches
         };
       }
       addChatUsage(usage, payload.value?.usage);
       const localCalls = bridgeWebSearchCalls(payload.value);
       if (!localCalls.length) {
         const value = { ...payload.value, usage: mergedChatUsage(payload.value?.usage, usage) };
-        return { response: clonedJsonResponse(response, value), calls };
+        return { response: clonedJsonResponse(response, value), calls, searches };
       }
       if (hasNonBridgeToolCalls(payload.value)) {
         return {
           response: bridgeWebSearchFailureResponse('模型在同一轮同时调用了本地 Web Search 与客户端工具；请重试该请求，或在 Claude Code 中关闭并行工具调用', 'bridge_web_search_parallel_tools'),
-          calls
+          calls,
+          searches
         };
       }
       const assistant = payload.value?.choices?.[0]?.message;
       if (!assistant || typeof assistant !== 'object' || Array.isArray(assistant)) {
-        return { response: bridgeWebSearchFailureResponse('Chat 上游 Web Search 工具响应缺少 assistant message', 'upstream_invalid_response'), calls };
+        return { response: bridgeWebSearchFailureResponse('Chat 上游 Web Search 工具响应缺少 assistant message', 'upstream_invalid_response'), calls, searches };
       }
       const availableSearches = Math.max(0, search.maxUses - calls);
       const searchesToRun = Math.min(localCalls.length, availableSearches);
       calls += searchesToRun;
-      const results = await Promise.all(localCalls.map(async (call, index) => {
+      const executions = await Promise.all(localCalls.map(async (call, index) => {
         let content;
+        let searchEvent;
         if (index >= searchesToRun) {
           content = 'Web Search 未执行：已达到本请求允许的最大搜索次数。请基于已有搜索结果直接回答用户。';
         } else {
+          const serverToolId = `srvtoolu_${randomBytes(18).toString('base64url')}`;
           try {
-            content = await executeBridgeWebSearch(call, {
+            const result = await executeBridgeWebSearchDetailed(call, {
               signal: requestSignal,
               provider: searchProvider,
               spec: search,
               sessionId,
               model
             });
+            content = result.content;
+            searchEvent = { id: serverToolId, query: result.query, results: result.results };
           } catch (error) {
             if (requestSignal.aborted) throw error;
             content = webSearchToolError(error);
+            searchEvent = { id: serverToolId, query: 'Web search request', errorCode: 'unavailable' };
           }
         }
-        return { role: 'tool', tool_call_id: call.id, content };
+        return { tool: { role: 'tool', tool_call_id: call.id, content }, searchEvent };
       }));
+      const results = executions.map((item) => item.tool);
+      searches.push(...executions.map((item) => item.searchEvent).filter(Boolean));
       current = {
         ...current,
         messages: [...(Array.isArray(current.messages) ? current.messages : []), assistant, ...results]
@@ -1320,10 +1330,38 @@ async function callChatWithBridgeWebSearch({ provider, credential, body, signal,
         }];
       }
     }
-    return { response: bridgeWebSearchFailureResponse('本地 Web Search 工具循环超过安全上限', 'bridge_web_search_loop_limit'), calls };
+    return { response: bridgeWebSearchFailureResponse('本地 Web Search 工具循环超过安全上限', 'bridge_web_search_loop_limit'), calls, searches };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function withClaudeBridgeWebSearchMetadata(message, searches) {
+  if (!message || typeof message !== 'object' || Array.isArray(message) || !searches.length) return message;
+  const blocks = searches.flatMap((search) => {
+    const resultContent = search.errorCode
+      ? { type: 'web_search_tool_result_error', error_code: search.errorCode }
+      : (Array.isArray(search.results) ? search.results : []).map((result) => ({
+          ...result,
+          encrypted_content: `bridge_mcp_${randomBytes(24).toString('base64url')}`
+        }));
+    return [
+      { type: 'server_tool_use', id: search.id, name: 'web_search', input: { query: search.query } },
+      { type: 'web_search_tool_result', tool_use_id: search.id, content: resultContent }
+    ];
+  });
+  const usage = message.usage && typeof message.usage === 'object' && !Array.isArray(message.usage) ? message.usage : {};
+  const serverToolUse = usage.server_tool_use && typeof usage.server_tool_use === 'object' && !Array.isArray(usage.server_tool_use)
+    ? usage.server_tool_use
+    : {};
+  return {
+    ...message,
+    content: [...blocks, ...(Array.isArray(message.content) ? message.content : [])],
+    usage: {
+      ...usage,
+      server_tool_use: { ...serverToolUse, web_search_requests: searches.length }
+    }
+  };
 }
 
 function imageHandoffEnabledForRoute(config, route) {
@@ -1572,6 +1610,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   let upstreamMetadata = {};
   let credentialAttempts = 0;
   let bridgeWebSearchCalls = 0;
+  const bridgeWebSearchEvents = [];
   let upstreamWaitMs = 0;
   let upstreamBodyStartedAt = 0;
   let responseDegradations = [];
@@ -1609,6 +1648,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
         });
         upstream = result.response;
         bridgeWebSearchCalls += result.calls;
+        bridgeWebSearchEvents.push(...result.searches);
       } else {
         upstream = await callUpstream({
           provider: route.provider,
@@ -1814,6 +1854,9 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     rememberResponseDegradations(responseMetadataDegradations(upstreamJson, route.protocol, incomingProtocol));
     if (incomingProtocol !== route.protocol) reasoningStates.rememberParts(normalizedResponse.parts, reasoningStateScope);
     clientResponse = incomingProtocol === route.protocol ? upstreamJson : formatResponse(normalizedResponse, incomingProtocol, responseOptions);
+    if (bridgeWebSearch && incomingProtocol === 'claude') {
+      clientResponse = withClaudeBridgeWebSearchMetadata(clientResponse, bridgeWebSearchEvents);
+    }
   } catch (error) {
     credentialHealth.releaseProbe(route.provider, credential);
     await writeLog({ status: 502, stream: false, error: error.message });

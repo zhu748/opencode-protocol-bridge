@@ -1991,6 +1991,37 @@ export async function* streamClaudeMessage(message) {
       if (argumentsText && argumentsText !== '{}') {
         yield sse('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: argumentsText } });
       }
+    } else if (block.type === 'server_tool_use') {
+      if (typeof block.id !== 'string' || !block.id || typeof block.name !== 'string' || !block.name
+        || !block.input || typeof block.input !== 'object' || Array.isArray(block.input)) {
+        throw new TypeError(`Claude server_tool_use content[${index}] 结构无效`);
+      }
+      const input = block.input && typeof block.input === 'object' && !Array.isArray(block.input) ? block.input : {};
+      yield sse('content_block_start', {
+        type: 'content_block_start', index,
+        content_block: { type: 'server_tool_use', id: block.id || `srvtoolu_${randomUUID().replaceAll('-', '')}`, name: block.name || 'web_search', input: {} }
+      });
+      const argumentsText = JSON.stringify(input);
+      if (argumentsText && argumentsText !== '{}') {
+        yield sse('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: argumentsText } });
+      }
+    } else if (block.type === 'web_search_tool_result') {
+      const resultError = block.content && typeof block.content === 'object' && !Array.isArray(block.content)
+        && typeof block.content.error_code === 'string' && block.content.error_code;
+      const validResults = Array.isArray(block.content) && block.content.every((result) => result?.type === 'web_search_result'
+        && typeof result.url === 'string' && result.url && typeof result.title === 'string' && result.title
+        && typeof result.encrypted_content === 'string' && result.encrypted_content);
+      if (typeof block.tool_use_id !== 'string' || !block.tool_use_id || (!resultError && !validResults)) {
+        throw new TypeError(`Claude web_search_tool_result content[${index}] 结构无效`);
+      }
+      yield sse('content_block_start', {
+        type: 'content_block_start', index,
+        content_block: {
+          type: 'web_search_tool_result',
+          tool_use_id: block.tool_use_id,
+          content: block.content
+        }
+      });
     } else if (block.type === 'redacted_thinking') {
       yield sse('content_block_start', { type: 'content_block_start', index, content_block: { type: 'redacted_thinking', data: block.data || 'bridge' } });
     } else {
@@ -2003,7 +2034,8 @@ export async function* streamClaudeMessage(message) {
     delta: { stop_reason: message.stop_reason || 'end_turn', stop_sequence: message.stop_sequence ?? null },
     usage: {
       output_tokens: outputTokens,
-      ...(usage.cache_creation_input_tokens ? { cache_creation_input_tokens: usage.cache_creation_input_tokens } : {})
+      ...(usage.cache_creation_input_tokens ? { cache_creation_input_tokens: usage.cache_creation_input_tokens } : {}),
+      ...(usage.server_tool_use ? { server_tool_use: usage.server_tool_use } : {})
     }
   });
   yield sse('message_stop', { type: 'message_stop' });
