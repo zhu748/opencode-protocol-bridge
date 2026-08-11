@@ -99,6 +99,8 @@ test('Claude Code 客户端 WebSearch 会映射为内部小写搜索函数', () 
   }, adapted.spec);
   assert.match(upstream.messages[0].content, /WebSearch.*映射.*web_search/);
   assert.match(upstream.messages[0].content, /不要输出 DSML/);
+  assert.match(upstream.messages[0].content, /完整 HTTP\(S\) URL/);
+  assert.match(upstream.messages[0].content, /不要把不兼容的数据拼成单一精确结论/);
   assert.ok(upstream.tools[0].function.parameters.properties.allowed_domains);
   assert.deepEqual(upstream.tool_choice, { type: 'function', function: { name: 'web_search' } });
 
@@ -259,9 +261,10 @@ test('Claude Code 的 typed Web Search 可经 Chat 上游完成完整工具循�
       maximumActiveSearches = Math.max(maximumActiveSearches, activeSearches);
       await new Promise((resolveWait) => setTimeout(resolveWait, 30));
       activeSearches--;
+      const sourcePath = request.params.arguments.query.includes('未来三天') ? 'three-day' : 'current';
       return sendJson(res, {
         jsonrpc: '2.0', id: 1,
-        result: { content: [{ type: 'text', text: `北京天气：${request.params.arguments.query}，18–27°C。` }] }
+        result: { content: [{ type: 'text', text: `Title: 权威天气 ${sourcePath}\nURL: https://weather.example/${sourcePath}\nHighlights:\n北京天气：${request.params.arguments.query}，18–27°C。` }] }
       });
     }
     if (path !== '/chat/completions') {
@@ -344,7 +347,11 @@ test('Claude Code 的 typed Web Search 可经 Chat 上游完成完整工具循�
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('x-opencode-tool-adaptations'), 'claude_web_search_to_mcp');
     const responseBody = await response.json();
-    assert.equal(responseBody.content.find((block) => block.type === 'text').text, '北京未来几天以晴到多云为主。');
+    const responseText = responseBody.content.find((block) => block.type === 'text').text;
+    assert.match(responseText, /^北京未来几天以晴到多云为主。/);
+    assert.match(responseText, /### 搜索来源链接 \/ Web search sources/);
+    assert.match(responseText, /\[权威天气 current\]\(https:\/\/weather\.example\/current\)/);
+    assert.match(responseText, /\[权威天气 three-day\]\(https:\/\/weather\.example\/three-day\)/);
     assert.equal(responseBody.content.filter((block) => block.type === 'server_tool_use').length, 2);
     assert.equal(responseBody.content.filter((block) => block.type === 'web_search_tool_result').length, 2);
     assert.deepEqual(responseBody.usage, {
@@ -390,6 +397,8 @@ test('Claude Code 的 typed Web Search 可经 Chat 上游完成完整工具循�
     assert.match(streamText, /"type":"web_search_tool_result"/);
     assert.match(streamText, /"web_search_requests":2/);
     assert.match(streamText, /北京未来几天以晴到多云为主/);
+    assert.match(streamText, /搜索来源链接 \/ Web search sources/);
+    assert.match(streamText, /https:\/\/weather\.example\/current/);
     assert.match(streamText, /event: message_stop/);
     assert.equal(chatRequests.length, 4);
     assert.ok(chatRequests.every((request) => request.stream === false));

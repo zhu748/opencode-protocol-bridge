@@ -1354,9 +1354,33 @@ function withClaudeBridgeWebSearchMetadata(message, searches) {
   const serverToolUse = usage.server_tool_use && typeof usage.server_tool_use === 'object' && !Array.isArray(usage.server_tool_use)
     ? usage.server_tool_use
     : {};
+  const originalContent = Array.isArray(message.content) ? message.content : [];
+  const existingText = originalContent.filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text).join('\n');
+  const seenSources = new Set();
+  const missingSources = searches.flatMap((search) => Array.isArray(search.results) ? search.results : [])
+    .filter((result) => {
+      if (typeof result?.url !== 'string' || !/^https?:\/\//i.test(result.url)
+        || typeof result.title !== 'string' || !result.title || seenSources.has(result.url)) return false;
+      seenSources.add(result.url);
+      return !existingText.includes(result.url);
+    })
+    .slice(0, 8);
+  let finalContent = originalContent;
+  if (missingSources.length) {
+    const markdownTitle = (value) => value.replaceAll('\\', '\\\\').replaceAll('[', '\\[').replaceAll(']', '\\]');
+    const markdownUrl = (value) => value.replaceAll('(', '%28').replaceAll(')', '%29');
+    const suffix = `\n\n### 搜索来源链接 / Web search sources\n\n${missingSources
+      .map((source) => `- [${markdownTitle(source.title)}](${markdownUrl(source.url)})`)
+      .join('\n')}`;
+    const lastTextIndex = originalContent.findLastIndex((block) => block?.type === 'text' && typeof block.text === 'string');
+    finalContent = lastTextIndex < 0
+      ? [...originalContent, { type: 'text', text: suffix.trimStart() }]
+      : originalContent.map((block, index) => index === lastTextIndex ? { ...block, text: `${block.text.trimEnd()}${suffix}` } : block);
+  }
   return {
     ...message,
-    content: [...blocks, ...(Array.isArray(message.content) ? message.content : [])],
+    content: [...blocks, ...finalContent],
     usage: {
       ...usage,
       server_tool_use: { ...serverToolUse, web_search_requests: searches.length }

@@ -238,11 +238,13 @@ export function withBridgeWebSearchTool(chatBody, spec) {
   const compatibilityInstruction = spec.clientToolName
     ? `Claude Code 的 ${spec.clientToolName} 工具在本次 Chat 上游中映射为已声明的 ${BRIDGE_WEB_SEARCH_NAME} 函数。需要联网时必须调用 ${BRIDGE_WEB_SEARCH_NAME}；不要输出 DSML、XML 或其它伪工具语法。`
     : '';
+  const answerInstruction = '完成联网搜索后必须基于返回的摘录作答，并在最终回答中引用返回结果里的完整 HTTP(S) URL；只写来源名称不算引用。优先使用官方和较新的来源，重要事实应交叉核对。若来源时间、数值或结论冲突，明确说明差异，不要把不兼容的数据拼成单一精确结论。只有字段完整且口径一致时才使用表格，否则使用简洁要点；发送前检查正文中是否存在截断句、残缺行或无法由搜索结果支持的细节。';
+  const systemInstruction = [compatibilityInstruction, answerInstruction].filter(Boolean).join('\n');
   const messages = asArray(chatBody.messages).map((message) => ({ ...message }));
-  if (compatibilityInstruction) {
+  if (systemInstruction) {
     const system = messages.find((message) => message.role === 'system' && typeof message.content === 'string');
-    if (system) system.content = `${system.content}\n\n${compatibilityInstruction}`;
-    else messages.unshift({ role: 'system', content: compatibilityInstruction });
+    if (system) system.content = `${system.content}\n\n${systemInstruction}`;
+    else messages.unshift({ role: 'system', content: systemInstruction });
   }
   const result = {
     ...chatBody,
@@ -436,7 +438,8 @@ function publicSearchResults(value) {
     const url = publicSearchUrl(urlValue);
     if (!url || seen.has(url)) return;
     seen.add(url);
-    const pageAge = String(pageAgeValue || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+    const pageAgeValueText = String(pageAgeValue || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+    const pageAge = /^(?:n\/?a|unknown|none|-)$/i.test(pageAgeValueText) ? '' : pageAgeValueText;
     results.push({
       type: 'web_search_result',
       url,
