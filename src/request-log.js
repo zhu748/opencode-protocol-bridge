@@ -176,6 +176,7 @@ function sanitizeEntry(entry) {
   const cacheCreation5mInputTokens = entry.cacheCreation5mInputTokens;
   const cacheCreation1hInputTokens = entry.cacheCreation1hInputTokens;
   const reasoningTokens = entry.reasoningTokens;
+  const bridgeWebSearchCalls = entry.bridgeWebSearchCalls;
   const responseDegradations = entry.responseDegradations;
   const errorCode = entry.errorCode;
   const error = entry.error;
@@ -189,6 +190,7 @@ function sanitizeEntry(entry) {
   if (cacheCreation5mInputTokens) sanitized.cacheCreation5mInputTokens = nonNegative(cacheCreation5mInputTokens);
   if (cacheCreation1hInputTokens) sanitized.cacheCreation1hInputTokens = nonNegative(cacheCreation1hInputTokens);
   if (reasoningTokens) sanitized.reasoningTokens = nonNegative(reasoningTokens);
+  if (bridgeWebSearchCalls !== undefined) sanitized.bridgeWebSearchCalls = nonNegative(bridgeWebSearchCalls, 8);
   if (responseDegradations) sanitized.responseDegradations = text(responseDegradations, 512);
   if (errorCode) sanitized.errorCode = text(errorCode, 64);
   if (error) sanitized.error = text(error, 500);

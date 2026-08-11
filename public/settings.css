@@ -719,6 +719,7 @@
 .log-upstream-id,
 .log-retry-after,
 .log-key-attempts,
+.log-web-search,
 .log-response-degradations,
 .log-timing {
   display: block;
@@ -754,6 +755,12 @@
 .log-key-attempts {
   max-width: 160px;
   color: var(--orange);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-web-search {
+  max-width: 180px;
+  color: var(--green);
   font-variant-numeric: tabular-nums;
 }
 

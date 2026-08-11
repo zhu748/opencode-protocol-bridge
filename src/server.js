@@ -11,7 +11,8 @@ import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, singBoxRunt
 import { KeepAliveService, normalizeKeepAliveUrl, resolveKeepAliveConfig } from './keep-alive.js';
 import { configuredProviderCredentials, createProviderCredentialResolver, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
 import { CredentialHealthTracker } from './credential-health.js';
-import { createSseObserver, sanitizeSseErrorStream, translateSse, withSseHeartbeat } from './stream.js';
+import { createSseObserver, sanitizeSseErrorStream, streamClaudeMessage, translateSse, withSseHeartbeat } from './stream.js';
+import { BRIDGE_WEB_SEARCH_NAME, bridgeWebSearchCalls, claudeWebSearchForChat, executeBridgeWebSearch, hasNonBridgeToolCalls, webSearchToolError, withBridgeWebSearchTool } from './bridge-web-search.js';
 import { RequestLogStore } from './request-log.js';
 import { aggregateRequestStats, summarizeRequestStatus } from './stats.js';
 import { applyPromptRules, claudeSystemBlockText, isClaudeMidTurnUserMessage, MAX_PROMPT_BYTES, normalizePromptRules, promptSnapshotText, rewriteClaudeRequestSystems } from './prompt-rewrite.js';
@@ -910,6 +911,10 @@ async function adminApiOperation(req, res, url, config) {
     if (next.clearZenProxy) updated.zenProxyUrl = '';
     if (next.clearGoProxy) updated.goProxyUrl = '';
     updated.defaultProvider = next.defaultProvider;
+    if (next.bridgeWebSearchEnabled !== undefined && typeof next.bridgeWebSearchEnabled !== 'boolean') return json(res, 400, { error: 'bridgeWebSearchEnabled 必须是布尔值' });
+    updated.bridgeWebSearchEnabled = next.bridgeWebSearchEnabled ?? config.bridgeWebSearchEnabled;
+    if (next.bridgeWebSearchProvider !== undefined && !['auto', 'exa', 'parallel'].includes(next.bridgeWebSearchProvider)) return json(res, 400, { error: 'bridgeWebSearchProvider 仅支持 auto、exa 或 parallel' });
+    updated.bridgeWebSearchProvider = next.bridgeWebSearchProvider ?? config.bridgeWebSearchProvider;
     updated.modelRoutes = modelRoutes;
     updated.imageHandoffModels = imageHandoffModels;
     updated.promptRewriteRules = promptRewriteRules;
@@ -1158,6 +1163,169 @@ function resolveRoute(model, config, forcedProvider = null) {
   return { provider, upstreamModel, protocol: upstreamProtocol(upstreamModel, explicit, provider), toolChoiceFallback: explicit.toolChoiceFallback };
 }
 
+function bridgeWebSearchFailureResponse(message, code = 'bridge_web_search_error') {
+  return new Response(JSON.stringify({
+    error: { message, type: 'upstream_error', code }
+  }), {
+    status: 502,
+    headers: { 'content-type': 'application/json; charset=utf-8' }
+  });
+}
+
+function clonedJsonResponse(response, value) {
+  const headers = new Headers(response.headers);
+  headers.set('content-type', 'application/json; charset=utf-8');
+  headers.delete('content-length');
+  headers.delete('content-encoding');
+  return new Response(JSON.stringify(value), {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+function addUsageValue(target, source, key) {
+  const value = source?.[key];
+  if (!Number.isSafeInteger(value) || value < 0) return;
+  target[key] = (target[key] || 0) + value;
+}
+
+function addChatUsage(target, usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return false;
+  target.seen = true;
+  for (const field of ['prompt_tokens', 'completion_tokens', 'total_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) {
+    addUsageValue(target, usage, field);
+  }
+  for (const [field, source] of [
+    ['cached_tokens', usage.prompt_tokens_details],
+    ['cache_creation_tokens', usage.prompt_tokens_details],
+    ['cache_write_tokens', usage.prompt_tokens_details],
+    ['reasoning_tokens', usage.completion_tokens_details]
+  ]) {
+    addUsageValue(target, source, field);
+  }
+  return true;
+}
+
+function mergedChatUsage(finalUsage, aggregate) {
+  if (!aggregate.seen) return finalUsage;
+  const promptDetails = {
+    ...(aggregate.cached_tokens ? { cached_tokens: aggregate.cached_tokens } : {}),
+    ...(aggregate.cache_creation_tokens ? { cache_creation_tokens: aggregate.cache_creation_tokens } : {}),
+    ...(aggregate.cache_write_tokens ? { cache_write_tokens: aggregate.cache_write_tokens } : {})
+  };
+  const completionDetails = aggregate.reasoning_tokens ? { reasoning_tokens: aggregate.reasoning_tokens } : {};
+  return {
+    ...(finalUsage && typeof finalUsage === 'object' && !Array.isArray(finalUsage) ? finalUsage : {}),
+    ...(aggregate.prompt_tokens !== undefined ? { prompt_tokens: aggregate.prompt_tokens } : {}),
+    ...(aggregate.completion_tokens !== undefined ? { completion_tokens: aggregate.completion_tokens } : {}),
+    ...(aggregate.total_tokens !== undefined ? { total_tokens: aggregate.total_tokens } : {}),
+    ...(aggregate.cache_read_input_tokens ? { cache_read_input_tokens: aggregate.cache_read_input_tokens } : {}),
+    ...(aggregate.cache_creation_input_tokens ? { cache_creation_input_tokens: aggregate.cache_creation_input_tokens } : {}),
+    ...(Object.keys(promptDetails).length ? { prompt_tokens_details: promptDetails } : {}),
+    ...(Object.keys(completionDetails).length ? { completion_tokens_details: completionDetails } : {})
+  };
+}
+
+function withoutBridgeWebSearchTool(body) {
+  const tools = Array.isArray(body.tools) ? body.tools.filter((tool) => tool?.function?.name !== BRIDGE_WEB_SEARCH_NAME) : [];
+  const next = { ...body };
+  if (tools.length) next.tools = tools;
+  else {
+    delete next.tools;
+    delete next.tool_choice;
+    delete next.parallel_tool_calls;
+  }
+  return next;
+}
+
+async function callChatWithBridgeWebSearch({ provider, credential, body, signal, timeoutMs, forwardHeaders, search, searchProvider, sessionId, model }) {
+  const timeoutController = new AbortController();
+  const timeout = setTimeout(() => {
+    timeoutController.abort(new DOMException('本地 Web Search 工具循环超时', 'TimeoutError'));
+  }, timeoutMs);
+  timeout.unref?.();
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
+  let current = body;
+  let calls = 0;
+  const usage = { seen: false };
+  try {
+    for (let turns = 0; turns < search.maxUses + 3; turns++) {
+      const response = await callUpstream({
+        provider,
+        protocol: 'chat',
+        ...credential,
+        body: current,
+        signal: requestSignal,
+        timeoutMs,
+        forwardHeaders
+      });
+      if (!response.ok) return { response, calls };
+      let payload;
+      try { payload = await readResponseJsonPayload(response); }
+      catch (error) {
+        return {
+          response: bridgeWebSearchFailureResponse(`本地 Web Search 读取 Chat 上游响应失败：${error.message}`, error.code || 'upstream_response_error'),
+          calls
+        };
+      }
+      addChatUsage(usage, payload.value?.usage);
+      const localCalls = bridgeWebSearchCalls(payload.value);
+      if (!localCalls.length) {
+        const value = { ...payload.value, usage: mergedChatUsage(payload.value?.usage, usage) };
+        return { response: clonedJsonResponse(response, value), calls };
+      }
+      if (hasNonBridgeToolCalls(payload.value)) {
+        return {
+          response: bridgeWebSearchFailureResponse('模型在同一轮同时调用了本地 Web Search 与客户端工具；请重试该请求，或在 Claude Code 中关闭并行工具调用', 'bridge_web_search_parallel_tools'),
+          calls
+        };
+      }
+      const assistant = payload.value?.choices?.[0]?.message;
+      if (!assistant || typeof assistant !== 'object' || Array.isArray(assistant)) {
+        return { response: bridgeWebSearchFailureResponse('Chat 上游 Web Search 工具响应缺少 assistant message', 'upstream_invalid_response'), calls };
+      }
+      const availableSearches = Math.max(0, search.maxUses - calls);
+      const searchesToRun = Math.min(localCalls.length, availableSearches);
+      calls += searchesToRun;
+      const results = await Promise.all(localCalls.map(async (call, index) => {
+        let content;
+        if (index >= searchesToRun) {
+          content = 'Web Search 未执行：已达到本请求允许的最大搜索次数。请基于已有搜索结果直接回答用户。';
+        } else {
+          try {
+            content = await executeBridgeWebSearch(call, {
+              signal: requestSignal,
+              provider: searchProvider,
+              spec: search,
+              sessionId,
+              model
+            });
+          } catch (error) {
+            if (requestSignal.aborted) throw error;
+            content = webSearchToolError(error);
+          }
+        }
+        return { role: 'tool', tool_call_id: call.id, content };
+      }));
+      current = {
+        ...current,
+        messages: [...(Array.isArray(current.messages) ? current.messages : []), assistant, ...results]
+      };
+      if (calls >= search.maxUses) {
+        current = withoutBridgeWebSearchTool(current);
+        current.messages = [...current.messages, {
+          role: 'system',
+          content: '本地 web_search 已达到本请求的使用上限。不要输出、模拟或编造任何未在当前 tools 列表中声明的工具调用语法；请优先基于已有搜索摘要和 URL 直接回答。当前 tools 列表中仍存在的其它客户端工具可以正常调用。'
+        }];
+      }
+    }
+    return { response: bridgeWebSearchFailureResponse('本地 Web Search 工具循环超过安全上限', 'bridge_web_search_loop_limit'), calls };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function imageHandoffEnabledForRoute(config, route) {
   const model = route.upstreamModel.toLowerCase();
   return config.imageHandoffModels
@@ -1291,6 +1459,21 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   if (responsesCompact && route.protocol !== 'responses') {
     return protocolError(res, 400, incomingProtocol, 'Responses compact 只能透传到原生 Responses 模型；请将该模型路由设为 responses');
   }
+  let bridgeWebSearch;
+  if (incomingProtocol === 'claude' && route.protocol === 'chat') {
+    let localSearch;
+    try { localSearch = claudeWebSearchForChat(body); }
+    catch (error) { return protocolError(res, 400, incomingProtocol, error.message); }
+    if (localSearch) {
+      body = localSearch.body;
+      if (localSearch.enabled) {
+        if (!config.bridgeWebSearchEnabled) {
+          return protocolError(res, 400, incomingProtocol, 'Claude Web Search 已在桥接设置中关闭；请启用“为 Claude Code 启用本地 Web Search”，或将模型路由设为原生 Claude');
+        }
+        bridgeWebSearch = localSearch.spec;
+      }
+    }
+  }
   const reasoningStateScope = createReasoningStateScope(client.id || client.name || 'client', body.model, route);
   const responseOptions = responsesOutputOptions(body, incomingProtocol);
   const chatOptions = chatOutputOptions(body, incomingProtocol);
@@ -1304,6 +1487,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   if (incomingProtocol === 'responses' && route.protocol === 'gemini' && hasHostedResponsesWebSearch(body.tools)) {
     toolAdaptations.push('responses_web_search_to_gemini_google_search');
   }
+  if (bridgeWebSearch) toolAdaptations.push('claude_web_search_to_mcp');
   let inputDegradations;
   try {
     inputDegradations = inputRequestDegradations(body, incomingProtocol, route.protocol);
@@ -1319,6 +1503,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       ? reasoningStates.inject(body, incomingProtocol, route.protocol, reasoningStateScope)
       : body;
     upstreamBody = prepareUpstreamRequest(conversionBody, incomingProtocol, route.protocol, route.upstreamModel, { toolChoiceFallback: route.toolChoiceFallback, imageHandoffEnabled });
+    if (bridgeWebSearch) upstreamBody = withBridgeWebSearchTool(upstreamBody, bridgeWebSearch);
   } catch (error) {
     if (abort.signal.aborted) return;
     return protocolError(res, error.status || 400, incomingProtocol, error.message, error.type || 'invalid_request_error');
@@ -1386,6 +1571,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   const protocolLabel = `${incomingProtocol} → ${route.protocol}${compatibilityLabels.length ? ` (${compatibilityLabels.join(', ')})` : ''}`;
   let upstreamMetadata = {};
   let credentialAttempts = 0;
+  let bridgeWebSearchCalls = 0;
   let upstreamWaitMs = 0;
   let upstreamBodyStartedAt = 0;
   let responseDegradations = [];
@@ -1396,6 +1582,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     requestId, clientId: client?.id, clientName: client?.name,
     model: body.model, upstreamModel: route.upstreamModel, provider: route.provider, credentialId: credential.credentialId, credentialLabel: credential.credentialLabel, protocol: protocolLabel,
     credentialAttempts, duration: Date.now() - started, ...upstreamMetadata, ...entry,
+    ...(bridgeWebSearchCalls ? { bridgeWebSearchCalls } : {}),
     ...(responseDegradations.length ? { responseDegradations: responseDegradations.join(',') } : {}),
     ...(credentialAttempts ? { upstreamWaitMs } : {}),
     ...(upstreamBodyStartedAt ? { upstreamBodyMs: Math.max(0, Date.now() - upstreamBodyStartedAt) } : {})
@@ -1407,17 +1594,34 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     const upstreamAttemptStartedAt = Date.now();
     activity.stage('waiting_upstream');
     try {
-      upstream = await callUpstream({
-        provider: route.provider,
-        protocol: route.protocol,
-        ...credential,
-        body: upstreamBody,
-        signal: abort.signal,
-        timeoutMs: config.upstreamTimeoutMs,
-        forwardHeaders: compatibilityHeaders(req, incomingProtocol, route.protocol),
-        anthropicBetaEndpoint: usesAnthropicBetaEndpoint(url, incomingProtocol, route.protocol),
-        operation: responsesCompact ? 'compact' : 'create'
-      });
+      if (bridgeWebSearch) {
+        const result = await callChatWithBridgeWebSearch({
+          provider: route.provider,
+          credential,
+          body: upstreamBody,
+          signal: abort.signal,
+          timeoutMs: config.upstreamTimeoutMs,
+          forwardHeaders: compatibilityHeaders(req, incomingProtocol, route.protocol),
+          search: bridgeWebSearch,
+          searchProvider: config.bridgeWebSearchProvider,
+          sessionId: requestId,
+          model: route.upstreamModel
+        });
+        upstream = result.response;
+        bridgeWebSearchCalls += result.calls;
+      } else {
+        upstream = await callUpstream({
+          provider: route.provider,
+          protocol: route.protocol,
+          ...credential,
+          body: upstreamBody,
+          signal: abort.signal,
+          timeoutMs: config.upstreamTimeoutMs,
+          forwardHeaders: compatibilityHeaders(req, incomingProtocol, route.protocol),
+          anthropicBetaEndpoint: usesAnthropicBetaEndpoint(url, incomingProtocol, route.protocol),
+          operation: responsesCompact ? 'compact' : 'create'
+        });
+      }
     } catch (error) {
       upstreamWaitMs += Math.max(0, Date.now() - upstreamAttemptStartedAt);
       if (abort.signal.aborted) {
@@ -1462,7 +1666,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     return protocolError(res, failure.status, incomingProtocol, failure.message, failure.type, {}, failure.code);
   }
   const upstreamContentType = upstream.headers.get('content-type') || '';
-  if (stream && !/^text\/event-stream(?:\s*;|$)/i.test(upstreamContentType)) {
+  if (stream && !bridgeWebSearch && !/^text\/event-stream(?:\s*;|$)/i.test(upstreamContentType)) {
     await discardUpstreamResponse(upstream).catch(() => {});
     const received = upstreamContentType ? `收到 ${upstreamContentType.slice(0, 128)}` : '缺少 Content-Type';
     const message = `上游流式响应格式无效：${received}`;
@@ -1474,7 +1678,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   const sanitizeStreamError = (error) => normalizeUpstreamStreamError(error, {
     secrets: [credential.apiKey, credential.proxyUrl]
   });
-  if (stream && incomingProtocol === route.protocol) {
+  if (stream && !bridgeWebSearch && incomingProtocol === route.protocol) {
     const upstreamStream = withStreamIdleTimeout(upstream.body, config.upstreamStreamIdleTimeoutMs, activity.upstreamChunk);
     const observer = createSseObserver(route.protocol, body.model);
     res.writeHead(upstream.status, {
@@ -1520,7 +1724,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     await writeLog({ status: observed.error ? 502 : upstream.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', ...(observedError ? { error: observedError.message, errorCode: observedError.code || observedError.type } : {}), ...observed.usage });
     return res.end();
   }
-  if (stream) {
+  if (stream && !bridgeWebSearch) {
     const upstreamStream = withStreamIdleTimeout(upstream.body, config.upstreamStreamIdleTimeoutMs, activity.upstreamChunk);
     let streamUsage = {};
     let streamError;
@@ -1624,6 +1828,35 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       cacheCreation1hInputTokens: normalizedResponse.cacheCreation1hInputTokens,
       reasoningTokens: normalizedResponse.reasoningTokens
     } : {};
+  if (bridgeWebSearch && stream) {
+    if (responseDegradations.length) res.setHeader('x-opencode-response-degradations', responseDegradations.join(','));
+    res.writeHead(upstream.status, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store, no-transform',
+      'x-accel-buffering': 'no',
+      connection: 'keep-alive'
+    });
+    res.flushHeaders();
+    try {
+      for await (const event of streamClaudeMessage(clientResponse)) {
+        activity.stage('writing_stream');
+        await writeResponseChunk(res, event, STREAM_WRITE_TIMEOUT_MS);
+      }
+    } catch (error) {
+      const failure = streamFailure(error, res, abort);
+      if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
+      else credentialHealth.releaseProbe(route.provider, credential);
+      await writeLog({ status: failure.status, stream: true, ...usageLog, error: failure.message, errorCode: failure.code || 'upstream_error' });
+      if (!res.writableEnded && !res.destroyed) {
+        if (failure.status !== 499) res.write(streamProtocolError(incomingProtocol, failure.message, 0, failure.code || 'upstream_error'));
+        res.end();
+      }
+      return;
+    }
+    recordCredentialResponse(route.provider, credential, upstream);
+    await writeLog({ status: upstream.status, stream: true, ...usageLog });
+    return res.end();
+  }
   recordCredentialResponse(route.provider, credential, upstream);
   try {
     activity.stage('writing_response');

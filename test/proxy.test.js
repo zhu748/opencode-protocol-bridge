@@ -1328,7 +1328,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
       body: JSON.stringify({
         model: 'chat-alias', max_tokens: 64, messages: [{ role: 'user', content: '搜索网页' }],
-        tools: [{ type: 'web_search_20260318', name: 'web_search' }]
+        tools: [{ type: 'computer_20250124', name: 'computer' }]
       })
     });
     assert.equal(typedServerTool.status, 400);

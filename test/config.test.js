@@ -64,6 +64,8 @@ test('旧版未修改的四项和十五项图片默认会迁移，自定义选�
 test('公开配置提供非敏感的 Zen 与 Go 协议和视觉能力表', () => {
   const exposed = publicConfig(normalizeStoredConfig());
   assert.equal(exposed.upstreamStreamIdleTimeoutMs, 300000);
+  assert.equal(exposed.bridgeWebSearchEnabled, true);
+  assert.equal(exposed.bridgeWebSearchProvider, 'auto');
   assert.deepEqual(exposed.goModelCapabilities['gpt-5.6-luna'], {
     protocol: 'responses', imageInput: true, inputModalities: ['text', 'image', 'pdf'], reasoning: true, toolCall: true, temperature: false,
     contextLimit: 1_050_000, inputLimit: 922_000, outputLimit: 128_000
@@ -149,6 +151,8 @@ test('旧版部分配置会补齐默认字段并规范化模型路由和 Key 池
   assert.equal(config.upstreamTimeoutMs, 120000);
   assert.equal(config.upstreamStreamIdleTimeoutMs, 300000);
   assert.equal(config.persistLogs, false);
+  assert.equal(config.bridgeWebSearchEnabled, true);
+  assert.equal(config.bridgeWebSearchProvider, 'auto');
   assert.equal(config.keepAliveUrl, '');
   assert.equal(config.keepAliveIntervalSeconds, 60);
   assert.deepEqual(config.imageHandoffModels, DEFAULT_IMAGE_HANDOFF_MODELS);
@@ -172,6 +176,8 @@ test('持久化配置拒绝错误类型、越界值和未知版本', () => {
   assert.equal(normalizeStoredConfig({ upstreamStreamIdleTimeoutMs: 0 }).upstreamStreamIdleTimeoutMs, 0);
   assert.throws(() => normalizeStoredConfig({ upstreamStreamIdleTimeoutMs: 999 }), /上游流空闲超时必须是 0 或 1000–3600000 的整数/);
   assert.throws(() => normalizeStoredConfig({ persistLogs: 'false' }), /日志持久化开关必须是布尔值/);
+  assert.throws(() => normalizeStoredConfig({ bridgeWebSearchEnabled: 'false' }), /本地 Web Search 开关必须是布尔值/);
+  assert.throws(() => normalizeStoredConfig({ bridgeWebSearchProvider: 'other' }), /本地 Web Search 提供方仅支持 auto 或 exa 或 parallel/);
   assert.throws(() => normalizeStoredConfig({ keepAliveUrl: 'file:///tmp/test' }), /仅支持 HTTP 或 HTTPS/);
   assert.throws(() => normalizeStoredConfig({ keepAliveIntervalSeconds: 4 }), /保活间隔必须是 5–86400 的整数/);
   assert.throws(() => normalizeStoredConfig({ modelRoutes: null }), /模型路由必须是 JSON 对象/);

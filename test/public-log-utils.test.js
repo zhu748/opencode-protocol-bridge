@@ -6,7 +6,7 @@ const logs = [
   { time: '2026-08-04T11:30:00Z', requestId: 'local-success', upstreamRequestId: 'trace-a', provider: 'zen', status: 200, model: 'model-a', clientName: '工作机' },
   { time: '2026-08-04T10:30:00Z', requestId: 'local-rate', upstreamRequestId: 'trace-b', provider: 'go', status: 429, model: 'model-b', error: 'rate limited' },
   { time: '2026-08-03T11:30:00Z', requestId: 'local-bad', provider: 'go', status: 401, upstreamModel: 'real-model', credentialId: 'config:backup', credentialLabel: '备用', credentialAttempts: 2, retryAfter: '9' },
-  { time: 'invalid', requestId: 'local-upstream', provider: 'zen', status: 502, protocol: 'claude → chat', responseDegradations: 'claude_iterations', errorCode: 'upstream_dns_error', error: '连接失败' }
+  { time: 'invalid', requestId: 'local-upstream', provider: 'zen', status: 502, protocol: 'claude → chat', bridgeWebSearchCalls: 37, responseDegradations: 'claude_iterations', errorCode: 'upstream_dns_error', error: '连接失败' }
 ];
 
 test('日志筛选可组合关键词、上游与互斥状态', () => {
@@ -19,6 +19,7 @@ test('日志筛选可组合关键词、上游与互斥状态', () => {
   assert.deepEqual(filterRequestLogs(logs, { query: 'config:backup' }).map((item) => item.requestId), ['local-bad']);
   assert.deepEqual(filterRequestLogs(logs, { query: '9' }).map((item) => item.requestId), ['local-bad']);
   assert.deepEqual(filterRequestLogs(logs, { query: 'upstream_dns_error' }).map((item) => item.requestId), ['local-upstream']);
+  assert.deepEqual(filterRequestLogs(logs, { query: '37' }).map((item) => item.requestId), ['local-upstream']);
   assert.deepEqual(filterRequestLogs(logs, { query: 'claude_iterations' }).map((item) => item.requestId), ['local-upstream']);
   const now = Date.parse('2026-08-04T12:00:00Z');
   assert.deepEqual(filterRequestLogs(logs, { timeRange: '1h', now }).map((item) => item.requestId), ['local-success']);
@@ -38,7 +39,7 @@ test('CSV 导出限定元数据字段并防止公式注入', () => {
   const csv = requestLogsToCsv([{
     time: '2026-08-04T12:00:00Z', requestId: '=HYPERLINK("bad")', upstreamRequestId: '+cmd',
     clientName: '@evil', model: '-1+1', provider: 'go', status: 429, duration: 900, upstreamWaitMs: 850, upstreamBodyMs: 25,
-    responseDegradations: 'claude_cache_creation_ttl', cacheCreation5mInputTokens: 3, cacheCreation1hInputTokens: 4,
+    bridgeWebSearchCalls: 37, responseDegradations: 'claude_cache_creation_ttl', cacheCreation5mInputTokens: 3, cacheCreation1hInputTokens: 4,
     errorCode: 'upstream_connect_timeout', error: '含有,逗号和"引号"',
     apiKey: 'must-not-export', prompt: 'must-not-export-either'
   }]);
@@ -51,6 +52,8 @@ test('CSV 导出限定元数据字段并防止公式注入', () => {
   assert.match(csv, /"850"/);
   assert.match(csv, /"响应体阶段 ms"/);
   assert.match(csv, /"响应元数据降级"/);
+  assert.match(csv, /"本地 Web Search 次数"/);
+  assert.match(csv, /"37"/);
   assert.match(csv, /claude_cache_creation_ttl/);
   assert.match(csv, /"5 分钟缓存写入 Token"/);
   assert.match(csv, /"含有,逗号和""引号"""/);

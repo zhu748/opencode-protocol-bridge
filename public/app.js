@@ -272,6 +272,8 @@ async function refresh() {
     }
     $('#requestLogLimit').value = config.requestLogLimit;
     $('#persistLogs').checked = Boolean(config.persistLogs);
+    $('#bridgeWebSearchEnabled').checked = config.bridgeWebSearchEnabled !== false;
+    $('#bridgeWebSearchProvider').value = config.bridgeWebSearchProvider || 'auto';
     $('#upstreamTimeoutMs').value = config.upstreamTimeoutMs;
     $('#upstreamStreamIdleTimeoutMs').value = config.upstreamStreamIdleTimeoutMs;
     $('#maxConcurrentRequests').value = config.maxConcurrentRequests;
@@ -462,12 +464,15 @@ function renderLogs() {
     const responseDegradations = item.responseDegradations
       ? `<small class="log-response-degradations" title="${escapeHtml(item.responseDegradations)}">响应元数据降级：${escapeHtml(item.responseDegradations)}</small>`
       : '';
+    const bridgeWebSearch = item.bridgeWebSearchCalls
+      ? `<small class="log-web-search">本地 Web Search：${formatNumber(item.bridgeWebSearchCalls)} 次</small>`
+      : '';
     const phases = [
       Object.hasOwn(item, 'upstreamWaitMs') ? `等待 ${formatDuration(item.upstreamWaitMs)}` : '',
       Object.hasOwn(item, 'upstreamBodyMs') ? `响应体 ${formatDuration(item.upstreamBodyMs)}` : ''
     ].filter(Boolean).join(' · ');
     const timing = `${formatDuration(item.duration)}${phases ? `<small class="log-timing">${phases}</small>` : ''}`;
-    return `<tr><td>${escapeHtml(new Date(item.time).toLocaleString())}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}${responseDegradations}</td><td class="${statusClass}">${formatNumber(item.status)}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
+    return `<tr><td>${escapeHtml(new Date(item.time).toLocaleString())}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}${bridgeWebSearch}${responseDegradations}</td><td class="${statusClass}">${formatNumber(item.status)}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
   }).join('');
 }
 
@@ -885,7 +890,7 @@ $('#settings-form').addEventListener('submit', async (event) => {
     const payload = configPayload({
       defaultProvider: $('#defaultProvider').value,
       clientToken: $('#clientToken').value,
-      requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), upstreamStreamIdleTimeoutMs: Number($('#upstreamStreamIdleTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes,
+      requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, bridgeWebSearchEnabled: $('#bridgeWebSearchEnabled').checked, bridgeWebSearchProvider: $('#bridgeWebSearchProvider').value, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), upstreamStreamIdleTimeoutMs: Number($('#upstreamStreamIdleTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes,
       ...keepAliveOverrides
     });
     if ($('#proxyUrl').value.trim()) payload.proxyUrl = $('#proxyUrl').value.trim();
@@ -901,6 +906,8 @@ function configPayload(overrides = {}) {
     promptRewriteRules: config.promptRewriteRules || [],
     requestLogLimit: config.requestLogLimit,
     persistLogs: Boolean(config.persistLogs),
+    bridgeWebSearchEnabled: config.bridgeWebSearchEnabled !== false,
+    bridgeWebSearchProvider: config.bridgeWebSearchProvider || 'auto',
     upstreamTimeoutMs: config.upstreamTimeoutMs,
     upstreamStreamIdleTimeoutMs: config.upstreamStreamIdleTimeoutMs,
     maxConcurrentRequests: config.maxConcurrentRequests,

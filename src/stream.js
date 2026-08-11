@@ -1943,6 +1943,72 @@ function geminiSse(data) {
   return `data: ${JSON.stringify(data)}\n\n`;
 }
 
+export async function* streamClaudeMessage(message) {
+  if (!message || typeof message !== 'object' || Array.isArray(message)) throw new TypeError('Claude 流式消息必须是对象');
+  const content = Array.isArray(message.content) ? message.content : [];
+  const usage = message.usage && typeof message.usage === 'object' && !Array.isArray(message.usage) ? message.usage : {};
+  const inputTokens = Number.isSafeInteger(usage.input_tokens) && usage.input_tokens >= 0 ? usage.input_tokens : 0;
+  const outputTokens = Number.isSafeInteger(usage.output_tokens) && usage.output_tokens >= 0 ? usage.output_tokens : 0;
+  yield sse('message_start', {
+    type: 'message_start',
+    message: {
+      id: typeof message.id === 'string' && message.id ? message.id : `msg_${randomUUID().replaceAll('-', '')}`,
+      type: 'message',
+      role: 'assistant',
+      model: typeof message.model === 'string' && message.model ? message.model : 'unknown',
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: 0,
+        ...(usage.cache_read_input_tokens ? { cache_read_input_tokens: usage.cache_read_input_tokens } : {}),
+        ...(usage.cache_creation_input_tokens ? { cache_creation_input_tokens: usage.cache_creation_input_tokens } : {}),
+        ...(usage.speed ? { speed: usage.speed } : {})
+      }
+    }
+  });
+  for (const [index, block] of content.entries()) {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) throw new TypeError(`Claude content[${index}] 必须是对象`);
+    if (block.type === 'text') {
+      yield sse('content_block_start', { type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
+      if (typeof block.text === 'string' && block.text) {
+        yield sse('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: block.text } });
+      }
+    } else if (block.type === 'thinking') {
+      yield sse('content_block_start', { type: 'content_block_start', index, content_block: { type: 'thinking', thinking: '', signature: '' } });
+      if (typeof block.thinking === 'string' && block.thinking) {
+        yield sse('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'thinking_delta', thinking: block.thinking } });
+      }
+      yield sse('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'signature_delta', signature: block.signature || 'bridge' } });
+    } else if (block.type === 'tool_use') {
+      const input = block.input && typeof block.input === 'object' && !Array.isArray(block.input) ? block.input : {};
+      yield sse('content_block_start', {
+        type: 'content_block_start', index,
+        content_block: { type: 'tool_use', id: block.id || `call_${randomUUID().replaceAll('-', '')}`, name: block.name || 'unknown', input: {} }
+      });
+      const argumentsText = JSON.stringify(input);
+      if (argumentsText && argumentsText !== '{}') {
+        yield sse('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: argumentsText } });
+      }
+    } else if (block.type === 'redacted_thinking') {
+      yield sse('content_block_start', { type: 'content_block_start', index, content_block: { type: 'redacted_thinking', data: block.data || 'bridge' } });
+    } else {
+      throw new TypeError(`本地 Web Search 无法流式编码 Claude content 类型：${String(block.type || 'unknown')}`);
+    }
+    yield sse('content_block_stop', { type: 'content_block_stop', index });
+  }
+  yield sse('message_delta', {
+    type: 'message_delta',
+    delta: { stop_reason: message.stop_reason || 'end_turn', stop_sequence: message.stop_sequence ?? null },
+    usage: {
+      output_tokens: outputTokens,
+      ...(usage.cache_creation_input_tokens ? { cache_creation_input_tokens: usage.cache_creation_input_tokens } : {})
+    }
+  });
+  yield sse('message_stop', { type: 'message_stop' });
+}
+
 function blockToolArguments(block) {
   let parsed;
   try { parsed = parsedToolArguments(block.arguments, 'tool'); }

@@ -24,6 +24,9 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /function credentialLabel\(item\)/);
   assert.match(html, /Key \/ 尝试/);
   assert.match(script, /log-key-attempts/);
+  assert.match(script, /log-web-search/);
+  assert.match(html, /id="bridgeWebSearchProvider"/);
+  assert.match(html, /Exa 优先，失败回退 Parallel/);
   assert.match(script, /navigator\.clipboard\.writeText\(button\.dataset\.copyValue\)/);
   assert.match(script, /requestLogsToCsv\(items\)/);
   assert.match(html, /id="stats-avg-phases"/);
@@ -223,6 +226,7 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.match(spec.components.headers.ToolAdaptations.schema.pattern, /gemini_function_names_aliased/);
   assert.match(spec.components.headers.ToolAdaptations.schema.pattern, /gemini_response_schema_to_description/);
   assert.match(spec.components.headers.ToolAdaptations.schema.pattern, /claude_tool_error_to_content/);
+  assert.match(spec.components.headers.ToolAdaptations.schema.pattern, /claude_web_search_to_mcp/);
   assert.match(spec.components.headers.ReasoningAdaptations.schema.pattern, /reasoning_history_to_assistant_text/);
   for (const path of ['/messages', '/responses', '/chat/completions']) {
     assert.equal(spec.paths[path].post.responses['200'].headers['x-opencode-service-adaptations'].$ref, '#/components/headers/ServiceAdaptations');
