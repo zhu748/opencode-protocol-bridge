@@ -26,6 +26,7 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /log-key-attempts/);
   assert.match(script, /log-web-search/);
   assert.match(html, /id="bridgeWebSearchProvider"/);
+  assert.match(html, /id="statsRetentionDays"[^>]*min="1"[^>]*max="365"/);
   assert.match(html, /Exa 优先，失败回退 Parallel/);
   assert.match(script, /navigator\.clipboard\.writeText\(button\.dataset\.copyValue\)/);
   assert.match(script, /requestLogsToCsv\(items\)/);
@@ -41,6 +42,7 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /loadDataSource\('请求日志'/);
   assert.match(script, /loadDataSource\('运行状态'/);
   assert.match(script, /loadDataSource\('用量统计', refreshStats/);
+  assert.match(script, /new Date\(\)\.getTimezoneOffset\(\)/);
   assert.match(script, /createLatestRequestGate/);
   assert.match(script, /if \(!result\.superseded\) toast/);
   assert.match(script, /configSaveInProgress/);
@@ -100,6 +102,10 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(settings, /@media \(max-width: 1200px\)[\s\S]*?\.log-toolbar/);
   assert.match(settings, /@media \(max-width: 1000px\)[\s\S]*?\.log-toolbar/);
   assert.match(settings, /@media \(max-width: 720px\)[\s\S]*?\.log-toolbar/);
+  assert.match(settings, /\.trend-column/);
+  assert.match(settings, /\.portion-20/);
+  assert.match(settings, /\.stats-dimension/);
+  assert.match(settings, /\.protocol-breakdown/);
 });
 
 test('Render Blueprint 暴露批量 Key、逐项代理、远程图片交接、保活和 sing-box 变量', async () => {

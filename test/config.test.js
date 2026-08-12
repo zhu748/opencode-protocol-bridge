@@ -151,6 +151,7 @@ test('旧版部分配置会补齐默认字段并规范化模型路由和 Key 池
   assert.equal(config.upstreamTimeoutMs, 120000);
   assert.equal(config.upstreamStreamIdleTimeoutMs, 300000);
   assert.equal(config.persistLogs, false);
+  assert.equal(config.statsRetentionDays, 7);
   assert.equal(config.bridgeWebSearchEnabled, true);
   assert.equal(config.bridgeWebSearchProvider, 'auto');
   assert.equal(config.keepAliveUrl, '');
@@ -176,6 +177,7 @@ test('持久化配置拒绝错误类型、越界值和未知版本', () => {
   assert.equal(normalizeStoredConfig({ upstreamStreamIdleTimeoutMs: 0 }).upstreamStreamIdleTimeoutMs, 0);
   assert.throws(() => normalizeStoredConfig({ upstreamStreamIdleTimeoutMs: 999 }), /上游流空闲超时必须是 0 或 1000–3600000 的整数/);
   assert.throws(() => normalizeStoredConfig({ persistLogs: 'false' }), /日志持久化开关必须是布尔值/);
+  assert.throws(() => normalizeStoredConfig({ statsRetentionDays: 0 }), /统计保留天数必须是 1–365 的整数/);
   assert.throws(() => normalizeStoredConfig({ bridgeWebSearchEnabled: 'false' }), /本地 Web Search 开关必须是布尔值/);
   assert.throws(() => normalizeStoredConfig({ bridgeWebSearchProvider: 'other' }), /本地 Web Search 提供方仅支持 auto 或 exa 或 parallel/);
   assert.throws(() => normalizeStoredConfig({ keepAliveUrl: 'file:///tmp/test' }), /仅支持 HTTP 或 HTTPS/);

@@ -295,9 +295,17 @@ test('时间趋势按范围生成固定桶并统计错误与 token', () => {
 
   const all = aggregateRequestStats(logs, 'all', now).timeline;
   assert.equal(all.bucket, 'day');
-  assert.equal(all.range, '14d');
-  assert.equal(all.buckets.length, 14);
+  assert.equal(all.range, '7d');
+  assert.equal(all.buckets.length, 7);
   assert.equal(all.buckets.reduce((sum, item) => sum + item.requests, 0), 3);
+
+  const fourteenDays = aggregateRequestStats(logs, 'all', now, { retentionDays: 30 }).timeline;
+  assert.equal(fourteenDays.range, '14d');
+  assert.equal(fourteenDays.buckets.length, 14);
+
+  const local = aggregateRequestStats(logs, 'all', now, { retentionDays: 7, timezoneOffsetMinutes: -480 });
+  assert.equal(local.timezoneOffsetMinutes, -480);
+  assert.equal(local.timeline.buckets.at(-1).start, '2026-08-03T16:00:00.000Z', 'UTC+8 的每日桶应从本地零点开始');
 });
 
 test('OpenAI 缓存写入是独立指标，不会从原始输入的未缓存部分重复扣除', () => {

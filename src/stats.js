@@ -38,10 +38,12 @@ export function summarizeRequestStatus(items, window = 'all', now = Date.now()) 
   };
 }
 
-export function aggregateRequestStats(items, window = 'all', now = Date.now()) {
+export function aggregateRequestStats(items, window = 'all', now = Date.now(), { retentionDays = 7, timezoneOffsetMinutes = 0 } = {}) {
   const from = statsWindowStart(window, now);
   const summaryState = createSummaryState();
-  const timelineState = createTimelineState(window, now);
+  const normalizedRetentionDays = Math.min(365, Math.max(1, Number(retentionDays) || 7));
+  const normalizedTimezoneOffset = normalizeTimezoneOffset(timezoneOffsetMinutes);
+  const timelineState = createTimelineState(window, now, normalizedRetentionDays, normalizedTimezoneOffset);
   const groupedState = createGroupedState();
   let retainedRequests = 0;
   for (const item of items) {
@@ -58,6 +60,8 @@ export function aggregateRequestStats(items, window = 'all', now = Date.now()) {
   return {
     generatedAt: new Date(now).toISOString(),
     window,
+    retentionDays: normalizedRetentionDays,
+    timezoneOffsetMinutes: normalizedTimezoneOffset,
     from: from === null ? null : new Date(from).toISOString(),
     retainedRequests,
     summary,
@@ -76,12 +80,13 @@ function statsWindowStart(window, now) {
   return duration === null ? null : now - duration;
 }
 
-function createTimelineState(window, now) {
+function createTimelineState(window, now, retentionDays, timezoneOffsetMinutes) {
   const hour = 60 * 60 * 1000;
   const day = 24 * hour;
   const bucketMs = window === '24h' ? hour : day;
-  const bucketCount = window === '24h' ? 24 : window === '7d' ? 7 : 14;
-  const end = Math.floor(now / bucketMs) * bucketMs;
+  const bucketCount = window === '24h' ? 24 : window === '7d' ? 7 : Math.min(14, retentionDays);
+  const timezoneOffsetMs = timezoneOffsetMinutes * 60 * 1000;
+  const end = Math.floor((now - timezoneOffsetMs) / bucketMs) * bucketMs + timezoneOffsetMs;
   const start = end - (bucketCount - 1) * bucketMs;
   const buckets = Array.from({ length: bucketCount }, (_, index) => ({
     start: new Date(start + index * bucketMs).toISOString(),
@@ -91,11 +96,16 @@ function createTimelineState(window, now) {
   }));
   return {
     bucket: window === '24h' ? 'hour' : 'day',
-    range: window === 'all' ? '14d' : window,
+    range: window === 'all' ? `${bucketCount}d` : window,
     bucketMs,
     start,
     buckets
   };
+}
+
+function normalizeTimezoneOffset(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= -840 && parsed <= 840 ? parsed : 0;
 }
 
 function addTimelineItem(state, timestamp, measurement) {

@@ -14,6 +14,7 @@ import { CredentialHealthTracker } from './credential-health.js';
 import { createSseObserver, sanitizeSseErrorStream, streamClaudeMessage, translateSse, withSseHeartbeat } from './stream.js';
 import { BRIDGE_WEB_SEARCH_NAME, bridgeWebSearchCalls, claudeWebSearchForChat, executeBridgeWebSearchDetailed, hasNonBridgeToolCalls, webSearchToolError, withBridgeWebSearchTool } from './bridge-web-search.js';
 import { RequestLogStore } from './request-log.js';
+import { RequestStatsStore } from './request-stats-store.js';
 import { aggregateRequestStats, summarizeRequestStatus } from './stats.js';
 import { applyPromptRules, claudeSystemBlockText, isClaudeMidTurnUserMessage, MAX_PROMPT_BYTES, normalizePromptRules, promptSnapshotText, rewriteClaudeRequestSystems } from './prompt-rewrite.js';
 import { ImageHandoffStore, imageHandoffStorageOptions, localImageHandoffEnabled, resolveImageHandoffPublicUrl } from './image-handoff.js';
@@ -64,6 +65,7 @@ const JSON_DECODER = new TextDecoder('utf-8', { fatal: true });
 const PUBLIC = join(ROOT, 'public');
 const PUBLIC_ROOT = await canonicalStaticRoot(PUBLIC);
 const requestLogs = new RequestLogStore(process.env.LOG_FILE || resolve(ROOT, 'data', 'request-logs.json'));
+const requestStats = new RequestStatsStore(process.env.STATS_FILE || (process.env.NODE_TEST_CONTEXT ? '' : resolve(ROOT, 'data', 'request-stats.json')));
 const keepAlive = new KeepAliveService();
 const sharedModelDiscoveries = new SharedOperationPool();
 const imageHandoffPublicUrl = resolveImageHandoffPublicUrl(process.env);
@@ -85,6 +87,9 @@ const activeClientRequests = new Map();
 const activeClientTokenCountRequests = new Map();
 const activeInferenceRecords = new Map();
 let recentClaudePrompt = null;
+let statsMigrationPromise = null;
+let cachedStatusStats = null;
+let cachedAggregateStats = null;
 const environmentCredentialPools = {
   zen: environmentProviderCredentials(process.env, 'zen'),
   go: environmentProviderCredentials(process.env, 'go')
@@ -703,8 +708,60 @@ function geminiEndpoint(pathname, base) {
 }
 
 async function addLog(entry, config) {
-  try { await requestLogs.add({ time: new Date().toISOString(), ...entry }, { limit: config.requestLogLimit, persist: config.persistLogs }); }
-  catch (error) { console.error(`请求日志持久化失败：${error.message}`); }
+  const record = { time: new Date().toISOString(), ...entry };
+  const [logResult, statsResult] = await Promise.allSettled([
+    requestLogs.add(record, { limit: config.requestLogLimit, persist: config.persistLogs }),
+    requestStats.add(record, { retentionDays: config.statsRetentionDays })
+  ]);
+  if (logResult.status === 'rejected') console.error(`请求日志持久化失败：${logResult.reason.message}`);
+  if (statsResult.status === 'rejected') console.error(`请求统计持久化失败：${statsResult.reason.message}`);
+}
+
+async function ensureRequestStats(config) {
+  if (!statsMigrationPromise) {
+    statsMigrationPromise = (async () => {
+      await Promise.all([
+        requestStats.ensureLoaded({ retentionDays: config.statsRetentionDays }),
+        requestLogs.ensureLoaded({ limit: config.requestLogLimit, persist: config.persistLogs })
+      ]);
+      await requestStats.merge(requestLogs.values(config.requestLogLimit), { retentionDays: config.statsRetentionDays });
+    })().catch((error) => {
+      statsMigrationPromise = null;
+      throw error;
+    });
+  }
+  await statsMigrationPromise;
+  await requestStats.ensureLoaded({ retentionDays: config.statsRetentionDays });
+}
+
+function statsTimezoneOffset(url) {
+  const raw = url.searchParams.get('timezoneOffsetMinutes');
+  if (raw === null) return 0;
+  if (!/^-?\d{1,4}$/.test(raw)) throw Object.assign(new Error('timezoneOffsetMinutes 必须是 -840–840 的整数'), { status: 400 });
+  const value = Number(raw);
+  if (value < -840 || value > 840) throw Object.assign(new Error('timezoneOffsetMinutes 必须是 -840–840 的整数'), { status: 400 });
+  return value;
+}
+
+function requestStatusSummary() {
+  if (cachedStatusStats?.version === requestStats.version) return cachedStatusStats.value;
+  const value = summarizeRequestStatus(requestStats.values());
+  cachedStatusStats = { version: requestStats.version, value };
+  return value;
+}
+
+function aggregateStoredRequestStats(window, config, timezoneOffsetMinutes, now = Date.now()) {
+  const localDay = Math.floor((now - timezoneOffsetMinutes * 60 * 1000) / (24 * 60 * 60 * 1000));
+  const key = `${requestStats.version}:${config.statsRetentionDays}:${timezoneOffsetMinutes}:${localDay}`;
+  if (window === 'all' && cachedAggregateStats?.key === key) {
+    return { ...cachedAggregateStats.value, generatedAt: new Date(now).toISOString() };
+  }
+  const value = aggregateRequestStats(requestStats.values(), window, now, {
+    retentionDays: config.statsRetentionDays,
+    timezoneOffsetMinutes
+  });
+  if (window === 'all') cachedAggregateStats = { key, value };
+  return value;
 }
 
 const ADMIN_EXACT_METHODS = new Map([
@@ -919,6 +976,7 @@ async function adminApiOperation(req, res, url, config) {
     updated.imageHandoffModels = imageHandoffModels;
     updated.promptRewriteRules = promptRewriteRules;
     updated.requestLogLimit = boundedInteger(next.requestLogLimit, '日志保留条数', 10, 1000, config.requestLogLimit);
+    updated.statsRetentionDays = boundedInteger(next.statsRetentionDays, '统计保留天数', 1, 365, config.statsRetentionDays);
     updated.upstreamTimeoutMs = boundedInteger(next.upstreamTimeoutMs, '上游超时', 1000, 600000, config.upstreamTimeoutMs);
     updated.upstreamStreamIdleTimeoutMs = boundedZeroOrInteger(next.upstreamStreamIdleTimeoutMs, '上游流空闲超时', 1000, 3600000, config.upstreamStreamIdleTimeoutMs);
     updated.maxConcurrentRequests = boundedInteger(next.maxConcurrentRequests, '最大并发请求', 1, 1000, config.maxConcurrentRequests);
@@ -940,6 +998,7 @@ async function adminApiOperation(req, res, url, config) {
       goCredentials: next.clearGoKey || replaceGoKey ? updated.goCredentials : current.goCredentials
     }), { expectedRevision });
     await requestLogs.configure({ limit: saved.requestLogLimit, persist: saved.persistLogs }).catch((error) => console.error(`更新日志持久化设置失败：${error.message}`));
+    await requestStats.configure({ retentionDays: saved.statsRetentionDays }).catch((error) => console.error(`更新统计保留设置失败：${error.message}`));
     keepAlive.configure(resolveKeepAliveConfig(saved));
     return runtimeConfigResponse(res, 200, saved);
   }
@@ -1033,14 +1092,15 @@ async function adminApiOperation(req, res, url, config) {
     return json(res, 200, { ok: true });
   }
   if (url.pathname === '/api/stats' && req.method === 'GET') {
-    await requestLogs.ensureLoaded({ limit: config.requestLogLimit, persist: config.persistLogs });
-    const stats = aggregateRequestStats(requestLogs.values(config.requestLogLimit), url.searchParams.get('window') || 'all');
-    return json(res, 200, { ...stats, credentialHealth: credentialHealthSnapshot(config) });
+    const timezoneOffsetMinutes = statsTimezoneOffset(url);
+    await ensureRequestStats(config);
+    await requestStats.flush().catch(() => {});
+    const stats = aggregateStoredRequestStats(url.searchParams.get('window') || 'all', config, timezoneOffsetMinutes);
+    return json(res, 200, { ...stats, persistenceError: requestStats.lastError || null, credentialHealth: credentialHealthSnapshot(config) });
   }
   if (url.pathname === '/api/status' && req.method === 'GET') {
-    await requestLogs.ensureLoaded({ limit: config.requestLogLimit, persist: config.persistLogs });
-    const logs = requestLogs.values(config.requestLogLimit);
-    const summary = summarizeRequestStatus(logs);
+    await ensureRequestStats(config);
+    const summary = requestStatusSummary();
     const memory = process.memoryUsage();
     const activeInference = activeInferenceSnapshot();
     return json(res, 200, {
@@ -1066,6 +1126,7 @@ async function adminApiOperation(req, res, url, config) {
       upstreamBodyTimingCoverageRate: summary.upstreamBodyCoverageRate,
       memoryMb: Math.round(memory.rss / 1024 / 1024),
       logPersistenceError: requestLogs.lastError || null,
+      statsPersistenceError: requestStats.lastError || null,
       keepAlive: keepAlive.status()
     });
   }
@@ -2276,6 +2337,7 @@ async function finalizeShutdown(exitCode, forceExit) {
   shutdownFinalized = true;
   clearTimeout(forceExit);
   await requestLogs.flush().catch((error) => console.error(`退出前刷新请求日志失败：${error.message}`));
+  await requestStats.flush().catch((error) => console.error(`退出前刷新请求统计失败：${error.message}`));
   const force = exitCode !== 0;
   await Promise.all([closeProxyDispatchers({ force }), closeDirectUpstreamDispatcher({ force }), imageHandoff.close()]);
   process.exit(exitCode);

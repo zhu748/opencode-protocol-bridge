@@ -2,6 +2,7 @@ node_modules/
 vendor/sing-box/
 data/config.json
 data/request-logs.json
+data/request-stats.json
 data/*.tmp
 data/ui-*.png
 .env

@@ -55,7 +55,7 @@
           <article><span>接口地址</span><strong id="base-url">—</strong><small>本机中转端点</small></article>
           <article><span>Zen 密钥</span><strong id="zen-state">未配置</strong><small id="zen-proxy-state">直连</small></article>
           <article><span>Go 密钥</span><strong id="go-state">未配置</strong><small id="go-proxy-state">直连</small></article>
-          <article><span>最近请求</span><strong id="request-count">0</strong><small id="request-summary">内存日志条目</small></article>
+          <article><span>保留期请求</span><strong id="request-count">0</strong><small id="request-summary">默认统计最近 7 天</small></article>
         </div>
         <div class="panel"><div class="panel-head"><div><h3>快速接入</h3><p>使用路径明确选择 OpenCode Zen 或 Go</p></div><span class="client-actions"><button class="ghost copy" data-copy="zen">复制 Zen</button><button class="ghost copy" data-copy="go">复制 Go</button></span></div><code id="endpoint-code">http://localhost:8787/zen/v1</code><code id="go-endpoint-code">http://localhost:8787/go/v1</code></div>
       </section>
@@ -86,6 +86,7 @@
           </section>
           <label>日志保留条数<input id="requestLogLimit" type="number" min="10" max="1000"></label>
           <label class="check-field"><input id="persistLogs" type="checkbox"><span>持久化请求日志<small>仅保存请求元数据，不保存提示词和响应正文</small></span></label>
+          <label>统计保留天数<input id="statsRetentionDays" type="number" min="1" max="365" value="7" required><small>默认 7 天；独立于日志条数，过期统计会自动删除</small></label>
           <label class="check-field"><input id="bridgeWebSearchEnabled" type="checkbox"><span>为 Claude Code 启用本地 Web Search<small>当 Chat 上游收到 Claude typed web_search 或 Claude Code 内置 WebSearch 时，桥接会通过 Exa 或 Parallel MCP 完成搜索并回填结果；搜索关键词会发送到选中的搜索服务。</small></span></label>
           <label>本地 Web Search 提供方<select id="bridgeWebSearchProvider"><option value="auto">自动（Exa 优先，失败回退 Parallel）</option><option value="exa">仅 Exa</option><option value="parallel">仅 Parallel</option></select><small>自动模式兼顾 OpenCode 的双后端能力与稳定性；域名过滤和国家定位会固定使用 Exa Advanced。</small></label>
           <label>上游超时（毫秒）<input id="upstreamTimeoutMs" type="number" min="1000" max="600000" step="1000"><small>非流式和错误正文覆盖完整读取；成功流式仅限制连接与响应头</small></label>
@@ -172,7 +173,7 @@
       </section>
 
       <section id="stats" class="view">
-        <div class="section-intro row"><div><h3>请求与 Token 统计</h3><p>基于当前保留的请求元数据汇总，不读取提示词或响应正文。</p></div><div class="stats-toolbar"><select id="stats-window"><option value="all">全部记录</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select><button id="refresh-stats" class="ghost" type="button">刷新统计</button></div></div>
+        <div class="section-intro row"><div><h3>请求与 Token 统计</h3><p>基于独立持久化的统计元数据汇总，不受请求日志条数限制，也不读取提示词或响应正文。</p></div><div class="stats-toolbar"><select id="stats-window"><option value="all">保留期内全部</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select><button id="refresh-stats" class="ghost" type="button">刷新统计</button></div></div>
         <div class="metric-grid">
           <article class="metric-card"><span>请求总数</span><strong id="stats-requests">0</strong><small id="stats-usage-coverage">0 条含用量</small></article>
           <article class="metric-card"><span>成功率</span><strong id="stats-success-rate">100%</strong><small id="stats-success-detail">0 成功 · 0 失败</small></article>
@@ -205,14 +206,14 @@
           </div>
         </article>
         <article class="panel trend-panel">
-          <div class="panel-head"><div><h3>近期趋势</h3><p id="stats-trend-range">最近 14 天 · 每日</p></div><div class="trend-legend"><span><i class="requests"></i>请求</span><span><i class="tokens"></i>Token</span><span><i class="errors"></i>失败</span></div></div>
+          <div class="panel-head"><div><h3>近期趋势</h3><p id="stats-trend-range">最近 7 天 · 每日</p></div><div class="trend-legend"><span><i class="requests"></i>请求</span><span><i class="tokens"></i>Token</span><span><i class="errors"></i>失败</span></div></div>
           <div id="stats-trend" class="trend-chart" role="img" aria-label="尚无请求趋势"></div>
         </article>
-        <p id="stats-scope" class="stats-note">统计范围：当前内存保留记录</p>
+        <p id="stats-scope" class="stats-note">统计范围：持久化统计保留期</p>
         <div class="breakdown-grid">
           <article class="panel table-wrap"><div class="breakdown-title"><h3>按上游</h3></div><table><thead><tr><th>上游</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th></tr></thead><tbody id="stats-provider-rows"></tbody></table></article>
           <article class="panel table-wrap"><div class="breakdown-title"><h3>按模型</h3></div><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th></tr></thead><tbody id="stats-model-rows"></tbody></table></article>
-          <article class="panel table-wrap"><div class="breakdown-title"><h3>按协议转换</h3></div><table><thead><tr><th>协议</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th></tr></thead><tbody id="stats-protocol-rows"></tbody></table></article>
+          <article class="panel table-wrap protocol-breakdown"><div class="breakdown-title"><h3>按协议转换</h3></div><table><thead><tr><th>协议</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th></tr></thead><tbody id="stats-protocol-rows"></tbody></table></article>
           <article class="panel table-wrap"><div class="breakdown-title"><h3>按客户端</h3></div><table><thead><tr><th>客户端</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th></tr></thead><tbody id="stats-client-rows"></tbody></table></article>
           <article class="panel table-wrap credential-breakdown"><div class="breakdown-title"><h3>Key 健康与用量</h3><p>失效、限流或连续网络故障的 Key 会临时冷却；确认上游恢复后可手动重置。仅显示来源和编号，不保存或展示密钥内容</p></div><table class="credential-table"><thead><tr><th>Key 槽位</th><th>运行状态</th><th>连续失败</th><th>请求</th><th>成功率</th><th>总 Token</th><th>缓存率</th><th>耗时（平均 / P95）</th><th>最近事件</th></tr></thead><tbody id="stats-credential-rows"></tbody></table></article>
         </div>

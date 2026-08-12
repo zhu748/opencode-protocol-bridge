@@ -196,12 +196,15 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 30_000 },
     assert.equal(wrongConfigMethod.headers.get('allow'), 'GET, PUT');
     const unauthenticatedStats = await fetch(`http://127.0.0.1:${port}/api/stats`);
     assert.equal(unauthenticatedStats.status, 401);
-    const emptyStats = await fetch(`http://127.0.0.1:${port}/api/stats?window=24h`, { headers: { cookie } }).then((result) => result.json());
+    const emptyStats = await fetch(`http://127.0.0.1:${port}/api/stats?window=24h&timezoneOffsetMinutes=-480`, { headers: { cookie } }).then((result) => result.json());
     assert.equal(emptyStats.window, '24h');
+    assert.equal(emptyStats.timezoneOffsetMinutes, -480);
     assert.equal(emptyStats.summary.requests, 0);
     assert.deepEqual(emptyStats.byProvider, []);
     const invalidStatsWindow = await fetch(`http://127.0.0.1:${port}/api/stats?window=month`, { headers: { cookie } });
     assert.equal(invalidStatsWindow.status, 400);
+    const invalidStatsTimezone = await fetch(`http://127.0.0.1:${port}/api/stats?timezoneOffsetMinutes=841`, { headers: { cookie } });
+    assert.equal(invalidStatsTimezone.status, 400);
     const redactedConfigResponse = await fetch(`http://127.0.0.1:${port}/api/config`, { headers: { cookie } });
     const redactedConfig = await redactedConfigResponse.json();
     assert.equal(typeof redactedConfig.singBoxRuntime?.available, 'boolean');
@@ -2701,5 +2704,87 @@ test('Claude 新版响应元数据在同协议透传，跨协议通过响应头�
     upstream.close();
     await once(upstream, 'close').catch(() => {});
     await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+  }
+});
+
+test('统计超过 100 条日志上限并在服务重启后恢复', { timeout: 30_000 }, async () => {
+  const upstream = createHttpServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'chatcmpl-stats', object: 'chat.completion', created: 1, model: 'deepseek-v4-flash',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 }
+    }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+
+  const port = 20_000 + Math.floor(Math.random() * 10_000);
+  const suffix = randomUUID();
+  const configFile = resolve(import.meta.dirname, `../data/stats-server-${suffix}.json`);
+  const statsFile = resolve(import.meta.dirname, `../data/stats-server-items-${suffix}.json`);
+  const env = {
+    ...process.env,
+    HOST: '127.0.0.1', PORT: String(port), CONFIG_FILE: configFile, STATS_FILE: statsFile,
+    CONFIG_ENCRYPTION_KEY: 'stats-integration-master-key',
+    OPENCODE_BRIDGE_ADMIN_PASSWORD: 'Admin123', OPENCODE_BRIDGE_CLIENT_TOKEN: 'Api123',
+    OPENCODE_BRIDGE_DEFAULT_PROVIDER: 'go', OPENCODE_GO_KEY: 'stats-key',
+    OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.address().port}`
+  };
+  const start = async () => {
+    const service = spawn(process.execPath, ['src/server.js'], {
+      cwd: resolve(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe']
+    });
+    await Promise.race([
+      new Promise((resolveStarted) => service.stdout.on('data', (chunk) => {
+        if (chunk.toString('utf8').includes('OpenCode Bridge 已启动')) resolveStarted();
+      })),
+      once(service, 'exit').then(([code]) => { throw new Error(`服务提前退出：${code}`); })
+    ]);
+    return service;
+  };
+  const loginCookie = async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
+    });
+    assert.equal(response.status, 200);
+    return response.headers.get('set-cookie').split(';')[0];
+  };
+
+  let child;
+  try {
+    child = await start();
+    for (let index = 0; index < 105; index++) {
+      const response = await fetch(`http://127.0.0.1:${port}/go/v1/chat/completions`, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+        body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: `request ${index}` }] })
+      });
+      assert.equal(response.status, 200);
+      await response.json();
+    }
+    const cookie = await loginCookie();
+    const logs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+    const stats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(logs.length, 100);
+    assert.equal(stats.summary.requests, 105);
+    assert.equal(stats.retentionDays, 7);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 400));
+
+    child.kill();
+    await once(child, 'exit');
+    child = await start();
+    const restoredCookie = await loginCookie();
+    const restored = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie: restoredCookie } }).then((response) => response.json());
+    assert.equal(restored.summary.requests, 105);
+    assert.equal(restored.retainedRequests, 105);
+  } finally {
+    if (child?.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
+    upstream.close();
+    await once(upstream, 'close').catch(() => {});
+    await unlink(configFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    await unlink(statsFile).catch((error) => { if (error.code !== 'ENOENT') throw error; });
   }
 });

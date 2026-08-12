@@ -168,9 +168,9 @@ async function loadDataSource(name, loader, fallback, apply) {
 }
 
 function renderRuntimeSummary() {
-  $('#request-count').textContent = requestLogItems.length;
   const statusStale = dataSourceFailures.has('运行状态');
   const logsStale = dataSourceFailures.has('请求日志');
+  $('#request-count').textContent = formatNumber(serviceStatus?.requests ?? requestLogItems.length);
   if (serviceStatus) {
     const successSummary = serviceStatus.requests ? `${formatPercentage(serviceStatus.successRate)} 成功` : '暂无请求';
     const averageUpstreamBody = serviceStatus.upstreamBodyTimingCoverageRate > 0 ? formatDuration(serviceStatus.averageUpstreamBody) : '—';
@@ -193,8 +193,8 @@ function renderRuntimeSummary() {
       : '';
     const adminMutations = serviceStatus.activeAdminMutations ? ` · 管理写 ${formatNumber(serviceStatus.activeAdminMutations)}/${formatNumber(serviceStatus.maxAdminMutations)}` : '';
     const adminDiscoveries = serviceStatus.activeAdminModelDiscoveries ? ` · 模型发现 ${formatNumber(serviceStatus.activeAdminModelDiscoveries)}/${formatNumber(serviceStatus.maxAdminModelDiscoveries)}` : '';
-    $('#request-summary').textContent = `${successSummary} · 活跃 ${serviceStatus.activeRequests}${inference}${httpConnections}${adminMutations}${adminDiscoveries} · 平均 ${formatDuration(serviceStatus.averageDuration)}${upstreamTiming} · ${serviceStatus.memoryMb} MiB${serviceStatus.logPersistenceError ? ' · 日志异常' : ''}${statusStale ? ' · 状态未更新' : ''}${logsStale ? ' · 日志未更新' : ''}`;
-    $('#request-summary').title = serviceStatus.logPersistenceError || '';
+    $('#request-summary').textContent = `${successSummary} · 活跃 ${serviceStatus.activeRequests}${inference}${httpConnections}${adminMutations}${adminDiscoveries} · 平均 ${formatDuration(serviceStatus.averageDuration)}${upstreamTiming} · ${serviceStatus.memoryMb} MiB${serviceStatus.logPersistenceError ? ' · 日志异常' : ''}${serviceStatus.statsPersistenceError ? ' · 统计异常' : ''}${statusStale ? ' · 状态未更新' : ''}${logsStale ? ' · 日志未更新' : ''}`;
+    $('#request-summary').title = [serviceStatus.logPersistenceError, serviceStatus.statsPersistenceError].filter(Boolean).join('；');
   } else {
     $('#request-summary').textContent = `运行状态暂不可用${logsStale ? ' · 日志未更新' : ''}`;
     $('#request-summary').title = dataSourceFailures.get('运行状态') || '';
@@ -272,6 +272,7 @@ async function refresh() {
     }
     $('#requestLogLimit').value = config.requestLogLimit;
     $('#persistLogs').checked = Boolean(config.persistLogs);
+    $('#statsRetentionDays').value = config.statsRetentionDays || 7;
     $('#bridgeWebSearchEnabled').checked = config.bridgeWebSearchEnabled !== false;
     $('#bridgeWebSearchProvider').value = config.bridgeWebSearchProvider || 'auto';
     $('#upstreamTimeoutMs').value = config.upstreamTimeoutMs;
@@ -503,7 +504,7 @@ function updateCooldownCountdowns() {
 }
 
 function renderStatsRows(selector, items) {
-  $(selector).innerHTML = items.length ? items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${formatNumber(item.requests)}</td><td>${formatPercentage(item.successRate)}</td><td>${formatNumber(item.totalTokens)}</td><td>${formatPercentage(item.cacheReadRate)}</td><td>${renderLatency(item)}</td></tr>`).join('') : '<tr><td colspan="6" class="stats-empty">暂无数据</td></tr>';
+  $(selector).innerHTML = items.length ? items.map((item) => `<tr><td class="stats-dimension" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td><td>${formatNumber(item.requests)}</td><td>${formatPercentage(item.successRate)}</td><td>${formatNumber(item.totalTokens)}</td><td>${formatPercentage(item.cacheReadRate)}</td><td>${renderLatency(item)}</td></tr>`).join('') : '<tr><td colspan="6" class="stats-empty">暂无数据</td></tr>';
 }
 
 function renderCredentialRows(history, health) {
@@ -546,7 +547,8 @@ function renderTimeline(timeline) {
   const maximumRequests = Math.max(0, ...buckets.map((item) => item.requests));
   const maximumTokens = Math.max(0, ...buckets.map((item) => item.totalTokens));
   const formatter = new Intl.DateTimeFormat('zh-CN', timeline?.bucket === 'hour' ? { hour: '2-digit', minute: '2-digit' } : { month: 'numeric', day: 'numeric' });
-  $('#stats-trend-range').textContent = timeline?.range === '24h' ? '最近 24 小时 · 每小时' : timeline?.range === '7d' ? '最近 7 天 · 每日' : '最近 14 天 · 每日';
+  const dailyRange = Number.parseInt(timeline?.range, 10) || buckets.length || 7;
+  $('#stats-trend-range').textContent = timeline?.range === '24h' ? '最近 24 小时 · 每小时' : `最近 ${dailyRange} 天 · 每日`;
   $('#stats-trend').innerHTML = buckets.map((item) => {
     const label = formatter.format(new Date(item.start));
     const phaseDetail = [
@@ -597,9 +599,11 @@ function renderStats(stats) {
   meter.setAttribute('aria-label', totalInput
     ? `缓存读取 ${readShare.toFixed(1)}%，未缓存 ${uncachedShare.toFixed(1)}%；缓存写入 ${writeShare.toFixed(1)}% 为独立指标`
     : '尚无输入 Token，暂无缓存用量');
-  const range = stats.window === 'all' ? '全部保留记录' : stats.window === '24h' ? '最近 24 小时' : '最近 7 天';
-  const trendRange = stats.timeline?.range === '24h' ? '最近 24 小时' : stats.timeline?.range === '7d' ? '最近 7 天' : '最近 14 天';
-  $('#stats-scope').textContent = `指标与分组：${range} · 趋势：${trendRange} · 当前共保留 ${formatNumber(stats.retainedRequests)} 条元数据 · 生成于 ${new Date(stats.generatedAt).toLocaleString()}`;
+  const retentionDays = Number(stats.retentionDays) || 7;
+  const range = stats.window === 'all' ? `保留期内全部（${retentionDays} 天）` : stats.window === '24h' ? '最近 24 小时' : '最近 7 天';
+  const trendRange = stats.timeline?.range === '24h' ? '最近 24 小时' : `最近 ${Number.parseInt(stats.timeline?.range, 10) || stats.timeline?.buckets?.length || retentionDays} 天`;
+  $('#stats-scope').textContent = `指标与分组：${range} · 趋势：${trendRange} · 持久化保留 ${formatNumber(stats.retainedRequests)} 条统计元数据 · 生成于 ${new Date(stats.generatedAt).toLocaleString()}${stats.persistenceError ? ' · 统计持久化异常' : ''}`;
+  $('#stats-scope').title = stats.persistenceError || '';
   renderStatsRows('#stats-provider-rows', stats.byProvider);
   renderCredentialRows(stats.byCredential, stats.credentialHealth);
   renderStatsRows('#stats-model-rows', stats.byModel);
@@ -609,7 +613,8 @@ function renderStats(stats) {
 }
 
 async function refreshStats(signal) {
-  return api(`/api/stats?window=${encodeURIComponent($('#stats-window').value)}`, { signal });
+  const timezoneOffsetMinutes = new Date().getTimezoneOffset();
+  return api(`/api/stats?window=${encodeURIComponent($('#stats-window').value)}&timezoneOffsetMinutes=${timezoneOffsetMinutes}`, { signal });
 }
 
 function formatPercentage(value) {
@@ -890,7 +895,7 @@ $('#settings-form').addEventListener('submit', async (event) => {
     const payload = configPayload({
       defaultProvider: $('#defaultProvider').value,
       clientToken: $('#clientToken').value,
-      requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, bridgeWebSearchEnabled: $('#bridgeWebSearchEnabled').checked, bridgeWebSearchProvider: $('#bridgeWebSearchProvider').value, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), upstreamStreamIdleTimeoutMs: Number($('#upstreamStreamIdleTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes,
+      requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, statsRetentionDays: Number($('#statsRetentionDays').value), bridgeWebSearchEnabled: $('#bridgeWebSearchEnabled').checked, bridgeWebSearchProvider: $('#bridgeWebSearchProvider').value, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), upstreamStreamIdleTimeoutMs: Number($('#upstreamStreamIdleTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes,
       ...keepAliveOverrides
     });
     if ($('#proxyUrl').value.trim()) payload.proxyUrl = $('#proxyUrl').value.trim();
@@ -906,6 +911,7 @@ function configPayload(overrides = {}) {
     promptRewriteRules: config.promptRewriteRules || [],
     requestLogLimit: config.requestLogLimit,
     persistLogs: Boolean(config.persistLogs),
+    statsRetentionDays: config.statsRetentionDays || 7,
     bridgeWebSearchEnabled: config.bridgeWebSearchEnabled !== false,
     bridgeWebSearchProvider: config.bridgeWebSearchProvider || 'auto',
     upstreamTimeoutMs: config.upstreamTimeoutMs,
