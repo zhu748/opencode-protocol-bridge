@@ -3994,7 +3994,10 @@ export function formatRequest(request, protocol, options = {}) {
   const promptCacheEnabled = supportsModernOpenAiPromptCache(request.model);
   const initialMessages = request.systemMessages?.length
     ? request.systemMessages.map((item) => {
-      const role = item.role === 'developer' ? 'developer' : 'system';
+      // OpenCode Go's Chat schema does not accept OpenAI's newer `developer`
+      // role. Preserve the instruction and its position using the closest
+      // portable Chat role instead of letting the upstream reject the body.
+      const role = 'system';
       if (promptCacheEnabled && (item.promptCacheBreakpoint || item.cacheControl)) {
         return { role, content: [{ type: 'text', text: item.text, prompt_cache_breakpoint: item.promptCacheBreakpoint || { mode: 'explicit' } }] };
       }
@@ -4091,7 +4094,7 @@ export function formatRequest(request, protocol, options = {}) {
       });
     }
     if (text || refusal || images.length || files.length || calls.length || preserveReasoningField || reasoningDetails.length) appendChatAssistantMessage(messages, {
-      role: message.role,
+      role: message.role === 'developer' ? 'system' : message.role,
       content: images.length || files.length || hasCacheControl ? richContent : (text || null),
       ...(refusal ? { refusal } : {}),
       ...(message.role === 'assistant' && reasoningContentSupported && (reasoning || calls.length) ? { reasoning_content: reasoning || 'tool call' } : {}),

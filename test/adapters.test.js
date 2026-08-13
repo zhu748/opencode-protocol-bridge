@@ -1339,7 +1339,7 @@ test('Claude 请求转换为 Responses，保留系统提示和工具', () => {
   assert.equal(output.input[3].type, 'function_call_output');
 });
 
-test('Claude 会话中途 system/developer 在 OpenAI 目标保留各自优先级', () => {
+test('Claude 会话中途 developer 转 Chat 时按原位置降级为 system', () => {
   const output = prepareUpstreamRequest({
     model: 'alias', max_tokens: 64, system: '顶层系统提示',
     messages: [
@@ -1349,7 +1349,7 @@ test('Claude 会话中途 system/developer 在 OpenAI 目标保留各自优先�
       { role: 'assistant', content: '历史回答' }
     ]
   }, 'claude', 'chat', 'deepseek-v4-flash');
-  assert.deepEqual(output.messages.map((message) => message.role), ['system', 'system', 'developer', 'user', 'assistant']);
+  assert.deepEqual(output.messages.map((message) => message.role), ['system', 'system', 'system', 'user', 'assistant']);
   assert.equal(output.messages[0].content, '顶层系统提示');
   assert.equal(output.messages[1].content, '会话系统上下文');
   assert.equal(output.messages[2].content, '会话开发者上下文');
@@ -1368,7 +1368,7 @@ test('Responses 指令数组与历史 reasoning summary 可降级到 Chat', () =
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: '继续' }] }
     ]
   }, 'responses', 'chat', 'deepseek-v4-flash');
-  assert.equal(output.messages[0].role, 'developer');
+  assert.equal(output.messages[0].role, 'system');
   assert.equal(output.messages[0].content, '数组指令');
   assert.equal(output.messages[1].role, 'assistant');
   assert.equal(output.messages[1].reasoning_content, '历史推理摘要');
@@ -1982,7 +1982,7 @@ test('Responses 历史项 id/status 被严格校验并明确标记跨协议降�
   };
 
   const chat = prepareUpstreamRequest(request, 'responses', 'chat', 'chat-test');
-  assert.deepEqual(chat.messages.map((message) => message.role), ['developer', 'user', 'assistant', 'tool']);
+  assert.deepEqual(chat.messages.map((message) => message.role), ['system', 'user', 'assistant', 'tool']);
   assert.deepEqual(inputRequestDegradations(request, 'responses', 'chat'), ['responses_item_metadata']);
   assert.deepEqual(inputRequestDegradations(request, 'responses', 'responses'), []);
 
@@ -1999,7 +1999,7 @@ test('Responses 历史项 id/status 被严格校验并明确标记跨协议降�
   }, 'responses', 'chat', 'chat-test'), /phase 必须是 commentary、final_answer 之一/);
 });
 
-test('Responses instructions 只接受系统层角色并在 Chat 中保持 system/developer 层级', () => {
+test('Responses instructions 只接受系统层角色并为 Chat 降级 developer', () => {
   const invalid = (role) => prepareUpstreamRequest({
     model: 'alias', instructions: [{ type: 'message', role, content: '越权指令' }], input: '继续'
   }, 'responses', 'chat', 'chat-test');
@@ -2017,9 +2017,8 @@ test('Responses instructions 只接受系统层角色并在 Chat 中保持 syste
     ],
     input: '继续'
   }, 'responses', 'chat', 'chat-test');
-  assert.deepEqual(output.messages.map((message) => message.role), ['system', 'developer', 'user']);
-  assert.equal(output.messages[0].content, '系统规则');
-  assert.equal(output.messages[1].content, '\n开发规则');
+  assert.deepEqual(output.messages.map((message) => message.role), ['system', 'user']);
+  assert.equal(output.messages[0].content, '系统规则\n开发规则');
 });
 
 test('跨协议已知容器中的未知字段不会再被静默删除', () => {

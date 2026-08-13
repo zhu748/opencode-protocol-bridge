@@ -445,6 +445,8 @@ Zen 当前原生端点按官方端点表分为四类：
 
 ## 当前边界
 
+> Chat 角色兼容：下文所述 `developer` 原角色保留仅适用于目标为 Responses；目标为 Chat 时，桥接会把 `developer` 在原位置转换为 `system`，正文与消息顺序不变。这与 Console Go 当前只接受 `system/user/assistant/tool/latest_reminder` 的消息枚举兼容，可避免 Codex 的 Responses `instructions` 被转换为上游无法反序列化的请求。
+
 - 跨协议非流式转换会逐项校验 Responses output（包括 item 类型/ID 与 reasoning `encrypted_content`）、Chat/Claude 工具调用、工具参数 JSON 和 Gemini/Chat 候选数量；损坏输出或意外多候选会作为 502 上游结构错误返回，不会落成普通运行时异常，也不会只取第一项后静默丢弃其余结果。同协议成功响应仍保留厂商扩展字段。
 - 跨协议 Chat SSE 同样只接受单个 `index=0` 候选，并严格校验 choices、delta、分段文本、reasoning details、旧式 function_call 与 tool_calls 增量的形状；多候选、非零索引和损坏增量会返回目标协议错误帧，不会被重编号、跳过或转成空内容。同协议 Chat SSE 仍保持字节级透传和宽松用量观察，不会因新增厂商扩展而中断。
 - Chat、Responses 或 Claude 上游的流式工具参数会在工具块结束时统一解析并确认是 JSON 对象；损坏 JSON、数组、`null` 或其它标量不会再以成功工具调用结束。该校验对 Claude、Responses、Chat 和 Gemini 四种客户端输出都生效，并保留 `UPSTREAM_INVALID_TOOL_ARGUMENTS` 错误码及原有稳定错误文案。

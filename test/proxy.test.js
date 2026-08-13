@@ -1055,7 +1055,8 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.body.model, 'deepseek-v4-flash');
     assert.equal(captured.body.client_metadata, undefined);
     assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['multi_agent_v1__spawn_agent']);
-    assert.match(captured.body.messages.find((message) => message.role === 'developer').content, /cannot execute the hosted web_search tool/);
+    assert.equal(captured.body.messages.some((message) => message.role === 'developer'), false);
+    assert.match(captured.body.messages.find((message) => message.role === 'system').content, /cannot execute the hosted web_search tool/);
     assert.equal(captured.body.messages.find((message) => message.role === 'assistant').reasoning_content, '先检查任务边界');
     const codexLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
     assert.equal(codexLog.protocol, 'responses → chat (web_search unavailable, reasoning degraded, responses client metadata dropped, responses item metadata degraded, reasoning_summary_best_effort_chat adapted, reasoning_history_to_chat_reasoning_content adapted)');
