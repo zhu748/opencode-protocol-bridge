@@ -1009,7 +1009,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
         model: 'chat-alias',
         instructions: '代理规则', metadata: { trace: 'codex-cross' },
         max_output_tokens: 512, temperature: 0.4, top_p: 0.8,
-        reasoning: { summary: 'auto' }, store: false, truncation: 'disabled',
+        reasoning: { effort: 'max', summary: 'auto' }, store: false, truncation: 'disabled',
         text: { verbosity: 'low' }, user: 'legacy-user', safety_identifier: 'safe-user',
         client_metadata: { 'x-codex-turn-metadata': '{"session_id":"session_probe"}' },
         input: [
@@ -1044,7 +1044,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(codexBody.max_output_tokens, 512);
     assert.equal(codexBody.temperature, 0.4);
     assert.equal(codexBody.top_p, 0.8);
-    assert.deepEqual(codexBody.reasoning, { summary: 'auto' });
+    assert.deepEqual(codexBody.reasoning, { effort: 'max', summary: 'auto' });
     assert.deepEqual(codexBody.text, { verbosity: 'low' });
     assert.equal(codexBody.store, false);
     assert.equal(codexBody.truncation, 'disabled');
@@ -1053,6 +1053,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.ok(Number.isSafeInteger(codexBody.completed_at));
     assert.equal(captured.path, '/chat/completions');
     assert.equal(captured.body.model, 'deepseek-v4-flash');
+    assert.equal(captured.body.reasoning_effort, 'max');
     assert.equal(captured.body.client_metadata, undefined);
     assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['multi_agent_v1__spawn_agent']);
     assert.equal(captured.body.messages.some((message) => message.role === 'developer'), false);
@@ -1060,6 +1061,12 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.body.messages.find((message) => message.role === 'assistant').reasoning_content, '先检查任务边界');
     const codexLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
     assert.equal(codexLog.protocol, 'responses → chat (web_search unavailable, reasoning degraded, responses client metadata dropped, responses item metadata degraded, reasoning_summary_best_effort_chat adapted, reasoning_history_to_chat_reasoning_content adapted)');
+    assert.equal(codexLog.requestedReasoningEffort, 'max');
+    assert.equal(codexLog.reasoningEffort, 'max');
+    const effortStats = await fetch(`http://127.0.0.1:${bridgePort}/api/stats`, { headers: { cookie } }).then((result) => result.json());
+    assert.ok(effortStats.byReasoningEffort.some((item) => item.name === 'max' && item.requests >= 1));
+    assert.ok(effortStats.summary.reasoningEffortPreservedRequests >= 1);
+    assert.equal(effortStats.summary.reasoningEffortDroppedRequests, 0);
 
     const requestsBeforeStatefulInput = upstreamRequestCount;
     const statefulResponses = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {

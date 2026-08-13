@@ -228,6 +228,10 @@ function sanitizeStatsEntry(entry) {
     duration: number(entry.duration),
     stream: Boolean(entry.stream)
   };
+  const requestedReasoningEffort = entry.requestedReasoningEffort;
+  const reasoningEffort = entry.reasoningEffort;
+  if (requestedReasoningEffort) sanitized.requestedReasoningEffort = text(requestedReasoningEffort, 64);
+  if (reasoningEffort) sanitized.reasoningEffort = text(reasoningEffort, 64);
   for (const field of [
     'upstreamWaitMs', 'upstreamBodyMs', 'inputTokens', 'outputTokens', 'cachedInputTokens',
     'cacheCreationInputTokens', 'cacheCreation5mInputTokens', 'cacheCreation1hInputTokens', 'reasoningTokens'

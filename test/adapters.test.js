@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiGroundingMetadata, geminiToolNameAliases, hasUsageData, reasoningRequestAdaptations, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, claudeToolAdaptations, responsesToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations } from '../src/adapters.js';
+import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiGroundingMetadata, geminiToolNameAliases, hasUsageData, reasoningRequestAdaptations, requestReasoningEffort, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, claudeToolAdaptations, responsesToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations } from '../src/adapters.js';
 import { decodeReasoningState, encodeReasoningStateBundle } from '../src/reasoning-state.js';
 
 test('识别四种兼容端点', () => {
@@ -3075,6 +3075,7 @@ test('Claude thinking 与 output_config 转为 OpenAI reasoning effort', () => {
     messages: [{ role: 'user', content: '分析' }]
   }, 'claude', 'chat', 'deepseek-v4-flash');
   assert.equal(deepSeekMaximum.reasoning_effort, 'max');
+  assert.equal(requestReasoningEffort(deepSeekMaximum, 'chat'), 'max');
   assert.deepEqual(reasoningRequestAdaptations({
     thinking: { type: 'adaptive', display: 'omitted' }, output_config: { effort: 'max' }
   }, 'claude', 'chat', 'deepseek-v4-flash'), []);
@@ -3084,6 +3085,21 @@ test('Claude thinking 与 output_config 转为 OpenAI reasoning effort', () => {
     messages: [{ role: 'user', content: '分析' }]
   }, 'claude', 'chat', 'deepseek-v4-flash-free');
   assert.equal('reasoning_effort' in unsupported, false);
+
+  const codexMaximum = prepareUpstreamRequest({
+    model: 'gpt5.5', reasoning: { effort: 'max', summary: 'auto' }, input: '分析'
+  }, 'responses', 'chat', 'deepseek-v4-flash');
+  assert.equal(codexMaximum.reasoning_effort, 'max');
+  assert.equal(requestReasoningEffort(codexMaximum, 'chat'), 'max');
+});
+
+test('思考强度日志标签拒绝畸形值并识别 Gemini 动态预算', () => {
+  assert.equal(requestReasoningEffort({ reasoning: { effort: ' max ' } }, 'responses'), 'max');
+  assert.equal(requestReasoningEffort({ reasoning: { effort: 'max\n伪造日志' } }, 'responses'), undefined);
+  assert.equal(requestReasoningEffort({ thinking: { type: 'enabled', budget_tokens: '4096' } }, 'claude'), undefined);
+  assert.equal(requestReasoningEffort({ thinking: { type: 'enabled', budget_tokens: 4096 } }, 'claude'), 'budget:4096');
+  assert.equal(requestReasoningEffort({ generationConfig: { thinkingConfig: { thinkingBudget: -1 } } }, 'gemini'), 'adaptive');
+  assert.equal(requestReasoningEffort({ generationConfig: { thinkingConfig: { thinkingBudget: 0 } } }, 'gemini'), 'none');
 });
 
 test('DeepSeek 工具历史保留 reasoning_content 并提供兼容兜底', () => {

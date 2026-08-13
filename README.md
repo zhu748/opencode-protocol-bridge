@@ -14,7 +14,7 @@
 - 每个 Zen / Go Key 可独立配置 HTTP、HTTPS、SOCKS4、SOCKS4a、SOCKS5、SOCKS5h、Clash/mihomo mixed-port，或由 sing-box 托管的 hy2 / TUIC / VLESS / VMess / Trojan / Shadowsocks / Hysteria 分享链接
 - 工具调用、工具结果、并行工具开关、文本消息、图片精度字段，以及 Claude Documents 与 Responses 文件块转换；Codex Responses `namespace` 工具可跨协议桥接到 Chat/Claude；Claude Code 的 typed `web_search_YYYYMMDD` 和内置客户端 `WebSearch` 可在 Chat 路由通过本地 Exa/Parallel MCP 工具循环执行
 - Claude thinking、Responses reasoning 摘要与 Chat reasoning_content 转换
-- Claude thinking/output effort、Gemini thinkingConfig 与 OpenAI reasoning 的模型感知映射
+- Claude thinking/output effort、Gemini thinkingConfig 与 OpenAI reasoning 的模型感知映射；请求日志同时记录客户端与最终上游思考强度，统计页可按最终强度分组
 - Claude `speed: standard|fast` 与 OpenAI/OpenCode `service_tier: default|fast` 双向映射；其它容量层明确拒绝，不冒充速度配置
 - Claude 新版 `compaction` 内容块支持非流式与流式转换：摘要可见传递，桥接生成的加密压缩状态可在客户端续轮后逐字恢复
 - DeepSeek / Kimi / Moonshot 工具历史 reasoning_content 兼容
@@ -447,6 +447,8 @@ Zen 当前原生端点按官方端点表分为四类：
 
 > Chat 角色兼容：下文所述 `developer` 原角色保留仅适用于目标为 Responses；目标为 Chat 时，桥接会把 `developer` 在原位置转换为 `system`，正文与消息顺序不变。这与 Console Go 当前只接受 `system/user/assistant/tool/latest_reminder` 的消息枚举兼容，可避免 Codex 的 Responses `instructions` 被转换为上游无法反序列化的请求。
 
+> 思考强度可观测性：路由到 DeepSeek V4 Flash / Pro Chat 上游时，Responses `reasoning.effort: "max"` 会转换为顶层 `reasoning_effort: "max"`。请求记录分别保存客户端请求值和最终上游值，发生近似映射时显示为 `max → high`；用量统计按最终实际发送的强度分组，未携带强度的请求单独归为“未指定”。
+
 - 跨协议非流式转换会逐项校验 Responses output（包括 item 类型/ID 与 reasoning `encrypted_content`）、Chat/Claude 工具调用、工具参数 JSON 和 Gemini/Chat 候选数量；损坏输出或意外多候选会作为 502 上游结构错误返回，不会落成普通运行时异常，也不会只取第一项后静默丢弃其余结果。同协议成功响应仍保留厂商扩展字段。
 - 跨协议 Chat SSE 同样只接受单个 `index=0` 候选，并严格校验 choices、delta、分段文本、reasoning details、旧式 function_call 与 tool_calls 增量的形状；多候选、非零索引和损坏增量会返回目标协议错误帧，不会被重编号、跳过或转成空内容。同协议 Chat SSE 仍保持字节级透传和宽松用量观察，不会因新增厂商扩展而中断。
 - Chat、Responses 或 Claude 上游的流式工具参数会在工具块结束时统一解析并确认是 JSON 对象；损坏 JSON、数组、`null` 或其它标量不会再以成功工具调用结束。该校验对 Claude、Responses、Chat 和 Gemini 四种客户端输出都生效，并保留 `UPSTREAM_INVALID_TOOL_ARGUMENTS` 错误码及原有稳定错误文案。
@@ -488,7 +490,7 @@ Zen 当前原生端点按官方端点表分为四类：
 - DeepSeek V4 Flash / V4 Flash Free 的 Chat 工具调用在未显式请求推理时会自动设置 `reasoning_effort: "none"`，避免模型默认 Thinking 模式拒绝工具；客户端显式启用 Claude thinking 时不会静默覆盖其选择。DeepSeek V4 Flash / Pro 支持的 `high` / `max` 强度会从 Claude Code `output_config.effort` 转成顶层 `reasoning_effort` 原样发给 Chat 上游；真实 Claude Code 隔离探针会强制验证 `max` 不被丢弃。对配置中选中的文本模型，桥接服务监听本机回环地址时会将 Claude base64 图片暂存到当前进程的系统临时目录，并把绝对路径作为文本交给 Claude Code 的 vision 技能；本地附件默认在最后使用 24 小时后删除，正常退出会清理全部副本。Render Web Service 会校验平台提供的 `RENDER_EXTERNAL_HOSTNAME` 并默认生成 15 分钟有效的随机附件 URL，其它远程部署或自定义域名可配置 `OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL`，提示客户端先下载到本机临时文件再调用 vision 技能。远程基址不可用或显式关闭交接时，图片会替换为明确的“图片未发送”文本提示，历史消息中的图片也会处理，以避免文本上游因图片内容块返回 400。短时 URL 是无需额外请求头的能力链接，请只在可信的 HTTPS 部署中启用；如果没有可读取本机文件或下载 URL 的 vision 技能，请改用原生支持视觉输入的模型。
 - 请求日志默认仅保存在内存中；管理面板可启用有界持久化，文件为 `data/request-logs.json`。日志不包含提示词、响应正文或密钥，启动时的并发请求只共享一次旧日志加载，写盘会在短时间窗口内合并，并在管理读取或服务正常退出时强制刷新；配置和日志都通过独占临时文件、文件同步与原子重命名落盘，普通写入失败会立即清理临时副本，异常退出遗留的固定副本会在下次加载时清理。临时写盘失败会保留内存中的待写状态供下次刷新重试。关闭持久化会取消尚未执行的延迟写盘，但不会自动删除已有文件；需要删除历史内容时再点击“清空记录”。请求记录列表会直接显示使用的 Key 槽位、面板 Key 名称和自动切换尝试次数，并支持按这些字段筛选，便于把 401/429/代理错误关联到具体 Key。
 - 用量统计不再从有界请求日志推算，而是始终把最小化元数据独立持久化到 `data/request-stats.json`，因此日志只保留 100 条时统计总数仍可继续增长，清空日志也不会清空统计。统计默认保留 7 天，可在“连接设置”中设为 1–365 天；读取、写入和修改保留期时都会自动删除过期项。“保留期内全部”与首页运行摘要均以这份数据为准，趋势图最多展示最近 14 天，并按浏览器本地时区的自然日切分。升级后首次读取统计时，会把当时仍保留的旧请求日志去重迁移进统计文件。统计文件只保存时间、状态、耗时、用量及分组所需的模型/协议/Key 槽位等字段，不保存提示词、响应正文、错误正文、上游请求 ID 或密钥；高频请求会在短时间窗口内合并，并以紧凑 JSON 原子写盘，减少磁盘写放大。
-- 管理面板“用量统计”按全部记录、最近 24 小时或最近 7 天汇总请求数、成功率、自动 Key 切换次数、平均/P95 耗时以及输入、输出、缓存读取、缓存写入和推理 token，并可按上游、实际模型、协议转换、客户端和 Key 槽位拆分；每个分组同时显示总耗时、上游等待和响应体阶段的平均/P95，时间趋势悬浮提示会显示该时段的平均阶段耗时。上游等待累计所有 Key 尝试中的连接、排队与等待响应头时间，响应体阶段从最终响应头到完成响应体读取与转换，流式请求还包含向客户端传输及背压等待。Key 表还展示当前健康状态、连续失败、冷却截止时间、实时剩余时间与最近事件。Key 统计只保存“环境变量编号/面板 Key”等安全标识，不保存密钥内容。请求记录会同时显示本地请求 ID、最终上游请求 ID、限流等待时间和安全错误码；连接超时、响应超时、DNS、拒绝连接、意外断连与 TLS 故障会分开标识，不回显底层 URL 或代理凭据。日志支持按关键词、错误码、时间、上游、成功/4xx/429/5xx 组合筛选，可复制两类请求 ID，并能将当前筛选结果导出为防公式注入的 UTF-8 CSV，便于关联排障。页面提供最近 24 小时、7 天或 14 天的请求/Token 趋势。统计会统一 OpenAI“缓存读取是输入子集、缓存写入为独立指标”和 Claude“缓存创建字段独立于普通输入”的两种 usage 口径：缓存写入不再从 OpenAI 的未缓存输入中重复扣除。跨协议响应和统计会把上游 usage 的数字字符串规范为整数，拒绝负数、非整数与非有限值，并将极端大值钳制到安全整数范围；同协议响应正文仍原样透传。统计只基于当前最多 1000 条保留日志；推理 token 是输出 token 的明细项，不会重复加总。上游没有返回有效 usage 时会计入“缺失用量”的请求数。由于 OpenCode 各模型的缓存价格会变化，面板不估算账单金额，应以 OpenCode 官方账单为准。
+- 管理面板“用量统计”按全部记录、最近 24 小时或最近 7 天汇总请求数、成功率、自动 Key 切换次数、平均/P95 耗时以及输入、输出、缓存读取、缓存写入和推理 token，并可按上游、实际模型、最终思考强度、协议转换、客户端和 Key 槽位拆分；思考强度区域还会汇总原样传递、跨协议转换、未传递和桥接注入的请求数，便于确认 Codex/Claude Code 的强度设置是否真正到达上游。每个分组同时显示总耗时、上游等待和响应体阶段的平均/P95，时间趋势悬浮提示会显示该时段的平均阶段耗时。上游等待累计所有 Key 尝试中的连接、排队与等待响应头时间，响应体阶段从最终响应头到完成响应体读取与转换，流式请求还包含向客户端传输及背压等待。Key 表还展示当前健康状态、连续失败、冷却截止时间、实时剩余时间与最近事件。Key 统计只保存“环境变量编号/面板 Key”等安全标识，不保存密钥内容。请求记录会同时显示本地请求 ID、最终上游请求 ID、限流等待时间和安全错误码；连接超时、响应超时、DNS、拒绝连接、意外断连与 TLS 故障会分开标识，不回显底层 URL 或代理凭据。日志支持按关键词、错误码、时间、上游、成功/4xx/429/5xx 组合筛选，可复制两类请求 ID，并能将当前筛选结果导出为防公式注入的 UTF-8 CSV，便于关联排障。页面提供最近 24 小时、7 天或 14 天的请求/Token 趋势。统计会统一 OpenAI“缓存读取是输入子集、缓存写入为独立指标”和 Claude“缓存创建字段独立于普通输入”的两种 usage 口径：缓存写入不再从 OpenAI 的未缓存输入中重复扣除。跨协议响应和统计会把上游 usage 的数字字符串规范为整数，拒绝负数、非整数与非有限值，并将极端大值钳制到安全整数范围；同协议响应正文仍原样透传。统计数据来自独立的保留期存储，不受请求日志 100 条显示上限影响；推理 token 是输出 token 的明细项，不会重复加总。上游没有返回有效 usage 时会计入“缺失用量”的请求数。由于 OpenCode 各模型的缓存价格会变化，面板不估算账单金额，应以 OpenCode 官方账单为准。
 - 管理面板只有配置读取是启动强依赖；请求日志、运行状态、客户端列表、用量统计或 Claude 提示词快照短暂失败时，页面会继续显示上一次成功数据，并在顶部列出未更新的数据源。后续刷新成功会自动清除对应告警。
 
 ## 安全建议

@@ -16,6 +16,8 @@ test('统计存储不受 100 条日志上限影响并可由新实例恢复', asy
         requestId: `stats-${index}`,
         time: new Date(now - index * 1000).toISOString(),
         status: 200,
+        requestedReasoningEffort: 'max',
+        reasoningEffort: 'max',
         inputTokens: index,
         prompt: '绝不能写入',
         error: '上游错误正文也不能写入',
@@ -34,6 +36,8 @@ test('统计存储不受 100 条日志上限影响并可由新实例恢复', asy
     assert.equal(reloaded.size, 250);
     assert.ok(reloaded.version > 0);
     assert.equal([...reloaded.values()][0].requestId, 'stats-0');
+    assert.equal([...reloaded.values()][0].requestedReasoningEffort, 'max');
+    assert.equal([...reloaded.values()][0].reasoningEffort, 'max');
   } finally {
     await unlink(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
   }

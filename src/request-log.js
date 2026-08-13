@@ -178,6 +178,8 @@ function sanitizeEntry(entry) {
   const reasoningTokens = entry.reasoningTokens;
   const bridgeWebSearchCalls = entry.bridgeWebSearchCalls;
   const responseDegradations = entry.responseDegradations;
+  const requestedReasoningEffort = entry.requestedReasoningEffort;
+  const reasoningEffort = entry.reasoningEffort;
   const errorCode = entry.errorCode;
   const error = entry.error;
   if (upstreamWaitMs !== undefined) sanitized.upstreamWaitMs = nonNegative(upstreamWaitMs);
@@ -192,6 +194,8 @@ function sanitizeEntry(entry) {
   if (reasoningTokens) sanitized.reasoningTokens = nonNegative(reasoningTokens);
   if (bridgeWebSearchCalls !== undefined) sanitized.bridgeWebSearchCalls = nonNegative(bridgeWebSearchCalls, 8);
   if (responseDegradations) sanitized.responseDegradations = text(responseDegradations, 512);
+  if (requestedReasoningEffort) sanitized.requestedReasoningEffort = text(requestedReasoningEffort, 64);
+  if (reasoningEffort) sanitized.reasoningEffort = text(reasoningEffort, 64);
   if (errorCode) sanitized.errorCode = text(errorCode, 64);
   if (error) sanitized.error = text(error, 500);
   return sanitized;

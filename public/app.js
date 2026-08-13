@@ -465,6 +465,9 @@ function renderLogs() {
     const responseDegradations = item.responseDegradations
       ? `<small class="log-response-degradations" title="${escapeHtml(item.responseDegradations)}">响应元数据降级：${escapeHtml(item.responseDegradations)}</small>`
       : '';
+    const reasoningEffort = item.reasoningEffort
+      ? `<small class="log-reasoning-effort">思考强度：${escapeHtml(item.requestedReasoningEffort && item.requestedReasoningEffort !== item.reasoningEffort ? `${item.requestedReasoningEffort} → ${item.reasoningEffort}` : item.reasoningEffort)}</small>`
+      : item.requestedReasoningEffort ? `<small class="log-reasoning-effort">思考强度：${escapeHtml(item.requestedReasoningEffort)} → 未传递</small>` : '';
     const bridgeWebSearch = item.bridgeWebSearchCalls
       ? `<small class="log-web-search">本地 Web Search：${formatNumber(item.bridgeWebSearchCalls)} 次</small>`
       : '';
@@ -473,7 +476,7 @@ function renderLogs() {
       Object.hasOwn(item, 'upstreamBodyMs') ? `响应体 ${formatDuration(item.upstreamBodyMs)}` : ''
     ].filter(Boolean).join(' · ');
     const timing = `${formatDuration(item.duration)}${phases ? `<small class="log-timing">${phases}</small>` : ''}`;
-    return `<tr><td>${escapeHtml(new Date(item.time).toLocaleString())}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}${bridgeWebSearch}${responseDegradations}</td><td class="${statusClass}">${formatNumber(item.status)}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
+    return `<tr><td>${escapeHtml(new Date(item.time).toLocaleString())}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}${reasoningEffort}${bridgeWebSearch}${responseDegradations}</td><td class="${statusClass}">${formatNumber(item.status)}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
   }).join('');
 }
 
@@ -607,6 +610,12 @@ function renderStats(stats) {
   renderStatsRows('#stats-provider-rows', stats.byProvider);
   renderCredentialRows(stats.byCredential, stats.credentialHealth);
   renderStatsRows('#stats-model-rows', stats.byModel);
+  $('#stats-reasoning-effort-detail').textContent = summary.requestedReasoningEffortRequests
+    ? `${formatNumber(summary.reasoningEffortPreservedRequests)} 条原样传递 · ${formatNumber(summary.reasoningEffortChangedRequests)} 条已转换 · ${formatNumber(summary.reasoningEffortDroppedRequests)} 条未传递${summary.reasoningEffortInjectedRequests ? ` · ${formatNumber(summary.reasoningEffortInjectedRequests)} 条桥接注入` : ''}`
+    : summary.reasoningEffortInjectedRequests
+      ? `${formatNumber(summary.reasoningEffortInjectedRequests)} 条由桥接按兼容性注入；其余请求未显式指定`
+      : '以实际发送给上游的请求字段为准；未携带强度的请求归为“未指定”';
+  renderStatsRows('#stats-reasoning-effort-rows', stats.byReasoningEffort || []);
   renderStatsRows('#stats-protocol-rows', stats.byProtocol);
   renderStatsRows('#stats-client-rows', stats.byClient);
   renderTimeline(stats.timeline);

@@ -4,9 +4,9 @@ import { aggregateRequestStats, summarizeRequestStatus } from '../src/stats.js';
 
 const now = Date.parse('2026-08-04T12:00:00.000Z');
 const logs = [
-  { time: '2026-08-04T11:00:00.000Z', status: 200, duration: 100, upstreamWaitMs: 70, upstreamBodyMs: 20, provider: 'zen', credentialId: 'environment:2', model: 'deepseek-free', upstreamModel: 'deepseek-v4-flash-free', protocol: 'claude → chat', clientName: '工作机', inputTokens: 10, outputTokens: 4, cachedInputTokens: 3, reasoningTokens: 2 },
-  { time: '2026-08-04T10:00:00.000Z', status: 502, duration: 900, upstreamWaitMs: 800, provider: 'go', model: 'deepseek', protocol: 'responses → chat', clientName: '', stream: true },
-  { time: '2026-08-01T10:00:00.000Z', status: 200, duration: 200, upstreamWaitMs: 150, upstreamBodyMs: 40, provider: 'zen', model: 'deepseek-free', protocol: 'chat → chat', clientName: '工作机', inputTokens: 5, outputTokens: 1, cacheCreationInputTokens: 2 }
+  { time: '2026-08-04T11:00:00.000Z', status: 200, duration: 100, upstreamWaitMs: 70, upstreamBodyMs: 20, provider: 'zen', credentialId: 'environment:2', model: 'deepseek-free', upstreamModel: 'deepseek-v4-flash-free', protocol: 'claude → chat', clientName: '工作机', requestedReasoningEffort: 'max', reasoningEffort: 'max', inputTokens: 10, outputTokens: 4, cachedInputTokens: 3, reasoningTokens: 2 },
+  { time: '2026-08-04T10:00:00.000Z', status: 502, duration: 900, upstreamWaitMs: 800, provider: 'go', model: 'deepseek', protocol: 'responses → chat', clientName: '', requestedReasoningEffort: 'max', reasoningEffort: 'high', stream: true },
+  { time: '2026-08-01T10:00:00.000Z', status: 200, duration: 200, upstreamWaitMs: 150, upstreamBodyMs: 40, provider: 'zen', model: 'deepseek-free', protocol: 'chat → chat', clientName: '工作机', reasoningEffort: 'none', inputTokens: 5, outputTokens: 1, cacheCreationInputTokens: 2 }
 ];
 
 test('统计汇总不会重复计算缓存和推理 token', () => {
@@ -20,6 +20,9 @@ test('统计汇总不会重复计算缓存和推理 token', () => {
     usageRequests: 2, missingUsageRequests: 1,
     usageCoverageRate: 66.7, cacheHitRequests: 1, cacheWriteRequests: 1, cacheHitRequestRate: 50,
     credentialAttempts: 3, failoverRequests: 0, failoverAttempts: 0,
+    requestedReasoningEffortRequests: 2, reasoningEffortRequests: 3,
+    reasoningEffortPreservedRequests: 1, reasoningEffortChangedRequests: 1,
+    reasoningEffortDroppedRequests: 0, reasoningEffortInjectedRequests: 1,
     inputTokens: 15, uncachedInputTokens: 12, outputTokens: 5, cachedInputTokens: 3,
     cacheCreationInputTokens: 2, reasoningTokens: 2, cacheReadRate: 20, totalTokens: 20,
     averageTokensPerUsageRequest: 10
@@ -31,6 +34,7 @@ test('统计汇总不会重复计算缓存和推理 token', () => {
   assert.equal(result.byModel[0].p95UpstreamWaitMs, 70);
   assert.equal(result.byModel[0].averageUpstreamBodyMs, 20);
   assert.equal(result.byCredential[0].name, 'ZEN 环境 #2');
+  assert.deepEqual(result.byReasoningEffort.map((item) => [item.name, item.requests]), [['max', 1], ['none', 1], ['high', 1]]);
   assert.equal(result.byClient.find((item) => item.name === '主令牌').requests, 1);
 });
 
@@ -95,11 +99,11 @@ test('单次统计汇总复用缓存与凭据字段读取', () => {
   assert.equal(result.summary.cacheCreationInputTokens, 2);
   assert.equal(result.summary.credentialAttempts, 2);
   assert.equal(result.summary.failoverRequests, 1);
-  assert.equal(cachedInputReads, 1, '总汇总、时间线和五类分组应共享一次缓存字段规范化');
-  assert.equal(cacheCreationReads, 1, '总汇总、时间线和五类分组应共享一次缓存写入字段规范化');
-  assert.equal(credentialAttemptReads, 1, '总汇总和五类分组应共享一次凭据尝试次数规范化');
-  assert.equal(upstreamWaitReads, 1, '总汇总、时间线和五类分组应共享一次上游等待值规范化');
-  assert.equal(upstreamBodyReads, 1, '总汇总、时间线和五类分组应共享一次上游正文耗时规范化');
+  assert.equal(cachedInputReads, 1, '总汇总、时间线和六类分组应共享一次缓存字段规范化');
+  assert.equal(cacheCreationReads, 1, '总汇总、时间线和六类分组应共享一次缓存写入字段规范化');
+  assert.equal(credentialAttemptReads, 1, '总汇总和六类分组应共享一次凭据尝试次数规范化');
+  assert.equal(upstreamWaitReads, 1, '总汇总、时间线和六类分组应共享一次上游等待值规范化');
+  assert.equal(upstreamBodyReads, 1, '总汇总、时间线和六类分组应共享一次上游正文耗时规范化');
   assert.equal(timeReads, 1, '过滤与时间线应共享一次时间戳读取和解析');
 });
 
@@ -128,7 +132,7 @@ test('状态摘要在大日志下不构建时间线、分组、Token 或 p95 数
   for (const field of [
     'provider', 'credentialId', 'credentialLabel', 'upstreamModel', 'model', 'protocol', 'clientName',
     'inputTokens', 'outputTokens', 'cachedInputTokens', 'cacheCreationInputTokens', 'reasoningTokens',
-    'credentialAttempts', 'stream'
+    'credentialAttempts', 'requestedReasoningEffort', 'reasoningEffort', 'stream'
   ]) {
     Object.defineProperty(item, field, {
       get() {
@@ -162,7 +166,7 @@ test('状态摘要在大日志下不构建时间线、分组、Token 或 p95 数
   assert.equal(sortCalls, 0, '状态摘要不应为 p95 排序');
 });
 
-test('五类统计分组共享一次日志数组遍历', () => {
+test('六类统计分组共享一次日志数组遍历', () => {
   const source = [...logs];
   const originalIterator = source[Symbol.iterator].bind(source);
   let sourceIterations = 0;
@@ -177,6 +181,7 @@ test('五类统计分组共享一次日志数组遍历', () => {
   assert.deepEqual(result.byProvider.map((item) => item.name), ['zen', 'go']);
   assert.equal(result.byCredential[0].name, 'ZEN 环境 #2');
   assert.equal(result.byModel[0].name, 'deepseek-v4-flash-free');
+  assert.equal(result.byReasoningEffort[0].name, 'max');
   assert.equal(result.byProtocol[0].name, 'claude → chat');
   assert.equal(result.byClient[0].name, '工作机');
 });
@@ -260,7 +265,7 @@ test('高基数分组先截取展示项再计算完整汇总与 p95', () => {
   assert.equal(result.byModel.at(-1).name, 'model-075');
   assert.equal(result.byModel[0].totalTokens, 100);
   assert.equal(result.byModel[0].p95DurationMs, 100);
-  assert.ok(sortCalls <= 430, `只应完成最终展示的分组，实际排序 ${sortCalls} 次`);
+  assert.ok(sortCalls <= 435, `只应完成最终展示的分组，实际排序 ${sortCalls} 次`);
 });
 
 test('统计请求内 Key 自动切换次数', () => {

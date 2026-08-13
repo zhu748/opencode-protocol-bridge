@@ -37,7 +37,12 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /function renderLatency\(item\)/);
   assert.match(script, /尚无请求数据/);
   assert.match(script, /平均上游等待/);
-  assert.equal((html.match(/耗时（平均 \/ P95）/g) || []).length, 5);
+  assert.equal((html.match(/耗时（平均 \/ P95）/g) || []).length, 6);
+  assert.match(html, /id="stats-reasoning-effort-rows"/);
+  assert.match(html, /id="stats-reasoning-effort-detail"/);
+  assert.match(script, /stats\.byReasoningEffort/);
+  assert.match(script, /reasoningEffortPreservedRequests/);
+  assert.match(script, /思考强度/);
   assert.match(html, /id="data-source-warning"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
   assert.match(script, /loadDataSource\('请求日志'/);
   assert.match(script, /loadDataSource\('运行状态'/);

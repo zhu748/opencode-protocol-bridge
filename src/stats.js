@@ -69,6 +69,7 @@ export function aggregateRequestStats(items, window = 'all', now = Date.now(), {
     byProvider: grouped.byProvider,
     byCredential: grouped.byCredential,
     byModel: grouped.byModel,
+    byReasoningEffort: grouped.byReasoningEffort,
     byProtocol: grouped.byProtocol,
     byClient: grouped.byClient
   };
@@ -157,6 +158,12 @@ function createSummaryState() {
     cacheWriteRequests: 0,
     credentialAttempts: 0,
     failoverRequests: 0,
+    requestedReasoningEffortRequests: 0,
+    reasoningEffortRequests: 0,
+    reasoningEffortPreservedRequests: 0,
+    reasoningEffortChangedRequests: 0,
+    reasoningEffortDroppedRequests: 0,
+    reasoningEffortInjectedRequests: 0,
     upstreamWaitTotal: 0,
     upstreamBodyTotal: 0,
     durations: [],
@@ -175,6 +182,8 @@ function createSummaryState() {
 
 function measureSummaryItem(item) {
   const usage = tokenUsage(item);
+  const requestedReasoningEffort = typeof item.requestedReasoningEffort === 'string' ? item.requestedReasoningEffort : '';
+  const reasoningEffort = typeof item.reasoningEffort === 'string' ? item.reasoningEffort : '';
   return {
     successful: item.status >= 200 && item.status < 400,
     duration: count(item.duration),
@@ -190,7 +199,9 @@ function measureSummaryItem(item) {
       || Object.hasOwn(item, 'cachedInputTokens') || Object.hasOwn(item, 'cacheCreationInputTokens')
       || Object.hasOwn(item, 'reasoningTokens'),
     attempts: count(item.credentialAttempts),
-    stream: Boolean(item.stream)
+    stream: Boolean(item.stream),
+    requestedReasoningEffort,
+    reasoningEffort
   };
 }
 
@@ -221,6 +232,13 @@ function addSummaryMeasurement(state, item, timelineState, timestamp) {
   state.credentialAttempts += Math.max(1, item.attempts);
   if (item.attempts > 1) state.failoverRequests++;
   if (item.stream) state.streamRequests++;
+  if (item.requestedReasoningEffort) state.requestedReasoningEffortRequests++;
+  if (item.reasoningEffort) state.reasoningEffortRequests++;
+  if (item.requestedReasoningEffort && item.reasoningEffort) {
+    if (item.requestedReasoningEffort === item.reasoningEffort) state.reasoningEffortPreservedRequests++;
+    else state.reasoningEffortChangedRequests++;
+  } else if (item.requestedReasoningEffort) state.reasoningEffortDroppedRequests++;
+  else if (item.reasoningEffort) state.reasoningEffortInjectedRequests++;
   if (timelineState) addTimelineItem(timelineState, timestamp, item);
 }
 
@@ -228,6 +246,8 @@ function finishSummary(state) {
   const {
     requests, success, durationTotal, streamRequests, usageRequests, cacheHitRequests, cacheWriteRequests,
     credentialAttempts, failoverRequests, upstreamWaitTotal, upstreamBodyTotal,
+    requestedReasoningEffortRequests, reasoningEffortRequests, reasoningEffortPreservedRequests,
+    reasoningEffortChangedRequests, reasoningEffortDroppedRequests, reasoningEffortInjectedRequests,
     durations, upstreamWaitValues, upstreamBodyValues, tokens
   } = state;
   durations.sort((left, right) => left - right);
@@ -257,6 +277,12 @@ function finishSummary(state) {
     credentialAttempts,
     failoverRequests,
     failoverAttempts: Math.max(0, credentialAttempts - requests),
+    requestedReasoningEffortRequests,
+    reasoningEffortRequests,
+    reasoningEffortPreservedRequests,
+    reasoningEffortChangedRequests,
+    reasoningEffortDroppedRequests,
+    reasoningEffortInjectedRequests,
     cacheHitRequestRate: usageRequests ? round(cacheHitRequests / usageRequests * 100, 1) : 0,
     ...tokens,
     cacheReadRate: tokens.inputTokens ? round(tokens.cachedInputTokens / tokens.inputTokens * 100, 1) : 0,
@@ -303,6 +329,7 @@ function createGroupedState() {
     byProvider: new Map(),
     byCredential: new Map(),
     byModel: new Map(),
+    byReasoningEffort: new Map(),
     byProtocol: new Map(),
     byClient: new Map()
   };
@@ -312,6 +339,7 @@ function addGroupedDimensions(state, item, measurement) {
   addGroupedItem(state.byProvider, item.provider || '未知', measurement);
   addGroupedItem(state.byCredential, credentialName(item), measurement);
   addGroupedItem(state.byModel, item.upstreamModel || item.model || '未知', measurement);
+  addGroupedItem(state.byReasoningEffort, item.reasoningEffort || '未指定', measurement);
   addGroupedItem(state.byProtocol, item.protocol || '未知', measurement);
   addGroupedItem(state.byClient, item.clientName || '主令牌', measurement);
 }
@@ -321,6 +349,7 @@ function finishGroupedStats(state) {
     byProvider: summarizeGroups(state.byProvider),
     byCredential: summarizeGroups(state.byCredential, 64),
     byModel: summarizeGroups(state.byModel, 25),
+    byReasoningEffort: summarizeGroups(state.byReasoningEffort, 25),
     byProtocol: summarizeGroups(state.byProtocol, 25),
     byClient: summarizeGroups(state.byClient, 25)
   };

@@ -136,6 +136,38 @@ function supportsReasoningEffort(model) {
     || /^deepseek-v4-(?:flash|pro)$/i.test(model || '');
 }
 
+const REASONING_EFFORT_LABEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+
+function reasoningEffortLabel(value) {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  return REASONING_EFFORT_LABEL.test(normalized) ? normalized : undefined;
+}
+
+export function requestReasoningEffort(body, protocol) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  if (protocol === 'responses') return reasoningEffortLabel(body.reasoning?.effort);
+  if (protocol === 'chat') return reasoningEffortLabel(body.reasoning_effort);
+  if (protocol === 'claude') {
+    const effort = reasoningEffortLabel(body.output_config?.effort);
+    if (effort) return effort;
+    if (body.thinking?.type === 'disabled') return 'none';
+    if (body.thinking?.type === 'adaptive') return 'adaptive';
+    const budget = body.thinking?.budget_tokens;
+    if (body.thinking?.type === 'enabled' && Number.isSafeInteger(budget) && budget >= 0) return `budget:${budget}`;
+    return undefined;
+  }
+  if (protocol === 'gemini') {
+    const thinking = body.generationConfig?.thinkingConfig;
+    const level = reasoningEffortLabel(thinking?.thinkingLevel);
+    if (level) return level;
+    const budget = thinking?.thinkingBudget;
+    if (budget === -1) return 'adaptive';
+    if (Number.isSafeInteger(budget) && budget >= 0) return budget === 0 ? 'none' : `budget:${budget}`;
+  }
+  return undefined;
+}
+
 function supportsModernOpenAiPromptCache(model) {
   return /(?:^|\/)gpt-(?:5\.(?:[6-9]|\d{2,})|(?:[6-9]|\d{2,})(?:\.\d+)?)(?:-|$)/i.test(model || '');
 }
