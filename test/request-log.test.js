@@ -186,12 +186,12 @@ test('临时副本无法清理时仍加载正式日志并保留诊断', async ()
 test('日志会保留阶段耗时、思考强度、缓存 TTL、响应降级、推理 token 和本地搜索次数', async () => {
   const store = new RequestLogStore('unused.json');
   const protocol = 'responses → chat (web_search unavailable, reasoning degraded, reasoning_summary_best_effort_chat adapted)';
-  await store.add({ requestId: 'usage', model: 'alias', upstreamModel: 'real-model', credentialId: 'environment:2', upstreamRequestId: 'upstream-trace', retryAfter: '7', protocol, requestedReasoningEffort: 'max', reasoningEffort: 'high', responseDegradations: 'claude_cache_creation_ttl,claude_iterations', errorCode: 'upstream_connect_timeout', upstreamWaitMs: 123, upstreamBodyMs: 45, inputTokens: 10, outputTokens: 4, inputTokensIncludeCache: true, cachedInputTokens: 3, cacheCreationInputTokens: 2, cacheCreation5mInputTokens: 1, cacheCreation1hInputTokens: 1, reasoningTokens: 1, bridgeWebSearchCalls: 2 });
+  await store.add({ requestId: 'usage', model: 'alias', upstreamModel: 'real-model', credentialId: 'environment:2', upstreamRequestId: 'upstream-trace', retryAfter: '7', protocol, requestKind: 'compaction', requestedReasoningEffort: 'max', reasoningEffort: 'high', responseDegradations: 'claude_cache_creation_ttl,claude_iterations', errorCode: 'upstream_connect_timeout', upstreamWaitMs: 123, upstreamBodyMs: 45, inputTokens: 10, outputTokens: 4, inputTokensIncludeCache: true, cachedInputTokens: 3, cacheCreationInputTokens: 2, cacheCreation5mInputTokens: 1, cacheCreation1hInputTokens: 1, reasoningTokens: 1, bridgeWebSearchCalls: 2 });
   assert.deepEqual(store.list()[0], {
     time: '', requestId: 'usage', clientId: '', clientName: '', model: 'alias', upstreamModel: 'real-model', provider: '', credentialId: 'environment:2', credentialLabel: '', credentialAttempts: 1, upstreamRequestId: 'upstream-trace', retryAfter: '7', protocol,
     status: 0, duration: 0, upstreamWaitMs: 123, upstreamBodyMs: 45, stream: false, inputTokens: 10, outputTokens: 4, inputTokensIncludeCache: true,
     cachedInputTokens: 3, cacheCreationInputTokens: 2, cacheCreation5mInputTokens: 1, cacheCreation1hInputTokens: 1,
-    reasoningTokens: 1, bridgeWebSearchCalls: 2, responseDegradations: 'claude_cache_creation_ttl,claude_iterations', requestedReasoningEffort: 'max', reasoningEffort: 'high', errorCode: 'upstream_connect_timeout'
+    reasoningTokens: 1, bridgeWebSearchCalls: 2, responseDegradations: 'claude_cache_creation_ttl,claude_iterations', requestedReasoningEffort: 'max', reasoningEffort: 'high', requestKind: 'compaction', errorCode: 'upstream_connect_timeout'
   });
 });
 
@@ -221,7 +221,7 @@ test('单条日志规范化只读取每个原始字段一次', async () => {
     upstreamWaitMs: 3, upstreamBodyMs: 7, stream: true, inputTokens: 8, outputTokens: 5,
     inputTokensIncludeCache: true, cachedInputTokens: 2, cacheCreationInputTokens: 1,
     cacheCreation5mInputTokens: 1, cacheCreation1hInputTokens: 1, reasoningTokens: 3,
-    requestedReasoningEffort: 'max', reasoningEffort: 'max',
+    requestedReasoningEffort: 'max', reasoningEffort: 'max', requestKind: 'turn',
     responseDegradations: 'none', errorCode: 'none', error: 'none'
   };
   const reads = new Map();

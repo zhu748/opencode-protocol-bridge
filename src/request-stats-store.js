@@ -223,7 +223,7 @@ function sanitizeStatsEntry(entry) {
     credentialId: text(entry.credentialId, 64),
     credentialLabel: text(entry.credentialLabel, 64),
     credentialAttempts: Math.max(1, number(entry.credentialAttempts, 1000) || 1),
-    protocol: text(entry.protocol, 256),
+    protocol: text(entry.protocol, 512),
     status: number(entry.status, 999),
     duration: number(entry.duration),
     stream: Boolean(entry.stream)

@@ -161,7 +161,7 @@ function sanitizeEntry(entry) {
     retryAfter: text(entry.retryAfter, 128),
     // Compatibility labels can contain several independent adaptations. Keep
     // the complete bounded label so the management UI does not hide the cause.
-    protocol: text(entry.protocol, 256),
+    protocol: text(entry.protocol, 512),
     status: nonNegative(entry.status, 999),
     duration: nonNegative(entry.duration),
     stream: Boolean(entry.stream)
@@ -180,6 +180,7 @@ function sanitizeEntry(entry) {
   const responseDegradations = entry.responseDegradations;
   const requestedReasoningEffort = entry.requestedReasoningEffort;
   const reasoningEffort = entry.reasoningEffort;
+  const requestKind = entry.requestKind;
   const errorCode = entry.errorCode;
   const error = entry.error;
   if (upstreamWaitMs !== undefined) sanitized.upstreamWaitMs = nonNegative(upstreamWaitMs);
@@ -196,6 +197,7 @@ function sanitizeEntry(entry) {
   if (responseDegradations) sanitized.responseDegradations = text(responseDegradations, 512);
   if (requestedReasoningEffort) sanitized.requestedReasoningEffort = text(requestedReasoningEffort, 64);
   if (reasoningEffort) sanitized.reasoningEffort = text(reasoningEffort, 64);
+  if (requestKind === 'turn' || requestKind === 'compaction') sanitized.requestKind = requestKind;
   if (errorCode) sanitized.errorCode = text(errorCode, 64);
   if (error) sanitized.error = text(error, 500);
   return sanitized;

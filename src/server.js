@@ -5,7 +5,7 @@ import { stat } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from './auth.js';
 import { loadConfig, saveConfig, updateConfig, publicConfig, configRevision, normalizeImageHandoffModels, normalizeModelRoutes, ROOT } from './config.js';
-import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiToolNameAliases, hasGeminiGoogleSearch, hasHostedResponsesWebSearch, responsesToolAdaptations, claudeToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations, hasUsageData, reasoningRequestAdaptations, requestReasoningEffort, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations } from './adapters.js';
+import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiToolNameAliases, hasGeminiGoogleSearch, hasHostedResponsesWebSearch, responsesToolAdaptations, claudeToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations, hasUsageData, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations } from './adapters.js';
 import { callUpstream, closeDirectUpstreamDispatcher, discardUpstreamResponse, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJsonPayload, readResponseText, upstreamConnectionFailure, withStreamIdleTimeout } from './upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, singBoxRuntimeStatus } from './proxy.js';
 import { KeepAliveService, normalizeKeepAliveUrl, resolveKeepAliveConfig } from './keep-alive.js';
@@ -1599,6 +1599,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   }
   const reasoningStateScope = createReasoningStateScope(client.id || client.name || 'client', body.model, route);
   const requestedReasoningEffort = requestReasoningEffort(body, incomingProtocol);
+  const requestKind = codexRequestKind(body, incomingProtocol);
   const responseOptions = responsesOutputOptions(body, incomingProtocol);
   const chatOptions = chatOutputOptions(body, incomingProtocol);
   const webSearchDegraded = incomingProtocol === 'responses' && !['responses', 'gemini'].includes(route.protocol) && hasHostedResponsesWebSearch(body.tools);
@@ -1688,6 +1689,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     ...(inputDegradations.includes('chat_reasoning_state') ? ['chat reasoning state degraded'] : []),
     ...(inputDegradations.includes('responses_client_metadata') ? ['responses client metadata dropped'] : []),
     ...(inputDegradations.includes('responses_item_metadata') ? ['responses item metadata degraded'] : []),
+    ...(inputDegradations.includes('responses_item_phase') ? ['responses item phase degraded'] : []),
     ...reasoningAdaptations.map((kind) => `${kind} adapted`),
     ...contextAdaptations.map((kind) => `${kind} adapted`),
     ...serviceAdaptations.map((kind) => `${kind} adapted`),
@@ -1711,6 +1713,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     credentialAttempts, duration: Date.now() - started, ...upstreamMetadata, ...entry,
     ...(requestedReasoningEffort ? { requestedReasoningEffort } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(requestKind ? { requestKind } : {}),
     ...(bridgeWebSearchCalls ? { bridgeWebSearchCalls } : {}),
     ...(responseDegradations.length ? { responseDegradations: responseDegradations.join(',') } : {}),
     ...(credentialAttempts ? { upstreamWaitMs } : {}),

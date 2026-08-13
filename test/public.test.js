@@ -43,6 +43,8 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /stats\.byReasoningEffort/);
   assert.match(script, /reasoningEffortPreservedRequests/);
   assert.match(script, /思考强度/);
+  assert.match(script, /Codex 上下文压缩/);
+  assert.match(settings, /\.log-workflow-kind/);
   assert.match(html, /id="data-source-warning"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
   assert.match(script, /loadDataSource\('请求日志'/);
   assert.match(script, /loadDataSource\('运行状态'/);
@@ -220,6 +222,7 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.equal(spec.paths['/models/{model}:streamGenerateContent'].post.responses['200'].headers['x-opencode-input-degradations'].$ref, '#/components/headers/InputDegradations');
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_client_metadata/);
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_item_metadata/);
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_item_phase/);
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_compaction_state/);
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /gemini_thought_signature/);
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /claude_thinking_signature/);

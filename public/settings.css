@@ -765,6 +765,14 @@
   font-variant-numeric: tabular-nums;
 }
 
+.log-workflow-kind {
+  display: block;
+  margin-top: 4px;
+  color: var(--accent-strong);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .log-web-search {
   max-width: 180px;
   color: var(--green);

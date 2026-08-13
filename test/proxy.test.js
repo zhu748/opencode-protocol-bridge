@@ -1011,9 +1011,10 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
         max_output_tokens: 512, temperature: 0.4, top_p: 0.8,
         reasoning: { effort: 'max', summary: 'auto' }, store: false, truncation: 'disabled',
         text: { verbosity: 'low' }, user: 'legacy-user', safety_identifier: 'safe-user',
-        client_metadata: { 'x-codex-turn-metadata': '{"session_id":"session_probe"}' },
+        client_metadata: { 'x-codex-turn-metadata': '{"session_id":"session_probe","request_kind":"turn"}' },
         input: [
           { type: 'reasoning', id: 'rs_cross', status: 'completed', encrypted_content: 'opaque-state', summary: [{ type: 'summary_text', text: '先检查任务边界' }] },
+          { type: 'message', id: 'msg_progress', status: 'completed', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: '正在分派检查任务' }] },
           { type: 'message', id: 'msg_cross', status: 'completed', role: 'user', content: [{ type: 'input_text', text: '搜索并分派检查任务' }] }
         ],
         tools: [
@@ -1029,7 +1030,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     });
     assert.equal(codexCrossProtocol.status, 200);
     assert.equal(codexCrossProtocol.headers.get('x-opencode-tool-degradations'), 'web_search');
-    assert.equal(codexCrossProtocol.headers.get('x-opencode-input-degradations'), 'responses_client_metadata,responses_item_metadata,encrypted_reasoning');
+    assert.equal(codexCrossProtocol.headers.get('x-opencode-input-degradations'), 'responses_client_metadata,responses_item_metadata,responses_item_phase,encrypted_reasoning');
     assert.equal(codexCrossProtocol.headers.get('x-opencode-reasoning-adaptations'), 'reasoning_summary_best_effort_chat,reasoning_history_to_chat_reasoning_content');
     const codexBody = await codexCrossProtocol.json();
     assert.equal(codexBody.output[0].type, 'function_call');
@@ -1057,12 +1058,14 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.body.client_metadata, undefined);
     assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['multi_agent_v1__spawn_agent']);
     assert.equal(captured.body.messages.some((message) => message.role === 'developer'), false);
+    assert.equal(captured.body.messages.some((message) => message.role === 'assistant' && message.content === '正在分派检查任务'), true);
     assert.match(captured.body.messages.find((message) => message.role === 'system').content, /cannot execute the hosted web_search tool/);
     assert.equal(captured.body.messages.find((message) => message.role === 'assistant').reasoning_content, '先检查任务边界');
     const codexLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(codexLog.protocol, 'responses → chat (web_search unavailable, reasoning degraded, responses client metadata dropped, responses item metadata degraded, reasoning_summary_best_effort_chat adapted, reasoning_history_to_chat_reasoning_content adapted)');
+    assert.equal(codexLog.protocol, 'responses → chat (web_search unavailable, reasoning degraded, responses client metadata dropped, responses item metadata degraded, responses item phase degraded, reasoning_summary_best_effort_chat adapted, reasoning_history_to_chat_reasoning_content adapted)');
     assert.equal(codexLog.requestedReasoningEffort, 'max');
     assert.equal(codexLog.reasoningEffort, 'max');
+    assert.equal(codexLog.requestKind, 'turn');
     const effortStats = await fetch(`http://127.0.0.1:${bridgePort}/api/stats`, { headers: { cookie } }).then((result) => result.json());
     assert.ok(effortStats.byReasoningEffort.some((item) => item.name === 'max' && item.requests >= 1));
     assert.ok(effortStats.summary.reasoningEffortPreservedRequests >= 1);

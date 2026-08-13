@@ -468,6 +468,9 @@ function renderLogs() {
     const reasoningEffort = item.reasoningEffort
       ? `<small class="log-reasoning-effort">思考强度：${escapeHtml(item.requestedReasoningEffort && item.requestedReasoningEffort !== item.reasoningEffort ? `${item.requestedReasoningEffort} → ${item.reasoningEffort}` : item.reasoningEffort)}</small>`
       : item.requestedReasoningEffort ? `<small class="log-reasoning-effort">思考强度：${escapeHtml(item.requestedReasoningEffort)} → 未传递</small>` : '';
+    const requestKind = item.requestKind === 'compaction'
+      ? '<small class="log-workflow-kind">Codex 上下文压缩</small>'
+      : '';
     const bridgeWebSearch = item.bridgeWebSearchCalls
       ? `<small class="log-web-search">本地 Web Search：${formatNumber(item.bridgeWebSearchCalls)} 次</small>`
       : '';
@@ -476,7 +479,7 @@ function renderLogs() {
       Object.hasOwn(item, 'upstreamBodyMs') ? `响应体 ${formatDuration(item.upstreamBodyMs)}` : ''
     ].filter(Boolean).join(' · ');
     const timing = `${formatDuration(item.duration)}${phases ? `<small class="log-timing">${phases}</small>` : ''}`;
-    return `<tr><td>${escapeHtml(new Date(item.time).toLocaleString())}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}${reasoningEffort}${bridgeWebSearch}${responseDegradations}</td><td class="${statusClass}">${formatNumber(item.status)}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
+    return `<tr><td>${escapeHtml(new Date(item.time).toLocaleString())}</td><td>${requestIdButton(item.requestId, '本地请求 ID')}${upstreamRequestId}</td><td>${escapeHtml(item.clientName || '主令牌')}</td><td>${escapeHtml(model)}</td><td>${escapeHtml(item.provider)}</td><td class="log-key">${credential}</td><td>${escapeHtml(item.protocol)}${requestKind}${reasoningEffort}${bridgeWebSearch}${responseDegradations}</td><td class="${statusClass}">${formatNumber(item.status)}${retryAfter}${error}</td><td>${escapeHtml(tokens)}</td><td>${timing}</td></tr>`;
   }).join('');
 }
 

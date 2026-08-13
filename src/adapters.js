@@ -168,6 +168,23 @@ export function requestReasoningEffort(body, protocol) {
   return undefined;
 }
 
+export function codexRequestKind(body, protocol) {
+  if (protocol !== 'responses' || !body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const metadata = body.client_metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined;
+  let kind = metadata.request_kind;
+  const encoded = metadata['x-codex-turn-metadata'];
+  if (kind === undefined && typeof encoded === 'string' && encoded.length <= 64 * 1024) {
+    try {
+      const parsed = JSON.parse(encoded);
+      kind = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed.request_kind : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return kind === 'turn' || kind === 'compaction' ? kind : undefined;
+}
+
 function supportsModernOpenAiPromptCache(model) {
   return /(?:^|\/)gpt-(?:5\.(?:[6-9]|\d{2,})|(?:[6-9]|\d{2,})(?:\.\d+)?)(?:-|$)/i.test(model || '');
 }
@@ -1368,7 +1385,6 @@ function assertPortableResponsesExecution(body, targetProtocol) {
   for (const [index, item] of asArray(body.input).entries()) {
     if (item?.phase !== undefined && item.phase !== null) {
       optionalOpenAiEnum(item.phase, `Responses input[${index}].phase`, RESPONSES_ITEM_PHASES);
-      throw unsupportedFeature(`跨协议转换到 ${target} 无法保留 Responses input[${index}].phase=${String(item.phase)}；请将模型路由设为 responses`);
     }
   }
 }
@@ -2050,6 +2066,10 @@ export function inputRequestDegradations(body, incomingProtocol, targetProtocol)
     if ([...instructionItems, ...inputItems].some((item) => item && typeof item === 'object' && !Array.isArray(item)
       && ((item.id !== undefined && item.id !== null) || (item.status !== undefined && item.status !== null)))) {
       degradations.push('responses_item_metadata');
+    }
+    if (inputItems.some((item) => item && typeof item === 'object' && !Array.isArray(item)
+      && item.phase !== undefined && item.phase !== null)) {
+      degradations.push('responses_item_phase');
     }
   }
   if (incomingProtocol === 'responses' && asArray(body?.input).some((item) => item?.type === 'reasoning'

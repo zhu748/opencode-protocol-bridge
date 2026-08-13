@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiGroundingMetadata, geminiToolNameAliases, hasUsageData, reasoningRequestAdaptations, requestReasoningEffort, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, claudeToolAdaptations, responsesToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations } from '../src/adapters.js';
+import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiGroundingMetadata, geminiToolNameAliases, hasUsageData, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, claudeToolAdaptations, responsesToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations } from '../src/adapters.js';
 import { decodeReasoningState, encodeReasoningStateBundle } from '../src/reasoning-state.js';
 
 test('识别四种兼容端点', () => {
@@ -1652,7 +1652,16 @@ test('Responses 服务端状态和执行语义跨协议时不会静默丢失', (
     assert.throws(() => prepareUpstreamRequest({ ...base, ...fields }, 'responses', 'claude', 'claude-test'), (error) => error.status === 400 && message.test(error.message));
   }
   assert.throws(() => prepareUpstreamRequest({ ...base, include: 'reasoning.encrypted_content' }, 'responses', 'chat', 'chat-test'), /include 必须是字符串数组/);
-  assert.throws(() => prepareUpstreamRequest({ ...base, input: [{ role: 'assistant', phase: 'commentary', content: '处理中' }] }, 'responses', 'chat', 'chat-test'), /input\[0\]\.phase=commentary/);
+  const phased = { ...base, input: [
+    { role: 'assistant', phase: 'commentary', content: '处理中' },
+    { role: 'assistant', phase: 'final_answer', content: '阶段完成' },
+    { role: 'user', content: '继续' }
+  ] };
+  assert.deepEqual(prepareUpstreamRequest(phased, 'responses', 'chat', 'chat-test').messages.map((message) => message.role), [
+    'assistant', 'user'
+  ]);
+  assert.match(prepareUpstreamRequest(phased, 'responses', 'chat', 'chat-test').messages[0].content, /处理中.*阶段完成/s);
+  assert.deepEqual(inputRequestDegradations(phased, 'responses', 'chat'), ['responses_item_phase']);
 });
 
 test('Codex Responses 安全默认值和加密推理 include 可跨协议', () => {
@@ -3091,6 +3100,55 @@ test('Claude thinking 与 output_config 转为 OpenAI reasoning effort', () => {
   }, 'responses', 'chat', 'deepseek-v4-flash');
   assert.equal(codexMaximum.reasoning_effort, 'max');
   assert.equal(requestReasoningEffort(codexMaximum, 'chat'), 'max');
+});
+
+test('Codex checkpoint 压缩摘要与目标工具可完整转换到 Chat', () => {
+  const metadata = { 'x-codex-turn-metadata': JSON.stringify({ request_kind: 'compaction', session_id: 'session-test' }) };
+  assert.equal(codexRequestKind({ client_metadata: metadata }, 'responses'), 'compaction');
+  assert.equal(codexRequestKind({ client_metadata: { request_kind: 'turn' } }, 'responses'), 'turn');
+  assert.equal(codexRequestKind({ client_metadata: { request_kind: 'unknown' } }, 'responses'), undefined);
+  assert.equal(codexRequestKind({ client_metadata: { 'x-codex-turn-metadata': '{broken' } }, 'responses'), undefined);
+
+  const checkpoint = prepareUpstreamRequest({
+    model: 'alias', client_metadata: metadata, reasoning: { effort: 'medium' },
+    input: [
+      { type: 'message', role: 'assistant', phase: 'commentary', content: '验证已经完成' },
+      { type: 'function_call', call_id: 'call_goal', name: 'get_goal', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_goal', output: '{"objective":"继续优化","status":"active"}' },
+      { type: 'message', role: 'user', content: 'You are performing a CONTEXT CHECKPOINT COMPACTION. Create a concise handoff summary.' }
+    ],
+    tools: []
+  }, 'responses', 'chat', 'deepseek-v4-flash');
+  assert.equal(checkpoint.reasoning_effort, 'medium');
+  assert.equal(checkpoint.messages.at(-1).role, 'user');
+  assert.match(checkpoint.messages.at(-1).content, /CONTEXT CHECKPOINT COMPACTION/);
+  assert.deepEqual(checkpoint.messages.map((message) => message.role), ['assistant', 'tool', 'user']);
+  assert.equal(checkpoint.messages[0].tool_calls[0].function.name, 'get_goal');
+
+  const goalTools = ['get_goal', 'create_goal', 'update_goal'].map((name) => ({
+    type: 'function', name, description: name, strict: false,
+    parameters: { type: 'object', properties: {}, additionalProperties: true }
+  }));
+  const resumed = prepareUpstreamRequest({
+    model: 'alias', reasoning: { effort: 'medium' },
+    input: [
+      { type: 'message', role: 'user', content: 'Another language model produced a handoff summary: continue the credential fix.' },
+      { type: 'message', role: 'user', content: '<codex_internal_context source="goal">Continue working toward the active goal.</codex_internal_context>' }
+    ],
+    tools: goalTools
+  }, 'responses', 'chat', 'deepseek-v4-flash');
+  assert.deepEqual(resumed.tools.map((tool) => tool.function.name), ['get_goal', 'create_goal', 'update_goal']);
+  assert.match(resumed.messages.map((message) => message.content).join('\n'), /handoff summary.*active goal/s);
+
+  const goalResponse = formatResponse(normalizeResponse({
+    id: 'chat_goal', model: 'deepseek-v4-flash',
+    choices: [{ index: 0, finish_reason: 'tool_calls', message: { role: 'assistant', content: null, tool_calls: [{
+      id: 'call_update', type: 'function', function: { name: 'update_goal', arguments: '{"status":"complete"}' }
+    }] } }]
+  }, 'chat'), 'responses');
+  assert.deepEqual(goalResponse.output[0], {
+    id: 'fc_0', type: 'function_call', call_id: 'call_update', name: 'update_goal', arguments: '{"status":"complete"}', status: 'completed'
+  });
 });
 
 test('思考强度日志标签拒绝畸形值并识别 Gemini 动态预算', () => {
