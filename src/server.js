@@ -1649,6 +1649,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       upstreamBody = forcedBody;
     }
     reasoningEffort = requestReasoningEffort(upstreamBody, route.protocol);
+    if (!reasoningEffort && maximumReasoningForced) reasoningEffort = 'model-default';
   } catch (error) {
     if (abort.signal.aborted) return;
     return protocolError(res, error.status || 400, incomingProtocol, error.message, error.type || 'invalid_request_error');

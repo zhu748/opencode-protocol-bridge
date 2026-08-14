@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 
 import { claudeSystemBlockText, isClaudeMidTurnUserMessage } from './prompt-rewrite.js';
-import { openCodeModelCapability } from './model-capabilities.js';
+import { openCodeMaximumReasoningEffort, openCodeModelCapability } from './model-capabilities.js';
 import { remoteImageHandoffNotice, UNSUPPORTED_IMAGE_NOTICE } from './image-handoff.js';
 import { addClaudeToolReferenceNames, claudeToolReferenceNames, validateClaudeCacheControl, validateClaudeCompactionBlock, validateClaudeFallbackBlock, validateClaudeThinkingBlock, validateClaudeToolOptionalFields } from './claude-tools.js';
 import { decodeReasoningState, encodeReasoningState, encodeReasoningStateBundle, GEMINI_BRIDGE_STATE_TEXT } from './reasoning-state.js';
@@ -139,12 +139,29 @@ function supportsReasoningEffort(model) {
 export function maximumReasoningEffort(model, protocol) {
   const normalized = typeof model === 'string' ? model.trim().toLowerCase() : '';
   if (!normalized) return undefined;
+  const knownOpenCodeEffort = openCodeMaximumReasoningEffort(normalized, protocol);
+  if (knownOpenCodeEffort) return knownOpenCodeEffort;
   if (protocol === 'gemini') return 'high';
-  if (protocol === 'claude') return 'max';
-  if (/^deepseek-v4-(?:flash|pro)$/.test(normalized) || /^gpt-5\.6(?:$|[-.])/.test(normalized)) return 'max';
-  if (/^gpt-5\.[2-5](?:$|[-.])/.test(normalized)) return 'xhigh';
-  if (/^gpt-5(?:\.1)?(?:$|[-.])/.test(normalized) || /^o\d/.test(normalized)) return 'high';
-  return protocol === 'responses' || protocol === 'chat' ? 'max' : undefined;
+  if (protocol === 'claude') {
+    if (/^claude-(?:fable-5|(?:opus|sonnet)-5|(?:opus|sonnet)-4-[6-9])(?:$|[-.])/.test(normalized)) return 'max';
+    if (/^claude-/.test(normalized)) return 'budget:31999';
+    if (/^minimax-m3(?:$|[-.])/.test(normalized)) return 'adaptive';
+    return 'model-default';
+  }
+  if (protocol === 'responses') {
+    if (/^gpt-5\.6(?:$|[-.])/.test(normalized)) return 'max';
+    if (/^gpt-5\.[2-5](?:$|[-.])/.test(normalized)) return 'xhigh';
+    if (/^gpt-5(?:\.1)?(?:$|[-.])/.test(normalized) || /^o\d/.test(normalized)) return 'high';
+    if (/^(?:grok-(?:4\.[5-9]|build)|muse-spark)(?:$|[-.])/.test(normalized)) return 'xhigh';
+    return 'high';
+  }
+  if (protocol === 'chat') {
+    if (/^deepseek-v4-(?:flash(?:-free)?|pro)(?:$|[-.])/.test(normalized) || /^glm-5\.2(?:$|[-.])/.test(normalized)) return 'max';
+    if (/^minimax-m3(?:$|[-.])/.test(normalized)) return 'adaptive';
+    if (/^(?:big-pickle|glm-|kimi-|minimax-|qwen)/.test(normalized)) return 'model-default';
+    return 'high';
+  }
+  return undefined;
 }
 
 export function withMaximumReasoningEffort(body, protocol, model) {
@@ -154,16 +171,43 @@ export function withMaximumReasoningEffort(body, protocol, model) {
     const reasoning = body.reasoning && !Array.isArray(body.reasoning) && typeof body.reasoning === 'object' ? body.reasoning : {};
     return { ...body, reasoning: { ...reasoning, effort } };
   }
-  if (protocol === 'chat') return { ...body, reasoning_effort: effort };
+  if (protocol === 'chat') {
+    const forced = { ...body };
+    delete forced.reasoning_effort;
+    delete forced.thinking;
+    if (effort === 'adaptive') forced.thinking = { type: 'adaptive' };
+    else if (effort !== 'model-default') forced.reasoning_effort = effort;
+    return forced;
+  }
   if (protocol === 'claude') {
     const outputConfig = body.output_config && !Array.isArray(body.output_config) && typeof body.output_config === 'object' ? body.output_config : {};
     const thinking = body.thinking && !Array.isArray(body.thinking) && typeof body.thinking === 'object' ? body.thinking : {};
-    const forced = {
-      ...body,
-      output_config: { ...outputConfig, effort },
-      thinking: { type: 'adaptive', ...(thinking.display ? { display: thinking.display } : {}) }
-    };
-    delete forced.temperature;
+    const { effort: _effort, ...preservedOutputConfig } = outputConfig;
+    const forced = { ...body };
+    delete forced.output_config;
+    delete forced.thinking;
+    if (Object.keys(preservedOutputConfig).length) forced.output_config = preservedOutputConfig;
+    if (effort === 'max' || effort === 'adaptive') {
+      forced.thinking = { type: 'adaptive', ...(thinking.display ? { display: thinking.display } : {}) };
+      if (effort === 'max') forced.output_config = { ...preservedOutputConfig, effort };
+      delete forced.temperature;
+    } else if (effort === 'legacy-high') {
+      const maxTokens = Number.isSafeInteger(body.max_tokens) ? body.max_tokens : undefined;
+      const budget = maxTokens === undefined ? 16_000 : Math.min(16_000, maxTokens - 1);
+      if (Number.isSafeInteger(budget) && budget >= 1024) {
+        forced.output_config = { ...preservedOutputConfig, effort: 'high' };
+        forced.thinking = { type: 'enabled', budget_tokens: budget, ...(thinking.display ? { display: thinking.display } : {}) };
+        delete forced.temperature;
+      }
+    } else if (effort.startsWith('budget:')) {
+      const requestedBudget = Number(effort.slice('budget:'.length));
+      const maxTokens = Number.isSafeInteger(body.max_tokens) ? body.max_tokens : undefined;
+      const budget = maxTokens === undefined ? requestedBudget : Math.min(requestedBudget, maxTokens - 1);
+      if (Number.isSafeInteger(budget) && budget >= 1024) {
+        forced.thinking = { type: 'enabled', budget_tokens: budget, ...(thinking.display ? { display: thinking.display } : {}) };
+        delete forced.temperature;
+      }
+    }
     return forced;
   }
   if (protocol === 'gemini') {
@@ -190,7 +234,13 @@ function reasoningEffortLabel(value) {
 export function requestReasoningEffort(body, protocol) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
   if (protocol === 'responses') return reasoningEffortLabel(body.reasoning?.effort);
-  if (protocol === 'chat') return reasoningEffortLabel(body.reasoning_effort);
+  if (protocol === 'chat') {
+    const effort = reasoningEffortLabel(body.reasoning_effort);
+    if (effort) return effort;
+    if (body.thinking?.type === 'adaptive') return 'adaptive';
+    if (body.thinking?.type === 'disabled') return 'none';
+    return undefined;
+  }
   if (protocol === 'claude') {
     const effort = reasoningEffortLabel(body.output_config?.effort);
     if (effort) return effort;

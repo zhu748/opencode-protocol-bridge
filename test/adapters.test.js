@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiGroundingMetadata, geminiToolNameAliases, hasUsageData, maximumReasoningEffort, withMaximumReasoningEffort, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, claudeToolAdaptations, responsesToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations } from '../src/adapters.js';
 import { decodeReasoningState, encodeReasoningStateBundle } from '../src/reasoning-state.js';
+import { OPENCODE_GO_MODEL_CAPABILITIES, OPENCODE_ZEN_MODEL_CAPABILITIES } from '../src/model-capabilities.js';
 
 test('识别四种兼容端点', () => {
   assert.equal(detectProtocol('/v1/messages'), 'claude');
@@ -1274,7 +1275,7 @@ test('根据模型选择 OpenCode 官方协议', () => {
   assert.equal(upstreamProtocol('qwen3.8-max', {}, 'go'), 'claude');
   assert.equal(upstreamProtocol('minimax-m3', {}, 'go'), 'claude');
   assert.equal(upstreamProtocol('kimi-k2.6'), 'chat');
-  assert.equal(upstreamProtocol('grok-4.5', {}, 'go'), 'chat');
+  assert.equal(upstreamProtocol('grok-4.5', {}, 'go'), 'responses');
   assert.equal(upstreamProtocol('minimax-m2.7', {}, 'zen'), 'chat');
   assert.equal(upstreamProtocol('minimax-m2.7', {}, 'go'), 'claude');
   assert.equal(upstreamProtocol('o3'), 'responses');
@@ -2201,7 +2202,7 @@ test('Claude 工具失败状态跨到 OpenAI 协议时保留为显式结果标�
 test('Zen 原生 Gemini 支持同协议透传以及 Chat、Responses、Claude 请求互转', () => {
   assert.equal(upstreamProtocol('gemini-3.6-flash', {}, 'zen'), 'gemini');
   assert.equal(upstreamProtocol('grok-4.5', {}, 'zen'), 'responses');
-  assert.equal(upstreamProtocol('grok-4.5', {}, 'go'), 'chat');
+  assert.equal(upstreamProtocol('grok-4.5', {}, 'go'), 'responses');
 
   const direct = prepareUpstreamRequest({
     contents: [{ role: 'user', parts: [{ text: '你好' }] }],
@@ -3109,21 +3110,50 @@ test('最高思考强度按最终模型和协议覆盖客户端强度', () => {
   assert.equal(maximumReasoningEffort('o3-mini', 'chat'), 'high');
   assert.equal(maximumReasoningEffort('deepseek-v4-flash', 'chat'), 'max');
   assert.equal(maximumReasoningEffort('deepseek-v4-flash-free', 'chat'), 'max');
+  assert.equal(maximumReasoningEffort('glm-5.2', 'chat'), 'max');
+  assert.equal(maximumReasoningEffort('glm-5.1', 'chat'), 'model-default');
+  assert.equal(maximumReasoningEffort('kimi-k3', 'chat'), 'max');
+  assert.equal(maximumReasoningEffort('mimo-v2.5', 'chat'), 'model-default');
   assert.equal(maximumReasoningEffort('claude-opus-4-8', 'claude'), 'max');
-  assert.equal(maximumReasoningEffort('minimax-m3', 'claude'), 'max');
+  assert.equal(maximumReasoningEffort('claude-opus-4-5', 'claude'), 'legacy-high');
+  assert.equal(maximumReasoningEffort('minimax-m3', 'claude'), 'adaptive');
+  assert.equal(maximumReasoningEffort('qwen3.8-max', 'claude'), 'model-default');
   assert.equal(maximumReasoningEffort('gemini-3.6-flash', 'gemini'), 'high');
   assert.equal(maximumReasoningEffort('future-native-model', 'gemini'), 'high');
-  assert.equal(maximumReasoningEffort('future-compatible-model', 'responses'), 'max');
-  assert.equal(maximumReasoningEffort('future-compatible-model', 'chat'), 'max');
+  assert.equal(maximumReasoningEffort('future-compatible-model', 'responses'), 'high');
+  assert.equal(maximumReasoningEffort('future-compatible-model', 'chat'), 'high');
 
   assert.deepEqual(withMaximumReasoningEffort({ model: 'gpt-5.5', reasoning: { effort: 'none', summary: 'auto' } }, 'responses', 'gpt-5.5').reasoning, { effort: 'xhigh', summary: 'auto' });
   assert.equal(withMaximumReasoningEffort({ model: 'deepseek-v4-flash', reasoning_effort: 'low' }, 'chat', 'deepseek-v4-flash').reasoning_effort, 'max');
+  const chatDefault = withMaximumReasoningEffort({ model: 'glm-5.1', reasoning_effort: 'low', thinking: { type: 'disabled' } }, 'chat', 'glm-5.1');
+  assert.equal('reasoning_effort' in chatDefault, false);
+  assert.equal('thinking' in chatDefault, false);
+  const minimax = withMaximumReasoningEffort({ model: 'minimax-m3', reasoning_effort: 'low' }, 'chat', 'minimax-m3');
+  assert.deepEqual(minimax.thinking, { type: 'adaptive' });
+  assert.equal(requestReasoningEffort(minimax, 'chat'), 'adaptive');
   const claude = withMaximumReasoningEffort({ model: 'claude-opus-4-8', temperature: 0.2, thinking: { type: 'disabled', display: 'omitted' }, output_config: { format: { type: 'json_schema', schema: {} }, effort: 'low' } }, 'claude', 'claude-opus-4-8');
   assert.deepEqual(claude.thinking, { type: 'adaptive', display: 'omitted' });
   assert.equal(claude.output_config.effort, 'max');
   assert.equal(claude.temperature, undefined);
+  const legacyClaude = withMaximumReasoningEffort({ model: 'claude-opus-4-5', max_tokens: 32_000, temperature: 0.2, thinking: { type: 'disabled' } }, 'claude', 'claude-opus-4-5');
+  assert.deepEqual(legacyClaude.thinking, { type: 'enabled', budget_tokens: 16_000 });
+  assert.equal(legacyClaude.output_config.effort, 'high');
+  assert.equal(legacyClaude.temperature, undefined);
+  const qwen = withMaximumReasoningEffort({ model: 'qwen3.8-max', temperature: 0.2, thinking: { type: 'disabled' }, output_config: { effort: 'low' } }, 'claude', 'qwen3.8-max');
+  assert.equal('thinking' in qwen, false);
+  assert.equal('output_config' in qwen, false);
+  assert.equal(qwen.temperature, 0.2);
   const gemini = withMaximumReasoningEffort({ generationConfig: { thinkingConfig: { thinkingBudget: 0, includeThoughts: true } } }, 'gemini', 'gemini-3.6-flash');
   assert.deepEqual(gemini.generationConfig.thinkingConfig, { includeThoughts: true, thinkingLevel: 'high' });
+});
+
+test('OpenCode Go 与 Zen 目录中的每个模型都有明确的最高思考策略', () => {
+  const knownProfiles = new Set(['high', 'xhigh', 'max', 'adaptive', 'budget:31999', 'legacy-high', 'model-default']);
+  for (const catalog of [OPENCODE_GO_MODEL_CAPABILITIES, OPENCODE_ZEN_MODEL_CAPABILITIES]) {
+    for (const [model, capability] of Object.entries(catalog)) {
+      assert.ok(knownProfiles.has(maximumReasoningEffort(model, capability.protocol)), model);
+    }
+  }
 });
 
 test('Codex checkpoint 压缩摘要与目标工具可完整转换到 Chat', () => {

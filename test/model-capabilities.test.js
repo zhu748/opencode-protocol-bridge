@@ -7,6 +7,7 @@ import {
   OPENCODE_ZEN_MODEL_CAPABILITIES,
   OPENCODE_ZEN_TEXT_ONLY_MODELS,
   openCodeGoModelCapability,
+  openCodeMaximumReasoningEffort,
   openCodeModelCapability,
   openCodeZenModelCapability,
   normalizeRequestedModel
@@ -66,9 +67,21 @@ test('OpenCode Zen 能力表按模型选择 Responses、Claude、Chat 与原生 
   assert.equal(openCodeZenModelCapability('claude-fable-5').protocol, 'claude');
   assert.equal(openCodeZenModelCapability('deepseek-v4-flash').protocol, 'chat');
   assert.equal(openCodeZenModelCapability('unknown-model'), null);
-  assert.equal(Object.keys(OPENCODE_ZEN_MODEL_CAPABILITIES).length, 63);
+  assert.equal(Object.keys(OPENCODE_ZEN_MODEL_CAPABILITIES).length, 68);
   assert.equal(openCodeModelCapability('zen', 'grok-4.5').protocol, 'responses');
-  assert.equal(openCodeModelCapability('go', 'grok-4.5').protocol, 'chat');
+  assert.equal(openCodeModelCapability('go', 'grok-4.5').protocol, 'responses');
+});
+
+test('OpenCode 模型最高思考策略遵循当前 reasoning options', () => {
+  assert.equal(openCodeMaximumReasoningEffort('gpt-5.6-luna', 'responses'), 'max');
+  assert.equal(openCodeMaximumReasoningEffort('gpt-5.5', 'responses'), 'xhigh');
+  assert.equal(openCodeMaximumReasoningEffort('grok-4.5', 'responses'), 'high');
+  assert.equal(openCodeMaximumReasoningEffort('grok-4.6', 'responses'), 'xhigh');
+  assert.equal(openCodeMaximumReasoningEffort('kimi-k3', 'chat'), 'max');
+  assert.equal(openCodeMaximumReasoningEffort('minimax-m3', 'chat'), 'adaptive');
+  assert.equal(openCodeMaximumReasoningEffort('minimax-m3', 'claude'), 'adaptive');
+  assert.equal(openCodeMaximumReasoningEffort('mimo-v2.5', 'chat'), 'model-default');
+  assert.equal(openCodeMaximumReasoningEffort('unknown-model', 'chat'), null);
 });
 
 test('OpenCode Zen 文本模型列表严格来自图片输入模态', () => {
@@ -77,9 +90,9 @@ test('OpenCode Zen 文本模型列表严格来自图片输入模态', () => {
     'deepseek-v4-flash', 'deepseek-v4-flash-free', 'deepseek-v4-pro',
     'glm-5', 'glm-5.1', 'glm-5.2',
     'gpt-5.3-codex-spark',
-    'laguna-s-2.1-free', 'ling-3.0-flash-free', 'ling-3.0-tiny-free', 'longcat-2.0-free',
+    'hy3-free', 'laguna-s-2.1-free', 'ling-3.0-flash-free', 'ling-3.0-tiny-free', 'longcat-2.0-free',
     'minimax-m2.5', 'minimax-m2.7',
-    'nemotron-3-ultra-free', 'north-mini-code-free', 'qwen3.7-max'
+    'nemotron-3.5-lightning-free', 'nemotron-3-ultra-free', 'north-mini-code-free', 'qwen3.7-max'
   ]);
   for (const model of OPENCODE_ZEN_TEXT_ONLY_MODELS) {
     assert.equal(OPENCODE_ZEN_MODEL_CAPABILITIES[model].imageInput, false, model);

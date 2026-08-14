@@ -373,22 +373,22 @@ Go 模型可直接使用 `opencode-go/<model-id>`，Zen 模型可使用 `opencod
 
 该选项默认关闭，并可能让模型选择不调用工具。仅应对已确认不支持标准 `tool_choice` 的模型启用；启用后请求日志的协议转换字段会附带兼容标记。
 
-自动协议判断会先按实际 provider 查询 OpenCode Zen / Go 的精确能力表，再只对未知新模型使用名称推断。同名模型在两个产品中的端点可以不同，例如 `grok-4.5` 在 Zen 是 Responses，在 Go 是 Chat。Go 当前原生端点如下：
+自动协议判断会先按实际 provider 查询 OpenCode Zen / Go 的精确能力表，再只对未知新模型使用名称推断。Go 当前原生端点如下：
 
 | 原生上游协议 | OpenCode Go 模型 |
 | --- | --- |
-| Responses | `gpt-5.6-luna` |
+| Responses | `gpt-5.6-luna`、`grok-4.5` |
 | Claude Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.5`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`；模型端点仍可发现的兼容型号 `qwen3.5-plus` 也按 Claude 路由 |
-| Chat Completions | `grok-4.5`、`glm-5.2`、`glm-5.1`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3`；兼容/预览型号 `glm-5`、`kimi-k2.5`、`mimo-v2-pro`、`mimo-v2-omni`、`hy3-preview` 同样按 Chat 路由 |
+| Chat Completions | `glm-5.2`、`glm-5.1`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3`；兼容/预览型号 `glm-5`、`kimi-k2.5`、`mimo-v2-pro`、`mimo-v2-omni`、`hy3-preview` 同样按 Chat 路由 |
 
 Zen 当前原生端点按官方端点表分为四类：
 
 | 原生上游协议 | OpenCode Zen 模型概况 |
 | --- | --- |
-| Gemini GenerateContent | `gemini-3-flash`、`gemini-3.1-pro`、`gemini-3.5-flash`、`gemini-3.5-flash-lite`、`gemini-3.6-flash` |
-| Responses | GPT 5/5.1/5.2/5.3/5.4/5.5/5.6 系列、`grok-4.5`、`grok-build-0.1` |
+| Gemini GenerateContent | `gemini-3-flash`、`gemini-3.1-pro`、`gemini-3.5-flash`、`gemini-3.5-flash-lite`、`gemini-3.6-flash`、`gemini-3.7-flash` |
+| Responses | GPT 5/5.1/5.2/5.3/5.4/5.5/5.6 系列、`grok-4.5`、`grok-4.6`、`grok-build-0.1`、`muse-spark-1.2` |
 | Claude Messages | Claude 4.5–5 系列，以及 Qwen3.5/3.6/3.7 系列 |
-| Chat Completions | DeepSeek V4、MiniMax、GLM、Kimi，以及 Zen 的 free 模型 |
+| Chat Completions | DeepSeek V4、MiniMax、GLM、Kimi，以及 Zen 的 `hy3-free`、Nemotron 等 free 模型 |
 
 因此入口协议并不限定转换方向：Claude、Responses、Chat 或 Gemini 请求都会转换到模型自己的原生上游协议；入口已经与目标一致时，请求与响应保留厂商扩展字段并直接透传。精确模型路由中的 `protocol` 支持 `auto / claude / responses / chat / gemini` 并始终优先，可用于覆盖官方调整或私有镜像差异。`npm run check:catalogs` 会只读核对 Zen/Go 在线 `/models`、官方端点表和 models.dev 模态/限制，发现新增模型或能力漂移时失败。
 
@@ -396,7 +396,7 @@ Zen 当前原生端点按官方端点表分为四类：
 
 管理面板“连接设置”中的“图片附件交接”用于选择哪些上游模型不能直接接收图片块，不再限制目标必须是 Chat。选择 Zen 或 Go 后，可以使用项目已经配置的 Key 池自动拉取模型，也可以指定某一把环境 Key 或面板 Key；浏览器只提交安全的 Key 槽位 ID，真实 Key 不会返回页面。勾选结果按 `{ provider, model }` 精确保存，同名模型在另一个上游不会被连带启用。
 
-新配置会根据 OpenCode 使用的 models.dev 输入模态，默认选中两边能力表确认的纯文本模型。Go 包括 DeepSeek V4、GLM、Hy3、MiMo Pro、MiniMax M2.x 和 `qwen3.7-max`；已不在当前 Go `/models` 与能力表中的历史型号（例如 `deepseek-v4-flash-free`）不会继续占用默认项。Zen 包括 `big-pickle`、DeepSeek V4、GLM、`gpt-5.3-codex-spark`、Laguna/Ling/LongCat/Nemotron/North free 模型、MiniMax M2.x 和 `qwen3.7-max`。原生图片输入模型不会默认开启，包括五个 Zen Gemini、GPT 视觉型号、Claude、Grok、Kimi、MiMo Omni/多模态型号、MiniMax M3 和多模态 Qwen。
+新配置会根据 OpenCode 使用的 models.dev 输入模态，默认选中两边能力表确认的纯文本模型。Go 包括 DeepSeek V4、GLM、Hy3、MiMo Pro、MiniMax M2.x 和 `qwen3.7-max`；已不在当前 Go `/models` 与能力表中的历史型号（例如 `deepseek-v4-flash-free`）不会继续占用默认项。Zen 包括 `big-pickle`、DeepSeek V4、GLM、`gpt-5.3-codex-spark`、Hy3、Laguna/Ling/LongCat/Nemotron/North free 模型、MiniMax M2.x 和 `qwen3.7-max`。原生图片输入模型不会默认开启，包括六个 Zen Gemini、GPT 视觉型号、Claude、Grok、Kimi、Muse Spark、MiMo Omni/多模态型号、MiniMax M3 和多模态 Qwen。
 
 仍保持旧四项或上一版 15 项内置默认值、且没有加入自定义选择的配置会在加载时自动迁移；已经自定义或清空的选择不会被覆盖。拉取 Zen 或 Go 模型后，面板都会标出原生协议以及“原生视觉”或“文本 · 建议交接”，并可一键添加当前结果中的建议文本模型；“选择当前结果”仍保留用于尚未进入能力表的自定义模型。
 
@@ -447,7 +447,7 @@ Zen 当前原生端点按官方端点表分为四类：
 
 > Chat 角色兼容：下文所述 `developer` 原角色保留仅适用于目标为 Responses；目标为 Chat 时，桥接会把 `developer` 在原位置转换为 `system`，正文与消息顺序不变。这与 Console Go 当前只接受 `system/user/assistant/tool/latest_reminder` 的消息枚举兼容，可避免 Codex 的 Responses `instructions` 被转换为上游无法反序列化的请求。
 
-> 思考强度可观测性：设置中的“始终使用模型最高思考强度”默认开启，Claude、Responses、Chat 与 Gemini 四种入口的普通推理请求都会在协议转换完成后，以最终路由的上游模型为准覆盖客户端强度；同协议透传也不会绕过。DeepSeek V4 Flash / Pro、GPT-5.6 和未知的 OpenAI 兼容型号使用 `max`，GPT-5.2–5.5 使用 `xhigh`，GPT-5/5.1 与 o 系列使用 `high`，Claude 上游使用 adaptive thinking + `output_config.effort: "max"`，Gemini 上游使用 `thinkingLevel: "high"`。请求记录分别保存客户端请求值和最终上游值，例如显示为 `low → max`；用量统计按最终实际发送的强度分组。关闭开关后恢复客户端原始强度与既有协议映射。专用 `/responses/compact` 保留压缩接口语义，不混入普通推理参数。
+> 思考强度可观测性：设置中的“始终使用模型最高思考强度”默认开启，Claude、Responses、Chat 与 Gemini 四种入口的普通推理请求都会在协议转换完成后，以最终路由的上游模型为准覆盖客户端强度；同协议透传也不会绕过。这里按 OpenCode 当前逐模型 `reasoning_options` 选择最高档，而不是统一写入 `max`：DeepSeek V4、GLM 5.2、Kimi K3 与 GPT 5.6 使用 `max`；GPT 5.2–5.5、Grok 4.6 与 Muse Spark 1.2 使用 `xhigh`；GPT 5/5.1、Grok 4.5、Gemini 3.x 及明确公开到 `high` 的 compatible 模型使用 `high`。新版 Claude 使用 adaptive thinking 与其最高 effort，Claude Opus 4.5 使用 `high` + 16,000 thinking budget，旧 Claude/Qwen budget 型号使用请求输出上限允许的最高 budget，MiniMax M3 使用 `adaptive`。没有公开可调档位的模型会移除客户端的降档/关闭参数，保留其默认推理模式，日志记为 `model-default`，不会发送未经支持的强度值。请求记录分别保存客户端请求值和最终上游值，例如显示为 `low → max`；用量统计按最终实际发送的强度分组。关闭开关后恢复客户端原始强度与既有协议映射。专用 `/responses/compact` 保留压缩接口语义，不混入普通推理参数。OpenCode Go 当前只有 `gpt-5.6-luna`，`gpt-5.5` 仅存在于 Zen 的 Responses 模型目录。
 
 > Codex 压缩可观测性：Codex 客户端通过普通 `/responses` 请求生成可读 checkpoint 交接摘要时，桥接会从经过严格限长解析的 `client_metadata` 中识别 `request_kind=compaction`，并在请求记录中显示“Codex 上下文压缩”；该遥测仍不会进入上游模型上下文。摘要提示、历史工具结果与后续续轮按普通 Responses input 转换。原生 `/responses/compact`、非空 `context_management` 或不透明 compaction item 则仍按其服务端状态语义处理，不能伪装成 Chat 压缩。
 
