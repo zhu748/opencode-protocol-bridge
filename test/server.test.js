@@ -213,6 +213,7 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 30_000 },
     assert.doesNotMatch(JSON.stringify(redactedConfig), new RegExp(setupBody.clientToken));
     assert.equal(redactedConfig.encryptionEnabled, true);
     assert.equal(redactedConfig.persistLogs, false);
+    assert.equal(redactedConfig.forceMaximumReasoningEffort, true);
     assert.equal(redactedConfig.upstreamStreamIdleTimeoutMs, 300000);
     assert.equal(redactedConfig.promptRewriteRules.length, 3);
     assert.equal(redactedConfig.promptRewriteDefaults.length, 3);
@@ -317,6 +318,8 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 30_000 },
     assert.equal(disabledKeepAlive.keepAliveStatus.enabled, false);
     const invalidBooleanSetting = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, persistLogs: 'false' }) });
     assert.equal(invalidBooleanSetting.status, 400);
+    const invalidReasoningSetting = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, forceMaximumReasoningEffort: 'true' }) });
+    assert.equal(invalidReasoningSetting.status, 400);
     const invalidSecretType = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, zenKey: { value: 'secret' } }) });
     assert.equal(invalidSecretType.status, 400);
     const invalidClientToken = await fetch(`http://127.0.0.1:${port}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ defaultProvider: 'zen', modelRoutes: {}, clientToken: 'abc-12' }) });
@@ -653,6 +656,8 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
   const idleBodyClosed = new Promise((resolveClosed) => { resolveIdleBodyClosed = resolveClosed; });
   let resolveEventIdleBodyClosed;
   const eventIdleBodyClosed = new Promise((resolveClosed) => { resolveEventIdleBodyClosed = resolveClosed; });
+  let resolveTerminalBodyClosed;
+  const terminalBodyClosed = new Promise((resolveClosed) => { resolveTerminalBodyClosed = resolveClosed; });
   let responseUpstreamCalls = 0;
   let resolveCrossProtocolBodyClosed;
   const crossProtocolBodyClosed = new Promise((resolveClosed) => { resolveCrossProtocolBodyClosed = resolveClosed; });
@@ -695,6 +700,19 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
         clearInterval(heartbeat);
         resolveEventIdleBodyClosed();
       });
+      return;
+    }
+    if (upstreamCalls === 11) {
+      res.write(`data: ${JSON.stringify({
+        id: 'chat_terminal_linger', model: 'deepseek-v4-flash',
+        choices: [{ index: 0, delta: { role: 'assistant', content: 'completed' }, finish_reason: null }]
+      })}\n\n`);
+      res.write(`data: ${JSON.stringify({
+        id: 'chat_terminal_linger', model: 'deepseek-v4-flash',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 7, completion_tokens: 2, completion_tokens_details: { reasoning_tokens: 1 } }
+      })}\n\n`);
+      res.once('close', resolveTerminalBodyClosed);
       return;
     }
     const streamId = upstreamCalls === 3 ? 'chat_recovered'
@@ -1019,6 +1037,40 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     assert.equal(runtime.oldestActiveInferenceMs, 0);
     assert.equal(runtime.longestActiveStreamSilenceMs, 0);
     assert.equal(runtime.activeStreamHeartbeats, 0);
+
+    const terminalResponse = await fetch(`http://127.0.0.1:${port}/zen/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, input: 'close immediately after response.completed' })
+    });
+    const terminalRequestId = terminalResponse.headers.get('x-request-id');
+    const terminalReader = terminalResponse.body.getReader();
+    let terminalText = '';
+    while (!terminalText.includes('event: response.completed')) {
+      const chunk = await terminalReader.read();
+      assert.equal(chunk.done, false, 'Responses 终态到达前不应结束');
+      terminalText += Buffer.from(chunk.value).toString('utf8');
+    }
+    await terminalReader.cancel();
+    await Promise.race([
+      terminalBodyClosed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('客户端收到终态后关闭时，上游连接未及时释放')), 1_000))
+    ]);
+    let terminalLogs;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      terminalLogs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+      if (terminalLogs.some((item) => item.requestId === terminalRequestId)) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    const terminalLog = terminalLogs.find((item) => item.requestId === terminalRequestId);
+    assert.equal(terminalLog.status, 200);
+    assert.equal(terminalLog.errorCode, undefined);
+    assert.equal(terminalLog.inputTokens, 7);
+    assert.equal(terminalLog.outputTokens, 2);
+    const terminalStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(terminalStats.summary.requests, 13);
+    assert.equal(terminalStats.summary.errors, 8);
+    assert.equal(terminalStats.summary.canceledRequests, 3);
+    assert.equal(terminalStats.credentialHealth[0].consecutiveFailures, 0);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});

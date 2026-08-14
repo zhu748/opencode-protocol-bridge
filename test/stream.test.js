@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chatStreamContentDeltas, createSseObserver, MAX_SSE_EVENT_BYTES, observeSse, sanitizeSseErrorStream, SSE_HEARTBEAT_COMMENT, summarizeStreamBlocks, translateSse, withSseEventIdleTimeout, withSseHeartbeat } from '../src/stream.js';
+import { chatStreamContentDeltas, createSseObserver, createSseTerminalTracker, MAX_SSE_EVENT_BYTES, observeSse, sanitizeSseErrorStream, SSE_HEARTBEAT_COMMENT, summarizeStreamBlocks, translateSse, withSseEventIdleTimeout, withSseHeartbeat } from '../src/stream.js';
 import { normalizeUpstreamStreamError } from '../src/upstream-error.js';
 import { decodeReasoningState, encodeReasoningState } from '../src/reasoning-state.js';
 
@@ -19,6 +19,30 @@ async function collect(iterable) {
   for await (const chunk of iterable) result += chunk;
   return result;
 }
+
+test('下游 SSE 终态跟踪只在协议终态完整写出后标记成功', () => {
+  const responses = createSseTerminalTracker('responses');
+  responses.write('event: response.completed\ndata: {"type":"response.comp');
+  assert.equal(responses.outcome, undefined);
+  responses.write('leted","response":{"status":"completed"}}\n\n');
+  assert.equal(responses.outcome, 'success');
+
+  const chat = createSseTerminalTracker('chat');
+  chat.write('data: {"choices":[{"finish_reason":"stop"}]}\n\n');
+  assert.equal(chat.outcome, undefined);
+  chat.write('data: [DONE]\n\n');
+  assert.equal(chat.outcome, 'success');
+
+  const claude = createSseTerminalTracker('claude');
+  claude.write('event: message_delta\ndata: {"type":"message_delta"}\n\n');
+  assert.equal(claude.outcome, undefined);
+  claude.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+  assert.equal(claude.completed, true);
+
+  const failed = createSseTerminalTracker('responses');
+  failed.write('event: error\ndata: {"type":"error","message":"failed"}\n\n');
+  assert.equal(failed.outcome, 'error');
+});
 
 test('流式终态汇总只迭代一次块表并保留各派生顺序', () => {
   const count = 512;

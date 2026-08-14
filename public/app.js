@@ -275,6 +275,7 @@ async function refresh() {
     $('#requestLogLimit').value = config.requestLogLimit;
     $('#persistLogs').checked = Boolean(config.persistLogs);
     $('#statsRetentionDays').value = config.statsRetentionDays || 7;
+    $('#forceMaximumReasoningEffort').checked = config.forceMaximumReasoningEffort !== false;
     $('#bridgeWebSearchEnabled').checked = config.bridgeWebSearchEnabled !== false;
     $('#bridgeWebSearchProvider').value = config.bridgeWebSearchProvider || 'auto';
     $('#upstreamTimeoutMs').value = config.upstreamTimeoutMs;
@@ -909,7 +910,7 @@ $('#settings-form').addEventListener('submit', async (event) => {
     const payload = configPayload({
       defaultProvider: $('#defaultProvider').value,
       clientToken: $('#clientToken').value,
-      requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, statsRetentionDays: Number($('#statsRetentionDays').value), bridgeWebSearchEnabled: $('#bridgeWebSearchEnabled').checked, bridgeWebSearchProvider: $('#bridgeWebSearchProvider').value, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), upstreamStreamIdleTimeoutMs: Number($('#upstreamStreamIdleTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes,
+      requestLogLimit: Number($('#requestLogLimit').value), persistLogs: $('#persistLogs').checked, statsRetentionDays: Number($('#statsRetentionDays').value), forceMaximumReasoningEffort: $('#forceMaximumReasoningEffort').checked, bridgeWebSearchEnabled: $('#bridgeWebSearchEnabled').checked, bridgeWebSearchProvider: $('#bridgeWebSearchProvider').value, upstreamTimeoutMs: Number($('#upstreamTimeoutMs').value), upstreamStreamIdleTimeoutMs: Number($('#upstreamStreamIdleTimeoutMs').value), maxConcurrentRequests: Number($('#maxConcurrentRequests').value), modelRoutes: config.modelRoutes,
       ...keepAliveOverrides
     });
     if ($('#proxyUrl').value.trim()) payload.proxyUrl = $('#proxyUrl').value.trim();
@@ -926,6 +927,7 @@ function configPayload(overrides = {}) {
     requestLogLimit: config.requestLogLimit,
     persistLogs: Boolean(config.persistLogs),
     statsRetentionDays: config.statsRetentionDays || 7,
+    forceMaximumReasoningEffort: config.forceMaximumReasoningEffort !== false,
     bridgeWebSearchEnabled: config.bridgeWebSearchEnabled !== false,
     bridgeWebSearchProvider: config.bridgeWebSearchProvider || 'auto',
     upstreamTimeoutMs: config.upstreamTimeoutMs,

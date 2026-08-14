@@ -5,13 +5,13 @@ import { stat } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from './auth.js';
 import { loadConfig, saveConfig, updateConfig, publicConfig, configRevision, normalizeImageHandoffModels, normalizeModelRoutes, ROOT } from './config.js';
-import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiToolNameAliases, hasGeminiGoogleSearch, hasHostedResponsesWebSearch, responsesToolAdaptations, claudeToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations, hasUsageData, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations } from './adapters.js';
+import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiToolNameAliases, hasGeminiGoogleSearch, hasHostedResponsesWebSearch, responsesToolAdaptations, claudeToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations, hasUsageData, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, withMaximumReasoningEffort } from './adapters.js';
 import { callUpstream, closeDirectUpstreamDispatcher, discardUpstreamResponse, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJsonPayload, readResponseText, upstreamConnectionFailure, withStreamIdleTimeout } from './upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, singBoxRuntimeStatus } from './proxy.js';
 import { KeepAliveService, normalizeKeepAliveUrl, resolveKeepAliveConfig } from './keep-alive.js';
 import { configuredProviderCredentials, createProviderCredentialResolver, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
 import { CredentialHealthTracker } from './credential-health.js';
-import { createSseObserver, sanitizeSseErrorStream, streamClaudeMessage, translateSse, withSseEventIdleTimeout, withSseHeartbeat } from './stream.js';
+import { createSseObserver, createSseTerminalTracker, sanitizeSseErrorStream, streamClaudeMessage, translateSse, withSseEventIdleTimeout, withSseHeartbeat } from './stream.js';
 import { BRIDGE_WEB_SEARCH_NAME, bridgeWebSearchCalls, claudeWebSearchForChat, executeBridgeWebSearchDetailed, hasNonBridgeToolCalls, webSearchToolError, withBridgeWebSearchTool } from './bridge-web-search.js';
 import { RequestLogStore } from './request-log.js';
 import { RequestStatsStore } from './request-stats-store.js';
@@ -978,6 +978,8 @@ async function adminApiOperation(req, res, url, config) {
     if (next.clearZenProxy) updated.zenProxyUrl = '';
     if (next.clearGoProxy) updated.goProxyUrl = '';
     updated.defaultProvider = next.defaultProvider;
+    if (next.forceMaximumReasoningEffort !== undefined && typeof next.forceMaximumReasoningEffort !== 'boolean') return json(res, 400, { error: 'forceMaximumReasoningEffort 必须是布尔值' });
+    updated.forceMaximumReasoningEffort = next.forceMaximumReasoningEffort ?? config.forceMaximumReasoningEffort;
     if (next.bridgeWebSearchEnabled !== undefined && typeof next.bridgeWebSearchEnabled !== 'boolean') return json(res, 400, { error: 'bridgeWebSearchEnabled 必须是布尔值' });
     updated.bridgeWebSearchEnabled = next.bridgeWebSearchEnabled ?? config.bridgeWebSearchEnabled;
     if (next.bridgeWebSearchProvider !== undefined && !['auto', 'exa', 'parallel'].includes(next.bridgeWebSearchProvider)) return json(res, 400, { error: 'bridgeWebSearchProvider 仅支持 auto、exa 或 parallel' });
@@ -1632,6 +1634,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   const imageHandoffEnabled = !responsesCompact && imageHandoffEnabledForRoute(config, route);
   let upstreamBody;
   let reasoningEffort;
+  let maximumReasoningForced = false;
   let conversionBody = body;
   try {
     if (imageHandoffEnabled) body = await imageHandoff.prepareRequest(body, incomingProtocol, true, { signal: abort.signal });
@@ -1640,6 +1643,11 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       : body;
     upstreamBody = prepareUpstreamRequest(conversionBody, incomingProtocol, route.protocol, route.upstreamModel, { toolChoiceFallback: route.toolChoiceFallback, imageHandoffEnabled });
     if (bridgeWebSearch) upstreamBody = withBridgeWebSearchTool(upstreamBody, bridgeWebSearch);
+    if (config.forceMaximumReasoningEffort && !responsesCompact) {
+      const forcedBody = withMaximumReasoningEffort(upstreamBody, route.protocol, route.upstreamModel);
+      maximumReasoningForced = forcedBody !== upstreamBody;
+      upstreamBody = forcedBody;
+    }
     reasoningEffort = requestReasoningEffort(upstreamBody, route.protocol);
   } catch (error) {
     if (abort.signal.aborted) return;
@@ -1647,6 +1655,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   }
   if (abort.signal.aborted) return;
   const reasoningAdaptations = reasoningRequestAdaptations(conversionBody, incomingProtocol, route.protocol, route.upstreamModel);
+  if (maximumReasoningForced) reasoningAdaptations.unshift('reasoning_effort_forced_maximum');
   const contextAdaptations = contextRequestAdaptations(body, incomingProtocol, route.protocol);
   const serviceAdaptations = serviceRequestAdaptations(body, incomingProtocol, route.protocol);
   const generationAdaptations = generationRequestAdaptations(body, incomingProtocol, route.protocol);
@@ -1824,6 +1833,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   if (stream && !bridgeWebSearch && incomingProtocol === route.protocol) {
     const upstreamStream = withStreamIdleTimeout(upstream.body, config.upstreamStreamIdleTimeoutMs);
     const observer = createSseObserver(route.protocol, body.model);
+    const downstreamTerminal = createSseTerminalTracker(incomingProtocol);
     let observedEventRevision = 0;
     let forwardedEventRevision = 0;
     res.writeHead(upstream.status, {
@@ -1855,12 +1865,18 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       })) {
         activity.stage('writing_stream');
         await writeResponseChunk(res, chunk, STREAM_WRITE_TIMEOUT_MS);
+        downstreamTerminal.write(chunk);
         activity.stage('streaming');
       }
     } catch (error) {
       const failure = streamFailure(error, res, abort);
       const safeFailure = sanitizeStreamError({ message: failure.message, code: failure.code });
-      const observed = failure.status === 499 ? undefined : observer.end();
+      const observed = failure.status === 499 && !downstreamTerminal.completed ? undefined : observer.end();
+      if (failure.status === 499 && downstreamTerminal.completed && !observed?.error) {
+        recordCredentialResponse(route.provider, credential, upstream);
+        await writeLog({ status: upstream.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', ...observed.usage });
+        return;
+      }
       if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
       else credentialHealth.releaseProbe(route.provider, credential);
       await writeLog({ status: failure.status, stream: true, error: safeFailure.message, errorCode: safeFailure.code || 'upstream_error' });
@@ -1883,6 +1899,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   }
   if (stream && !bridgeWebSearch) {
     const upstreamStream = withStreamIdleTimeout(upstream.body, config.upstreamStreamIdleTimeoutMs);
+    const downstreamTerminal = createSseTerminalTracker(incomingProtocol);
     let streamUsage = {};
     let streamError;
     let responseSequenceNumber = 0;
@@ -1919,11 +1936,17 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       })) {
         activity.stage('writing_stream');
         await writeResponseChunk(res, event, STREAM_WRITE_TIMEOUT_MS);
+        downstreamTerminal.write(event);
         activity.stage('streaming');
       }
     } catch (error) {
       const failure = streamFailure(error, res, abort);
       const safeFailure = sanitizeStreamError({ message: failure.message, code: failure.code });
+      if (failure.status === 499 && downstreamTerminal.completed && !streamError) {
+        recordCredentialResponse(route.provider, credential, upstream);
+        await writeLog({ status: upstream.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', ...streamUsage });
+        return;
+      }
       if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
       else credentialHealth.releaseProbe(route.provider, credential);
       await writeLog({ status: failure.status, stream: true, inputTokensIncludeCache: route.protocol !== 'claude', error: safeFailure.message, errorCode: safeFailure.code || 'upstream_error', ...streamUsage });
@@ -1993,6 +2016,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       reasoningTokens: normalizedResponse.reasoningTokens
     } : {};
   if (bridgeWebSearch && stream) {
+    const downstreamTerminal = createSseTerminalTracker(incomingProtocol);
     if (responseDegradations.length) res.setHeader('x-opencode-response-degradations', responseDegradations.join(','));
     res.writeHead(upstream.status, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -2005,9 +2029,15 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       for await (const event of streamClaudeMessage(clientResponse)) {
         activity.stage('writing_stream');
         await writeResponseChunk(res, event, STREAM_WRITE_TIMEOUT_MS);
+        downstreamTerminal.write(event);
       }
     } catch (error) {
       const failure = streamFailure(error, res, abort);
+      if (failure.status === 499 && downstreamTerminal.completed) {
+        recordCredentialResponse(route.provider, credential, upstream);
+        await writeLog({ status: upstream.status, stream: true, ...usageLog });
+        return;
+      }
       if (failure.penalizeCredential) credentialHealth.recordNetworkFailure(route.provider, credential, failure.status);
       else credentialHealth.releaseProbe(route.provider, credential);
       await writeLog({ status: failure.status, stream: true, ...usageLog, error: failure.message, errorCode: failure.code || 'upstream_error' });

@@ -906,7 +906,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     });
     assert.equal(claudeOpaqueThinking.status, 200);
     assert.equal(claudeOpaqueThinking.headers.get('x-opencode-input-degradations'), 'claude_thinking_signature,claude_redacted_thinking');
-    assert.equal(claudeOpaqueThinking.headers.get('x-opencode-reasoning-adaptations'), 'reasoning_history_to_chat_reasoning_content');
+    assert.equal(claudeOpaqueThinking.headers.get('x-opencode-reasoning-adaptations'), 'reasoning_effort_forced_maximum,reasoning_history_to_chat_reasoning_content');
     await claudeOpaqueThinking.json();
     assert.equal(captured.path, '/chat/completions');
     assert.deepEqual(captured.body.messages.map((message) => message.role), ['user', 'assistant', 'tool']);
@@ -915,7 +915,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(JSON.stringify(captured.body).includes('opaque-claude-signature'), false);
     assert.equal(JSON.stringify(captured.body).includes('opaque-redacted-thinking'), false);
     const claudeOpaqueLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(claudeOpaqueLog.protocol, 'claude → chat (claude thinking signature degraded, claude redacted thinking degraded, reasoning_history_to_chat_reasoning_content adapted)');
+    assert.equal(claudeOpaqueLog.protocol, 'claude → chat (claude thinking signature degraded, claude redacted thinking degraded, reasoning_effort_forced_maximum adapted, reasoning_history_to_chat_reasoning_content adapted)');
 
     const geminiStream = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1beta/models/alias:streamGenerateContent?alt=sse`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': createdClient.token },
@@ -963,7 +963,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['inspect', 'list']);
     assert.equal(captured.body.tool_choice, 'auto');
     const geminiToolsLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(geminiToolsLog.protocol, 'gemini → chat (gemini_allowed_functions_filtered adapted, gemini_validated_best_effort adapted)');
+    assert.equal(geminiToolsLog.protocol, 'gemini → chat (gemini_allowed_functions_filtered adapted, gemini_validated_best_effort adapted, reasoning_effort_forced_maximum adapted)');
 
     const geminiSignedHistory = await fetch(`http://127.0.0.1:${bridgePort}/v1beta/models/chat-alias:generateContent`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': createdClient.token },
@@ -980,7 +980,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     });
     assert.equal(geminiSignedHistory.status, 200);
     assert.equal(geminiSignedHistory.headers.get('x-opencode-input-degradations'), 'gemini_thought_signature');
-    assert.equal(geminiSignedHistory.headers.get('x-opencode-reasoning-adaptations'), 'reasoning_history_to_chat_reasoning_content');
+    assert.equal(geminiSignedHistory.headers.get('x-opencode-reasoning-adaptations'), 'reasoning_effort_forced_maximum,reasoning_history_to_chat_reasoning_content');
     await geminiSignedHistory.json();
     assert.equal(captured.path, '/chat/completions');
     assert.deepEqual(captured.body.messages.map((message) => message.role), ['user', 'assistant', 'tool']);
@@ -988,20 +988,20 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.body.messages[1].tool_calls[0].function.name, 'lookup');
     assert.equal(JSON.stringify(captured.body).includes('opaque-gemini-state'), false);
     const geminiSignatureLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(geminiSignatureLog.protocol, 'gemini → chat (gemini thought signature degraded, reasoning_history_to_chat_reasoning_content adapted)');
+    assert.equal(geminiSignatureLog.protocol, 'gemini → chat (gemini thought signature degraded, reasoning_effort_forced_maximum adapted, reasoning_history_to_chat_reasoning_content adapted)');
 
     const geminiThinking = await fetch(`http://127.0.0.1:${bridgePort}/v1beta/models/thinking-alias:generateContent`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': createdClient.token },
       body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'thinking 配置测试' }] }], generationConfig: { thinkingConfig: { thinkingBudget: 8192, includeThoughts: true } } })
     });
     assert.equal(geminiThinking.status, 200);
-    assert.equal(geminiThinking.headers.get('x-opencode-reasoning-adaptations'), 'thinking_budget_to_effort');
+    assert.equal(geminiThinking.headers.get('x-opencode-reasoning-adaptations'), 'reasoning_effort_forced_maximum,thinking_budget_to_effort');
     await geminiThinking.json();
     assert.equal(captured.path, '/responses');
     assert.equal(captured.body.model, 'gpt-5.6-luna');
-    assert.deepEqual(captured.body.reasoning, { effort: 'medium', summary: 'auto' });
+    assert.deepEqual(captured.body.reasoning, { effort: 'max', summary: 'auto' });
     const thinkingLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(thinkingLog.protocol, 'gemini → responses (thinking_budget_to_effort adapted)');
+    assert.equal(thinkingLog.protocol, 'gemini → responses (reasoning_effort_forced_maximum adapted, thinking_budget_to_effort adapted)');
 
     const codexCrossProtocol = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
@@ -1009,7 +1009,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
         model: 'chat-alias',
         instructions: '代理规则', metadata: { trace: 'codex-cross' },
         max_output_tokens: 512, temperature: 0.4, top_p: 0.8,
-        reasoning: { effort: 'max', summary: 'auto' }, store: false, truncation: 'disabled',
+        reasoning: { effort: 'low', summary: 'auto' }, store: false, truncation: 'disabled',
         text: { verbosity: 'low' }, user: 'legacy-user', safety_identifier: 'safe-user',
         client_metadata: { 'x-codex-turn-metadata': '{"session_id":"session_probe","request_kind":"turn"}' },
         input: [
@@ -1031,7 +1031,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(codexCrossProtocol.status, 200);
     assert.equal(codexCrossProtocol.headers.get('x-opencode-tool-degradations'), 'web_search');
     assert.equal(codexCrossProtocol.headers.get('x-opencode-input-degradations'), 'responses_client_metadata,responses_item_metadata,responses_item_phase,encrypted_reasoning');
-    assert.equal(codexCrossProtocol.headers.get('x-opencode-reasoning-adaptations'), 'reasoning_summary_best_effort_chat,reasoning_history_to_chat_reasoning_content');
+    assert.equal(codexCrossProtocol.headers.get('x-opencode-reasoning-adaptations'), 'reasoning_effort_forced_maximum,reasoning_summary_best_effort_chat,reasoning_history_to_chat_reasoning_content');
     const codexBody = await codexCrossProtocol.json();
     assert.equal(codexBody.output[0].type, 'function_call');
     assert.equal(codexBody.output[0].namespace, 'multi_agent_v1');
@@ -1045,7 +1045,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(codexBody.max_output_tokens, 512);
     assert.equal(codexBody.temperature, 0.4);
     assert.equal(codexBody.top_p, 0.8);
-    assert.deepEqual(codexBody.reasoning, { effort: 'max', summary: 'auto' });
+    assert.deepEqual(codexBody.reasoning, { effort: 'low', summary: 'auto' });
     assert.deepEqual(codexBody.text, { verbosity: 'low' });
     assert.equal(codexBody.store, false);
     assert.equal(codexBody.truncation, 'disabled');
@@ -1062,13 +1062,13 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.match(captured.body.messages.find((message) => message.role === 'system').content, /cannot execute the hosted web_search tool/);
     assert.equal(captured.body.messages.find((message) => message.role === 'assistant').reasoning_content, '先检查任务边界');
     const codexLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(codexLog.protocol, 'responses → chat (web_search unavailable, reasoning degraded, responses client metadata dropped, responses item metadata degraded, responses item phase degraded, reasoning_summary_best_effort_chat adapted, reasoning_history_to_chat_reasoning_content adapted)');
-    assert.equal(codexLog.requestedReasoningEffort, 'max');
+    assert.equal(codexLog.protocol, 'responses → chat (web_search unavailable, reasoning degraded, responses client metadata dropped, responses item metadata degraded, responses item phase degraded, reasoning_effort_forced_maximum adapted, reasoning_summary_best_effort_chat adapted, reasoning_history_to_chat_reasoning_content adapted)');
+    assert.equal(codexLog.requestedReasoningEffort, 'low');
     assert.equal(codexLog.reasoningEffort, 'max');
     assert.equal(codexLog.requestKind, 'turn');
     const effortStats = await fetch(`http://127.0.0.1:${bridgePort}/api/stats`, { headers: { cookie } }).then((result) => result.json());
     assert.ok(effortStats.byReasoningEffort.some((item) => item.name === 'max' && item.requests >= 1));
-    assert.ok(effortStats.summary.reasoningEffortPreservedRequests >= 1);
+    assert.ok(effortStats.summary.reasoningEffortChangedRequests >= 1);
     assert.equal(effortStats.summary.reasoningEffortDroppedRequests, 0);
 
     const requestsBeforeStatefulInput = upstreamRequestCount;
@@ -1122,7 +1122,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     await claudeToolError.json();
     assert.equal(captured.body.messages.find((message) => message.role === 'tool').content, '[Claude tool_result is_error=true]\n连接超时');
     const toolErrorLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(toolErrorLog.protocol, 'claude → chat (claude_tool_error_to_content adapted)');
+    assert.equal(toolErrorLog.protocol, 'claude → chat (claude_tool_error_to_content adapted, reasoning_effort_forced_maximum adapted)');
 
     const loadedTool = { type: 'function', name: 'inspect_file', description: '检查文件', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } };
     const codexAdaptedTools = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
@@ -1155,7 +1155,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.deepEqual(captured.body.messages.slice(-2).map((message) => message.role), ['assistant', 'tool']);
     assert.deepEqual(JSON.parse(captured.body.messages.at(-1).content), { tools: [loadedTool] });
     const adaptedLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(adaptedLog.protocol, 'responses → chat (custom adapted, client_tool_search adapted, responses item metadata degraded)');
+    assert.equal(adaptedLog.protocol, 'responses → chat (custom adapted, client_tool_search adapted, responses item metadata degraded, reasoning_effort_forced_maximum adapted)');
 
     const programmaticTools = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
@@ -1176,7 +1176,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['inventory']);
     assert.match(captured.body.tools[0].function.description, /Responses output_schema/);
     const programmaticLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(programmaticLog.protocol, 'responses → chat (programmatic_tool_calling_disabled adapted, output_schema_to_description adapted, allowed_callers_direct_only adapted)');
+    assert.equal(programmaticLog.protocol, 'responses → chat (programmatic_tool_calling_disabled adapted, output_schema_to_description adapted, allowed_callers_direct_only adapted, reasoning_effort_forced_maximum adapted)');
 
     const allowedTools = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
@@ -1195,7 +1195,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['inspect']);
     assert.equal(captured.body.tool_choice, 'required');
     const allowedToolsLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(allowedToolsLog.protocol, 'responses → chat (allowed_tools_filtered adapted)');
+    assert.equal(allowedToolsLog.protocol, 'responses → chat (allowed_tools_filtered adapted, reasoning_effort_forced_maximum adapted)');
 
     const claudeDeferredTools = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
@@ -1215,7 +1215,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['ToolSearch']);
     assert.equal(captured.body.tools[0].function.strict, true);
     const claudeDeferredLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(claudeDeferredLog.protocol, 'claude → chat (deferred_tools_hidden adapted, claude_keep_all_thinking_local adapted)');
+    assert.equal(claudeDeferredLog.protocol, 'claude → chat (deferred_tools_hidden adapted, reasoning_effort_forced_maximum adapted, claude_keep_all_thinking_local adapted)');
 
     const claudeLoadedDeferred = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
@@ -1242,7 +1242,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.body.tools[1].function.strict, true);
     assert.match(captured.body.tools[1].function.description, /Claude input_examples/);
     const claudeLoadedLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(claudeLoadedLog.protocol, 'claude → chat (deferred_tools_loaded adapted, input_examples_to_description adapted, allowed_callers_direct_only adapted)');
+    assert.equal(claudeLoadedLog.protocol, 'claude → chat (deferred_tools_loaded adapted, input_examples_to_description adapted, allowed_callers_direct_only adapted, reasoning_effort_forced_maximum adapted)');
 
     const eagerToolStream = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
@@ -1275,7 +1275,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.deepEqual(captured.body.prompt_cache_options, { mode: 'implicit' });
     assert.deepEqual(captured.body.input[0].content[0].prompt_cache_breakpoint, { mode: 'explicit' });
     const claudePromptCacheLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(claudePromptCacheLog.protocol, 'claude → responses (claude_cache_to_responses adapted, claude_cache_ttl_to_30m adapted)');
+    assert.equal(claudePromptCacheLog.protocol, 'claude → responses (reasoning_effort_forced_maximum adapted, claude_cache_to_responses adapted, claude_cache_ttl_to_30m adapted)');
 
     const responsesPromptCache = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
@@ -1293,7 +1293,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.deepEqual(captured.body.cache_control, { type: 'ephemeral' });
     assert.deepEqual(captured.body.messages[0].content[0].cache_control, { type: 'ephemeral' });
     const responsesPromptCacheLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(responsesPromptCacheLog.protocol, 'responses → claude (responses_cache_to_claude adapted, responses_cache_ttl_to_5m adapted, responses_cache_key_dropped adapted)');
+    assert.equal(responsesPromptCacheLog.protocol, 'responses → claude (reasoning_effort_forced_maximum adapted, responses_cache_to_claude adapted, responses_cache_ttl_to_5m adapted, responses_cache_key_dropped adapted)');
 
     const chatPromptCache = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
@@ -1312,7 +1312,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.body.prompt_cache_key, 'shared-chat-prefix');
     assert.deepEqual(captured.body.input[0].content[0].prompt_cache_breakpoint, { mode: 'explicit' });
     const chatPromptCacheLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(chatPromptCacheLog.protocol, 'chat → responses (chat_cache_to_responses adapted)');
+    assert.equal(chatPromptCacheLog.protocol, 'chat → responses (reasoning_effort_forced_maximum adapted, chat_cache_to_responses adapted)');
 
     const chatToolCache = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
@@ -1333,7 +1333,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.deepEqual(captured.body.messages[0].content[0].cache_control, { type: 'ephemeral', ttl: '1h' });
     assert.deepEqual(captured.body.tools[0].cache_control, { type: 'ephemeral', ttl: '1h' });
     const chatToolCacheLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(chatToolCacheLog.protocol, 'chat → claude (chat_cache_to_claude adapted)');
+    assert.equal(chatToolCacheLog.protocol, 'chat → claude (reasoning_effort_forced_maximum adapted, chat_cache_to_claude adapted)');
 
     const typedServerTool = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },

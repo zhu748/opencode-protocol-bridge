@@ -87,6 +87,7 @@
           <label>日志保留条数<input id="requestLogLimit" type="number" min="10" max="1000"></label>
           <label class="check-field"><input id="persistLogs" type="checkbox"><span>持久化请求日志<small>仅保存请求元数据，不保存提示词和响应正文</small></span></label>
           <label>统计保留天数<input id="statsRetentionDays" type="number" min="1" max="365" value="7" required><small>默认 7 天；独立于日志条数，过期统计会自动删除</small></label>
+          <label class="check-field"><input id="forceMaximumReasoningEffort" type="checkbox" checked><span>始终使用模型最高思考强度<small>默认开启；Claude、Responses、Chat、Gemini 的普通推理请求都会忽略客户端强度，并按最终上游模型发送其支持的最高档。会增加延迟与 Token 消耗。</small></span></label>
           <label class="check-field"><input id="bridgeWebSearchEnabled" type="checkbox"><span>为 Claude Code 启用本地 Web Search<small>当 Chat 上游收到 Claude typed web_search 或 Claude Code 内置 WebSearch 时，桥接会通过 Exa 或 Parallel MCP 完成搜索并回填结果；搜索关键词会发送到选中的搜索服务。</small></span></label>
           <label>本地 Web Search 提供方<select id="bridgeWebSearchProvider"><option value="auto">自动（Exa 优先，失败回退 Parallel）</option><option value="exa">仅 Exa</option><option value="parallel">仅 Parallel</option></select><small>自动模式兼顾 OpenCode 的双后端能力与稳定性；域名过滤和国家定位会固定使用 Exa Advanced。</small></label>
           <label>上游超时（毫秒）<input id="upstreamTimeoutMs" type="number" min="1000" max="600000" step="1000"><small>非流式和错误正文覆盖完整读取；成功流式仅限制连接与响应头</small></label>

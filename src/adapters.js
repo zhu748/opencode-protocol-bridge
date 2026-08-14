@@ -136,6 +136,49 @@ function supportsReasoningEffort(model) {
     || /^deepseek-v4-(?:flash|pro)$/i.test(model || '');
 }
 
+export function maximumReasoningEffort(model, protocol) {
+  const normalized = typeof model === 'string' ? model.trim().toLowerCase() : '';
+  if (!normalized) return undefined;
+  if (protocol === 'gemini') return 'high';
+  if (protocol === 'claude') return 'max';
+  if (/^deepseek-v4-(?:flash|pro)$/.test(normalized) || /^gpt-5\.6(?:$|[-.])/.test(normalized)) return 'max';
+  if (/^gpt-5\.[2-5](?:$|[-.])/.test(normalized)) return 'xhigh';
+  if (/^gpt-5(?:\.1)?(?:$|[-.])/.test(normalized) || /^o\d/.test(normalized)) return 'high';
+  return undefined;
+}
+
+export function withMaximumReasoningEffort(body, protocol, model) {
+  const effort = maximumReasoningEffort(model, protocol);
+  if (!effort || !body || Array.isArray(body) || typeof body !== 'object') return body;
+  if (protocol === 'responses') {
+    const reasoning = body.reasoning && !Array.isArray(body.reasoning) && typeof body.reasoning === 'object' ? body.reasoning : {};
+    return { ...body, reasoning: { ...reasoning, effort } };
+  }
+  if (protocol === 'chat') return { ...body, reasoning_effort: effort };
+  if (protocol === 'claude') {
+    const outputConfig = body.output_config && !Array.isArray(body.output_config) && typeof body.output_config === 'object' ? body.output_config : {};
+    const thinking = body.thinking && !Array.isArray(body.thinking) && typeof body.thinking === 'object' ? body.thinking : {};
+    const forced = {
+      ...body,
+      output_config: { ...outputConfig, effort },
+      thinking: { type: 'adaptive', ...(thinking.display ? { display: thinking.display } : {}) }
+    };
+    delete forced.temperature;
+    return forced;
+  }
+  if (protocol === 'gemini') {
+    const generationConfig = body.generationConfig && !Array.isArray(body.generationConfig) && typeof body.generationConfig === 'object' ? body.generationConfig : {};
+    const thinkingConfig = generationConfig.thinkingConfig && !Array.isArray(generationConfig.thinkingConfig) && typeof generationConfig.thinkingConfig === 'object'
+      ? generationConfig.thinkingConfig : {};
+    const { thinkingBudget: _thinkingBudget, ...preservedThinking } = thinkingConfig;
+    return {
+      ...body,
+      generationConfig: { ...generationConfig, thinkingConfig: { ...preservedThinking, thinkingLevel: effort } }
+    };
+  }
+  return body;
+}
+
 const REASONING_EFFORT_LABEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
 function reasoningEffortLabel(value) {

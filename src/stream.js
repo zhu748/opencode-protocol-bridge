@@ -2814,6 +2814,48 @@ export function createSseObserver(protocol, fallbackModel, options = {}) {
   };
 }
 
+export function createSseTerminalTracker(protocol) {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const pending = createSseTextBuffer();
+  let outcome;
+
+  const observeBlock = (block) => {
+    const lines = block.split(/\r\n|\r|\n/);
+    const rawData = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
+    if (protocol === 'chat' && rawData === '[DONE]') {
+      outcome = 'success';
+      return;
+    }
+    const parsed = parseSseBlock(block);
+    if (!parsed) return;
+    const { event, data } = parsed;
+    if (event === 'error' || data?.type === 'error' || data?.error) {
+      outcome = 'error';
+      return;
+    }
+    if (protocol === 'responses') {
+      const type = data?.type || event;
+      if (['response.completed', 'response.incomplete'].includes(type)) outcome = 'success';
+      else if (type === 'response.failed') outcome = 'error';
+    } else if (protocol === 'claude' && data?.type === 'message_stop') outcome = 'success';
+    else if (protocol === 'gemini' && (data?.candidates?.some((candidate) => candidate?.finishReason) || data?.promptFeedback?.blockReason)) outcome = 'success';
+  };
+
+  return {
+    write(chunk) {
+      if (outcome) return;
+      try {
+        const text = typeof chunk === 'string' ? chunk : decodeSseUtf8(decoder, chunk, { stream: true });
+        for (const { block } of appendSseText(pending, text)) observeBlock(block);
+      } catch {
+        // 这是下游记账观察器；解析失败不能影响已经发送的响应。
+      }
+    },
+    get outcome() { return outcome; },
+    get completed() { return outcome === 'success'; }
+  };
+}
+
 export async function observeSse(response, protocol, fallbackModel, options = {}) {
   const observer = createSseObserver(protocol, fallbackModel, options);
   try {

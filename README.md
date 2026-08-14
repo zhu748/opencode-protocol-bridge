@@ -13,7 +13,7 @@
 - OpenCode Zen / Go 密钥和模型路由
 - 每个 Zen / Go Key 可独立配置 HTTP、HTTPS、SOCKS4、SOCKS4a、SOCKS5、SOCKS5h、Clash/mihomo mixed-port，或由 sing-box 托管的 hy2 / TUIC / VLESS / VMess / Trojan / Shadowsocks / Hysteria 分享链接
 - 工具调用、工具结果、并行工具开关、文本消息、图片精度字段，以及 Claude Documents 与 Responses 文件块转换；Codex Responses `namespace` 工具可跨协议桥接到 Chat/Claude；Claude Code 的 typed `web_search_YYYYMMDD` 和内置客户端 `WebSearch` 可在 Chat 路由通过本地 Exa/Parallel MCP 工具循环执行
-- Claude thinking、Responses reasoning 摘要与 Chat reasoning_content 转换
+- Claude thinking、Responses reasoning 摘要与 Chat reasoning_content 转换；设置默认强制最终上游模型使用其已知最高思考档位
 - Claude thinking/output effort、Gemini thinkingConfig 与 OpenAI reasoning 的模型感知映射；请求日志同时记录客户端与最终上游思考强度，统计页可按最终强度分组
 - Claude `speed: standard|fast` 与 OpenAI/OpenCode `service_tier: default|fast` 双向映射；其它容量层明确拒绝，不冒充速度配置
 - Claude 新版 `compaction` 内容块支持非流式与流式转换：摘要可见传递，桥接生成的加密压缩状态可在客户端续轮后逐字恢复
@@ -35,7 +35,7 @@
 - 可单独停用、撤销和限制并发的命名客户端令牌
 - 管理端变更请求具有独立并发上限；设置、Key 池、命名客户端、主令牌和密码等持久化变更均使用配置修订号防止多页面覆盖
 - 管理面板的上游模型发现具有独立并发上限并在运行状态中可观测，避免多标签页同时刷新占满连接
-- HTTP 层限制总连接数、请求头体积/数量和单连接复用次数，并以 1 秒粒度检查慢头部与慢请求；已建立的 SSE 长响应不设置总时长上限，但会回收长期没有任何上游数据的停滞连接
+- HTTP 层限制总连接数、请求头体积/数量和单连接复用次数，并以 1 秒粒度检查慢头部与慢请求；已建立的 SSE 长响应不设置总时长上限，但会回收长期没有任何上游数据的停滞连接；客户端在收到协议终态后立即收束连接会按已完成请求记账，终态前断开仍单独统计为 499 取消
 - 流式推理、超过 64 KiB 的 JSON、远程图片附件和静态文件响应均遵守下游背压；客户端持续停止读取时会在可配置超时后断开并释放上游连接、文件读取租约和并发槽，不会惩罚对应 Key
 - 仅记录请求元数据的日志
 - 可选的有界请求日志持久化，以及默认保留 7 天、可在面板调整的独立统计持久化
@@ -447,7 +447,7 @@ Zen 当前原生端点按官方端点表分为四类：
 
 > Chat 角色兼容：下文所述 `developer` 原角色保留仅适用于目标为 Responses；目标为 Chat 时，桥接会把 `developer` 在原位置转换为 `system`，正文与消息顺序不变。这与 Console Go 当前只接受 `system/user/assistant/tool/latest_reminder` 的消息枚举兼容，可避免 Codex 的 Responses `instructions` 被转换为上游无法反序列化的请求。
 
-> 思考强度可观测性：路由到 DeepSeek V4 Flash / Pro Chat 上游时，Responses `reasoning.effort: "max"` 会转换为顶层 `reasoning_effort: "max"`。请求记录分别保存客户端请求值和最终上游值，发生近似映射时显示为 `max → high`；用量统计按最终实际发送的强度分组，未携带强度的请求单独归为“未指定”。
+> 思考强度可观测性：设置中的“始终使用模型最高思考强度”默认开启，Claude、Responses、Chat 与 Gemini 四种入口的普通推理请求都会在协议转换完成后，以最终路由的上游模型为准覆盖客户端强度；同协议透传也不会绕过。DeepSeek V4 Flash / Pro 和 GPT-5.6 使用 `max`，GPT-5.2–5.5 使用 `xhigh`，GPT-5/5.1 与 o 系列使用 `high`，Claude 上游使用 adaptive thinking + `output_config.effort: "max"`，Gemini 上游使用 `thinkingLevel: "high"`；明确没有标准强度控制的模型保持原样。请求记录分别保存客户端请求值和最终上游值，例如显示为 `low → max`；用量统计按最终实际发送的强度分组。关闭开关后恢复客户端原始强度与既有协议映射。专用 `/responses/compact` 保留压缩接口语义，不混入普通推理参数。
 
 > Codex 压缩可观测性：Codex 客户端通过普通 `/responses` 请求生成可读 checkpoint 交接摘要时，桥接会从经过严格限长解析的 `client_metadata` 中识别 `request_kind=compaction`，并在请求记录中显示“Codex 上下文压缩”；该遥测仍不会进入上游模型上下文。摘要提示、历史工具结果与后续续轮按普通 Responses input 转换。原生 `/responses/compact`、非空 `context_management` 或不透明 compaction item 则仍按其服务端状态语义处理，不能伪装成 Chat 压缩。
 

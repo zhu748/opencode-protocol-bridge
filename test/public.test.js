@@ -27,6 +27,8 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /log-web-search/);
   assert.match(html, /id="bridgeWebSearchProvider"/);
   assert.match(html, /id="statsRetentionDays"[^>]*min="1"[^>]*max="365"/);
+  assert.match(html, /id="forceMaximumReasoningEffort"[^>]*type="checkbox"[^>]*checked/);
+  assert.match(script, /forceMaximumReasoningEffort/);
   assert.match(html, /Exa 优先，失败回退 Parallel/);
   assert.match(script, /navigator\.clipboard\.writeText\(button\.dataset\.copyValue\)/);
   assert.match(script, /requestLogsToCsv\(items\)/);

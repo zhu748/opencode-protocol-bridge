@@ -64,6 +64,7 @@ test('旧版未修改的四项和十五项图片默认会迁移，自定义选�
 test('公开配置提供非敏感的 Zen 与 Go 协议和视觉能力表', () => {
   const exposed = publicConfig(normalizeStoredConfig());
   assert.equal(exposed.upstreamStreamIdleTimeoutMs, 300000);
+  assert.equal(exposed.forceMaximumReasoningEffort, true);
   assert.equal(exposed.bridgeWebSearchEnabled, true);
   assert.equal(exposed.bridgeWebSearchProvider, 'auto');
   assert.deepEqual(exposed.goModelCapabilities['gpt-5.6-luna'], {
@@ -152,6 +153,7 @@ test('旧版部分配置会补齐默认字段并规范化模型路由和 Key 池
   assert.equal(config.upstreamStreamIdleTimeoutMs, 300000);
   assert.equal(config.persistLogs, false);
   assert.equal(config.statsRetentionDays, 7);
+  assert.equal(config.forceMaximumReasoningEffort, true);
   assert.equal(config.bridgeWebSearchEnabled, true);
   assert.equal(config.bridgeWebSearchProvider, 'auto');
   assert.equal(config.keepAliveUrl, '');
@@ -178,6 +180,7 @@ test('持久化配置拒绝错误类型、越界值和未知版本', () => {
   assert.throws(() => normalizeStoredConfig({ upstreamStreamIdleTimeoutMs: 999 }), /上游流空闲超时必须是 0 或 1000–3600000 的整数/);
   assert.throws(() => normalizeStoredConfig({ persistLogs: 'false' }), /日志持久化开关必须是布尔值/);
   assert.throws(() => normalizeStoredConfig({ statsRetentionDays: 0 }), /统计保留天数必须是 1–365 的整数/);
+  assert.throws(() => normalizeStoredConfig({ forceMaximumReasoningEffort: 'true' }), /最高思考强度开关必须是布尔值/);
   assert.throws(() => normalizeStoredConfig({ bridgeWebSearchEnabled: 'false' }), /本地 Web Search 开关必须是布尔值/);
   assert.throws(() => normalizeStoredConfig({ bridgeWebSearchProvider: 'other' }), /本地 Web Search 提供方仅支持 auto 或 exa 或 parallel/);
   assert.throws(() => normalizeStoredConfig({ keepAliveUrl: 'file:///tmp/test' }), /仅支持 HTTP 或 HTTPS/);

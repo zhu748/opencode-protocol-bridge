@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiGroundingMetadata, geminiToolNameAliases, hasUsageData, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, claudeToolAdaptations, responsesToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations } from '../src/adapters.js';
+import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiGroundingMetadata, geminiToolNameAliases, hasUsageData, maximumReasoningEffort, withMaximumReasoningEffort, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, claudeToolAdaptations, responsesToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations } from '../src/adapters.js';
 import { decodeReasoningState, encodeReasoningStateBundle } from '../src/reasoning-state.js';
 
 test('识别四种兼容端点', () => {
@@ -3100,6 +3100,28 @@ test('Claude thinking 与 output_config 转为 OpenAI reasoning effort', () => {
   }, 'responses', 'chat', 'deepseek-v4-flash');
   assert.equal(codexMaximum.reasoning_effort, 'max');
   assert.equal(requestReasoningEffort(codexMaximum, 'chat'), 'max');
+});
+
+test('最高思考强度按最终模型和协议覆盖客户端强度', () => {
+  assert.equal(maximumReasoningEffort('gpt-5.6-sol', 'responses'), 'max');
+  assert.equal(maximumReasoningEffort('gpt-5.5', 'responses'), 'xhigh');
+  assert.equal(maximumReasoningEffort('gpt-5.1-codex', 'responses'), 'high');
+  assert.equal(maximumReasoningEffort('o3-mini', 'chat'), 'high');
+  assert.equal(maximumReasoningEffort('deepseek-v4-flash', 'chat'), 'max');
+  assert.equal(maximumReasoningEffort('deepseek-v4-flash-free', 'chat'), undefined);
+  assert.equal(maximumReasoningEffort('claude-opus-4-8', 'claude'), 'max');
+  assert.equal(maximumReasoningEffort('minimax-m3', 'claude'), 'max');
+  assert.equal(maximumReasoningEffort('gemini-3.6-flash', 'gemini'), 'high');
+  assert.equal(maximumReasoningEffort('future-native-model', 'gemini'), 'high');
+
+  assert.deepEqual(withMaximumReasoningEffort({ model: 'gpt-5.5', reasoning: { effort: 'none', summary: 'auto' } }, 'responses', 'gpt-5.5').reasoning, { effort: 'xhigh', summary: 'auto' });
+  assert.equal(withMaximumReasoningEffort({ model: 'deepseek-v4-flash', reasoning_effort: 'low' }, 'chat', 'deepseek-v4-flash').reasoning_effort, 'max');
+  const claude = withMaximumReasoningEffort({ model: 'claude-opus-4-8', temperature: 0.2, thinking: { type: 'disabled', display: 'omitted' }, output_config: { format: { type: 'json_schema', schema: {} }, effort: 'low' } }, 'claude', 'claude-opus-4-8');
+  assert.deepEqual(claude.thinking, { type: 'adaptive', display: 'omitted' });
+  assert.equal(claude.output_config.effort, 'max');
+  assert.equal(claude.temperature, undefined);
+  const gemini = withMaximumReasoningEffort({ generationConfig: { thinkingConfig: { thinkingBudget: 0, includeThoughts: true } } }, 'gemini', 'gemini-3.6-flash');
+  assert.deepEqual(gemini.generationConfig.thinkingConfig, { includeThoughts: true, thinkingLevel: 'high' });
 });
 
 test('Codex checkpoint 压缩摘要与目标工具可完整转换到 Chat', () => {
