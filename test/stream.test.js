@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chatStreamContentDeltas, createSseObserver, MAX_SSE_EVENT_BYTES, observeSse, sanitizeSseErrorStream, SSE_HEARTBEAT_COMMENT, summarizeStreamBlocks, translateSse, withSseHeartbeat } from '../src/stream.js';
+import { chatStreamContentDeltas, createSseObserver, MAX_SSE_EVENT_BYTES, observeSse, sanitizeSseErrorStream, SSE_HEARTBEAT_COMMENT, summarizeStreamBlocks, translateSse, withSseEventIdleTimeout, withSseHeartbeat } from '../src/stream.js';
 import { normalizeUpstreamStreamError } from '../src/upstream-error.js';
 import { decodeReasoningState, encodeReasoningState } from '../src/reasoning-state.js';
 
@@ -261,6 +261,63 @@ test('SSE 心跳等待同一个上游读取且不抢占真实事件', async () =
   await assert.rejects(collect(withSseHeartbeat(immediate(), 10, { comment: 'data: not-comment\n\n' })), /注释帧/);
   await assert.rejects(collect(withSseHeartbeat(immediate(), 10, { onHeartbeat: true })), /回调必须是函数/);
   await assert.rejects(collect(withSseHeartbeat(immediate(), 10, { onCancel: true })), /取消回调必须是函数/);
+
+  let stubbornCanceled = 0;
+  const stubborn = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => new Promise(() => {}),
+        return: () => new Promise(() => {})
+      };
+    }
+  };
+  const bounded = withSseHeartbeat(stubborn, 20, { onCancel: () => { stubbornCanceled++; } })[Symbol.asyncIterator]();
+  assert.deepEqual(await bounded.next(), { value: SSE_HEARTBEAT_COMMENT, done: false });
+  await Promise.race([
+    bounded.return(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('消费者取消不应无限等待上游 iterator.return')), 500))
+  ]);
+  assert.equal(stubbornCanceled, 1);
+});
+
+test('SSE 有效事件空闲超时忽略注释心跳并由真实事件重置', async () => {
+  let returned = 0;
+  let timeoutCode;
+  const comments = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return { value: ': upstream keep-alive\n\n', done: false };
+        },
+        async return() { returned++; return { done: true }; }
+      };
+    }
+  };
+  const commentsOnly = withSseEventIdleTimeout(comments, 50, {
+    isActivity: (chunk) => !String(chunk).startsWith(':'),
+    onTimeout: (error) => { timeoutCode = error.code; }
+  });
+  await assert.rejects(collect(commentsOnly), (error) => error?.code === 'UPSTREAM_STREAM_EVENT_IDLE_TIMEOUT');
+  assert.equal(timeoutCode, 'UPSTREAM_STREAM_EVENT_IDLE_TIMEOUT');
+  assert.equal(returned, 1);
+
+  async function* active() {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    yield 'data: one\n\n';
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    yield 'data: two\n\n';
+  }
+  let activities = 0;
+  assert.equal(await collect(withSseEventIdleTimeout(active(), 50, {
+    onActivity: () => { activities++; }
+  })), 'data: one\n\ndata: two\n\n');
+  assert.equal(activities, 2);
+
+  await assert.rejects(collect(withSseEventIdleTimeout(active(), -1)), /非负整数/);
+  await assert.rejects(collect(withSseEventIdleTimeout(active(), 10, { isActivity: true })), /判定必须是函数/);
+  await assert.rejects(collect(withSseEventIdleTimeout(active(), 10, { onActivity: true })), /回调必须是函数/);
+  await assert.rejects(collect(withSseEventIdleTimeout(active(), 10, { onTimeout: true })), /超时回调必须是函数/);
 });
 
 test('Claude SSE 可逐事件转换为 Responses SSE', async () => {

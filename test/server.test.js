@@ -651,6 +651,8 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
   const streamingBodyClosed = new Promise((resolveClosed) => { resolveStreamingBodyClosed = resolveClosed; });
   let resolveIdleBodyClosed;
   const idleBodyClosed = new Promise((resolveClosed) => { resolveIdleBodyClosed = resolveClosed; });
+  let resolveEventIdleBodyClosed;
+  const eventIdleBodyClosed = new Promise((resolveClosed) => { resolveEventIdleBodyClosed = resolveClosed; });
   let responseUpstreamCalls = 0;
   let resolveCrossProtocolBodyClosed;
   const crossProtocolBodyClosed = new Promise((resolveClosed) => { resolveCrossProtocolBodyClosed = resolveClosed; });
@@ -682,6 +684,17 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     if (upstreamCalls === 8) {
       res.flushHeaders();
       res.once('close', resolveStreamingBodyClosed);
+      return;
+    }
+    if (upstreamCalls === 10) {
+      res.flushHeaders();
+      const heartbeat = setInterval(() => {
+        if (!res.destroyed) res.write(': upstream keep-alive\n\n');
+      }, 100);
+      res.once('close', () => {
+        clearInterval(heartbeat);
+        resolveEventIdleBodyClosed();
+      });
       return;
     }
     const streamId = upstreamCalls === 3 ? 'chat_recovered'
@@ -848,7 +861,8 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
       await new Promise((resolveWait) => setTimeout(resolveWait, 10));
     }
     assert.equal(canceledStats.summary.requests, 8);
-    assert.equal(canceledStats.summary.errors, 7);
+    assert.equal(canceledStats.summary.errors, 6);
+    assert.equal(canceledStats.summary.canceledRequests, 1);
     assert.equal(canceledStats.credentialHealth[0].consecutiveFailures, 2);
 
     const streamingCancellation = new AbortController();
@@ -887,7 +901,8 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
       await new Promise((resolveWait) => setTimeout(resolveWait, 10));
     }
     assert.equal(streamingCanceledStats.summary.requests, 9);
-    assert.equal(streamingCanceledStats.summary.errors, 8);
+    assert.equal(streamingCanceledStats.summary.errors, 6);
+    assert.equal(streamingCanceledStats.summary.canceledRequests, 2);
     assert.equal(streamingCanceledStats.credentialHealth[0].consecutiveFailures, 2);
 
     const crossFlushConfig = await fetch(`http://127.0.0.1:${port}/api/config`, {
@@ -934,8 +949,13 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
       await new Promise((resolveWait) => setTimeout(resolveWait, 10));
     }
     assert.equal(crossCanceledStats.summary.requests, 10);
-    assert.equal(crossCanceledStats.summary.errors, 9);
+    assert.equal(crossCanceledStats.summary.errors, 6);
+    assert.equal(crossCanceledStats.summary.canceledRequests, 3);
     assert.equal(crossCanceledStats.credentialHealth[0].consecutiveFailures, 2);
+    const cancellationLogs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
+    const streamCancellationLogs = cancellationLogs.filter((item) => item.status === 499 && item.stream);
+    assert.equal(streamCancellationLogs.length, 2);
+    assert.ok(streamCancellationLogs.every((item) => item.errorCode === 'client_closed'));
 
     const idleConfig = await fetch(`http://127.0.0.1:${port}/api/config`, {
       method: 'PUT', headers: { 'content-type': 'application/json', cookie },
@@ -956,7 +976,7 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     });
     assert.equal(idleResponse.status, 200);
     const idleText = await idleResponse.text();
-    assert.match(idleText, /"code":"upstream_stream_idle_timeout"/);
+    assert.match(idleText, /"code":"upstream_stream_(?:event_)?idle_timeout"/);
     assert.match(idleText, /data: \[DONE\]/);
     await Promise.race([
       idleBodyClosed,
@@ -964,8 +984,31 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     ]);
     const idleStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
     assert.equal(idleStats.summary.requests, 11);
-    assert.equal(idleStats.summary.errors, 10);
+    assert.equal(idleStats.summary.errors, 7);
+    assert.equal(idleStats.summary.canceledRequests, 3);
     assert.equal(idleStats.credentialHealth[0].consecutiveFailures, 3);
+    const resetAfterIdle = await fetch(`http://127.0.0.1:${port}/api/credential-health/reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'zen', credentialId: 'environment:1' })
+    });
+    assert.equal(resetAfterIdle.status, 200);
+    const eventIdleResponse = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', stream: true, messages: [{ role: 'user', content: 'comments without events' }] })
+    });
+    assert.equal(eventIdleResponse.status, 200);
+    const eventIdleText = await eventIdleResponse.text();
+    assert.match(eventIdleText, /"code":"upstream_stream_event_idle_timeout"/);
+    assert.match(eventIdleText, /data: \[DONE\]/);
+    await Promise.race([
+      eventIdleBodyClosed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('有效 SSE 事件空闲超时后上游连接未及时关闭')), 1_000))
+    ]);
+    const eventIdleStats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
+    assert.equal(eventIdleStats.summary.requests, 12);
+    assert.equal(eventIdleStats.summary.errors, 8);
+    assert.equal(eventIdleStats.summary.canceledRequests, 3);
+    assert.equal(eventIdleStats.credentialHealth[0].consecutiveFailures, 1);
     const runtime = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { cookie } }).then((response) => response.json());
     assert.equal(runtime.activeRequests, 0);
     assert.equal(runtime.activeInferenceRequests, 0);

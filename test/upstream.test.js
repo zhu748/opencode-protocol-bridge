@@ -324,6 +324,13 @@ test('上游流空闲超时逐块重置并取消失去响应的正文', async ()
     code: 'upstream_stream_idle_timeout',
     message: '读取上游流超时：长时间未收到任何数据'
   });
+  const eventIdle = Object.assign(new Error('event idle'), { name: 'TimeoutError', code: 'UPSTREAM_STREAM_EVENT_IDLE_TIMEOUT' });
+  assert.equal(isUpstreamConnectionError(eventIdle), true);
+  assert.deepEqual(upstreamConnectionFailure(eventIdle), {
+    status: 504,
+    code: 'upstream_stream_event_idle_timeout',
+    message: '读取上游流超时：长时间未收到有效 SSE 事件'
+  });
 
   const disabled = new Response('unlimited').body;
   let disabledText = '';

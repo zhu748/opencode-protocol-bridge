@@ -73,7 +73,9 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.match(script, /confirmDiscardConfigDrafts\('退出登录'\)/);
   assert.match(html, /id="config-draft-status"[^>]*aria-live="polite"/);
   assert.match(html, /id="upstreamStreamIdleTimeoutMs"[^>]*min="0"[^>]*max="3600000"/);
-  assert.match(html, /每个数据块会重置，0 表示禁用/);
+  assert.match(html, /value="canceled">499 客户端取消/);
+  assert.match(html, /只有空心跳、没有有效 SSE 事件/);
+  assert.match(html, /连续无原始数据或只有空心跳/);
   assert.match(settings, /\.config-draft-status\.conflict/);
   assert.match(script, /renderRecentPrompt\(\{\}\)/);
   assert.doesNotMatch(script, /api\('\/api\/config'\), api\('\/api\/logs'\), api\('\/api\/status'\), api\('\/api\/clients'\)/);

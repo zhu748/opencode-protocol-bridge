@@ -820,6 +820,7 @@ tbody tr:hover {
 }
 
 .status-ok { color: var(--lime); font-weight: 600; }
+.status-cancelled { color: var(--orange); font-weight: 600; }
 .status-bad { color: var(--red); font-weight: 600; }
 
 .empty {

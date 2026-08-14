@@ -21,7 +21,7 @@ export function isUpstreamConnectionError(error) {
   const codes = new Set([
     'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
     'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'PROXY_TUNNEL_ERROR',
-    'UPSTREAM_STREAM_IDLE_TIMEOUT'
+    'UPSTREAM_STREAM_IDLE_TIMEOUT', 'UPSTREAM_STREAM_EVENT_IDLE_TIMEOUT'
   ]);
   return chain.some((item) => item?.name === 'TimeoutError'
     || codes.has(item?.code)
@@ -39,6 +39,9 @@ export function upstreamConnectionFailure(error) {
   }
   if (hasCode('UPSTREAM_STREAM_IDLE_TIMEOUT')) {
     return { status: 504, code: 'upstream_stream_idle_timeout', message: '读取上游流超时：长时间未收到任何数据' };
+  }
+  if (hasCode('UPSTREAM_STREAM_EVENT_IDLE_TIMEOUT')) {
+    return { status: 504, code: 'upstream_stream_event_idle_timeout', message: '读取上游流超时：长时间未收到有效 SSE 事件' };
   }
   if (hasCode('UND_ERR_CONNECT_TIMEOUT')) {
     return { status: 504, code: 'upstream_connect_timeout', message: '连接上游失败：建立连接超时，请检查网络或该 Key 的代理' };

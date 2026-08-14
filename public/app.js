@@ -172,7 +172,9 @@ function renderRuntimeSummary() {
   const logsStale = dataSourceFailures.has('请求日志');
   $('#request-count').textContent = formatNumber(serviceStatus?.requests ?? requestLogItems.length);
   if (serviceStatus) {
-    const successSummary = serviceStatus.requests ? `${formatPercentage(serviceStatus.successRate)} 成功` : '暂无请求';
+    const successSummary = serviceStatus.requests
+      ? `${formatPercentage(serviceStatus.successRate)} 成功${serviceStatus.canceledRequests ? ` · ${formatNumber(serviceStatus.canceledRequests)} 取消` : ''}`
+      : '暂无请求';
     const averageUpstreamBody = serviceStatus.upstreamBodyTimingCoverageRate > 0 ? formatDuration(serviceStatus.averageUpstreamBody) : '—';
     const upstreamTiming = serviceStatus.upstreamTimingCoverageRate > 0
       ? ` · 上游等待 ${formatDuration(serviceStatus.averageUpstreamWait)} · 响应体 ${averageUpstreamBody}`
@@ -453,7 +455,7 @@ function renderLogs() {
       : '';
     const tokens = item.inputTokens === undefined ? '—' : `${item.inputTokens} / ${item.outputTokens}${item.cachedInputTokens ? ` · 缓存读取 ${item.cachedInputTokens}` : ''}${item.cacheCreationInputTokens ? ` · 缓存写入 ${item.cacheCreationInputTokens}${cacheTtl}` : ''}${item.reasoningTokens ? ` · 推理 ${item.reasoningTokens}` : ''}`;
     const model = item.upstreamModel && item.upstreamModel !== item.model ? `${item.model} → ${item.upstreamModel}` : item.model;
-    const statusClass = item.status >= 200 && item.status < 400 ? 'status-ok' : 'status-bad';
+    const statusClass = item.status === 499 ? 'status-cancelled' : item.status >= 200 && item.status < 400 ? 'status-ok' : 'status-bad';
     const errorText = [item.errorCode, item.error].filter(Boolean).join(' · ');
     const error = errorText ? `<small class="log-error" title="${escapeHtml(errorText)}">${escapeHtml(errorText)}</small>` : '';
     const upstreamRequestId = item.upstreamRequestId
@@ -561,7 +563,7 @@ function renderTimeline(timeline) {
       item.upstreamWaitRequests ? `平均上游等待 ${formatDuration(item.averageUpstreamWaitMs)}` : '',
       item.upstreamBodyRequests ? `平均响应体阶段 ${formatDuration(item.averageUpstreamBodyMs)}` : ''
     ].filter(Boolean).join('，');
-    const title = `${label}：${formatNumber(item.requests)} 个请求，${formatNumber(item.errors)} 个失败，${formatNumber(item.totalTokens)} Token${phaseDetail ? `，${phaseDetail}` : ''}`;
+    const title = `${label}：${formatNumber(item.requests)} 个请求，${formatNumber(item.errors)} 个失败，${formatNumber(item.canceledRequests)} 个取消，${formatNumber(item.totalTokens)} Token${phaseDetail ? `，${phaseDetail}` : ''}`;
     return `<div class="trend-column" title="${escapeHtml(title)}"><div class="trend-bars"><span class="trend-bar token-bar ${portionClass(item.totalTokens, maximumTokens)}"></span><span class="trend-bar request-bar ${portionClass(item.requests, maximumRequests)}">${item.errors ? `<i class="error-mark" title="${formatNumber(item.errors)} 个失败"></i>` : ''}</span></div><time>${escapeHtml(label)}</time></div>`;
   }).join('');
   const totalRequests = buckets.reduce((sum, item) => sum + item.requests, 0);
@@ -574,7 +576,7 @@ function renderStats(stats) {
   $('#stats-requests').textContent = formatNumber(summary.requests);
   $('#stats-usage-coverage').textContent = summary.requests ? `${formatPercentage(summary.usageCoverageRate)} 含用量 · ${formatNumber(summary.missingUsageRequests)} 条缺失` : '暂无请求数据';
   $('#stats-success-rate').textContent = formatPercentage(summary.successRate);
-  $('#stats-success-detail').textContent = `${formatNumber(summary.success)} 成功 · ${formatNumber(summary.errors)} 失败 · ${formatNumber(summary.failoverRequests)} 次自动切换`;
+  $('#stats-success-detail').textContent = `${formatNumber(summary.success)} 成功 · ${formatNumber(summary.errors)} 失败 · ${formatNumber(summary.canceledRequests)} 取消 · ${formatNumber(summary.failoverRequests)} 次自动切换`;
   $('#stats-avg-duration').textContent = formatDuration(summary.averageDurationMs);
   $('#stats-p95-duration').textContent = formatDuration(summary.p95DurationMs);
   $('#stats-avg-phases').textContent = summary.upstreamWaitRequests

@@ -4,6 +4,7 @@ export function summarizeRequestStatus(items, window = 'all', now = Date.now()) 
   const from = statsWindowStart(window, now);
   let requests = 0;
   let success = 0;
+  let canceledRequests = 0;
   let durationTotal = 0;
   let upstreamWaitRequests = 0;
   let upstreamWaitTotal = 0;
@@ -13,7 +14,8 @@ export function summarizeRequestStatus(items, window = 'all', now = Date.now()) 
     const timestamp = Date.parse(item.time);
     if (!Number.isFinite(timestamp) || timestamp > now || (from !== null && timestamp < from)) continue;
     requests++;
-    if (item.status >= 200 && item.status < 400) success++;
+    if (item.status === 499) canceledRequests++;
+    else if (item.status >= 200 && item.status < 400) success++;
     durationTotal += count(item.duration);
     const upstreamWait = timingValue(item, 'upstreamWaitMs');
     if (upstreamWait !== null) {
@@ -29,7 +31,8 @@ export function summarizeRequestStatus(items, window = 'all', now = Date.now()) 
   return {
     requests,
     success,
-    successRate: requests ? round(success / requests * 100, 1) : null,
+    canceledRequests,
+    successRate: requests > canceledRequests ? round(success / (requests - canceledRequests) * 100, 1) : null,
     averageDurationMs: requests ? Math.round(durationTotal / requests) : 0,
     upstreamWaitCoverageRate: requests ? round(upstreamWaitRequests / requests * 100, 1) : null,
     averageUpstreamWaitMs: upstreamWaitRequests ? Math.round(upstreamWaitTotal / upstreamWaitRequests) : 0,
@@ -91,7 +94,7 @@ function createTimelineState(window, now, retentionDays, timezoneOffsetMinutes) 
   const start = end - (bucketCount - 1) * bucketMs;
   const buckets = Array.from({ length: bucketCount }, (_, index) => ({
     start: new Date(start + index * bucketMs).toISOString(),
-    requests: 0, errors: 0, totalTokens: 0, cachedInputTokens: 0,
+    requests: 0, errors: 0, canceledRequests: 0, totalTokens: 0, cachedInputTokens: 0,
     upstreamWaitRequests: 0, upstreamWaitTotalMs: 0,
     upstreamBodyRequests: 0, upstreamBodyTotalMs: 0
   }));
@@ -114,7 +117,8 @@ function addTimelineItem(state, timestamp, measurement) {
   if (!Number.isFinite(timestamp) || index < 0 || index >= state.buckets.length) return;
   const bucket = state.buckets[index];
   bucket.requests++;
-  if (!measurement.successful) bucket.errors++;
+  if (measurement.canceled) bucket.canceledRequests++;
+  else if (!measurement.successful) bucket.errors++;
   bucket.totalTokens += measurement.inputTokens + measurement.outputTokens;
   bucket.cachedInputTokens += measurement.cachedInputTokens;
   if (measurement.upstreamWait !== null) {
@@ -151,6 +155,7 @@ function createSummaryState() {
   return {
     requests: 0,
     success: 0,
+    canceledRequests: 0,
     durationTotal: 0,
     streamRequests: 0,
     usageRequests: 0,
@@ -186,6 +191,7 @@ function measureSummaryItem(item) {
   const reasoningEffort = typeof item.reasoningEffort === 'string' ? item.reasoningEffort : '';
   return {
     successful: item.status >= 200 && item.status < 400,
+    canceled: item.status === 499,
     duration: count(item.duration),
     upstreamWait: timingValue(item, 'upstreamWaitMs'),
     upstreamBody: timingValue(item, 'upstreamBodyMs'),
@@ -207,7 +213,8 @@ function measureSummaryItem(item) {
 
 function addSummaryMeasurement(state, item, timelineState, timestamp) {
   state.requests++;
-  if (item.successful) state.success++;
+  if (item.canceled) state.canceledRequests++;
+  else if (item.successful) state.success++;
   state.durations.push(item.duration);
   state.durationTotal += item.duration;
   const upstreamWait = item.upstreamWait;
@@ -244,7 +251,7 @@ function addSummaryMeasurement(state, item, timelineState, timestamp) {
 
 function finishSummary(state) {
   const {
-    requests, success, durationTotal, streamRequests, usageRequests, cacheHitRequests, cacheWriteRequests,
+    requests, success, canceledRequests, durationTotal, streamRequests, usageRequests, cacheHitRequests, cacheWriteRequests,
     credentialAttempts, failoverRequests, upstreamWaitTotal, upstreamBodyTotal,
     requestedReasoningEffortRequests, reasoningEffortRequests, reasoningEffortPreservedRequests,
     reasoningEffortChangedRequests, reasoningEffortDroppedRequests, reasoningEffortInjectedRequests,
@@ -256,8 +263,9 @@ function finishSummary(state) {
   return {
     requests,
     success,
-    errors: requests - success,
-    successRate: requests ? round(success / requests * 100, 1) : null,
+    canceledRequests,
+    errors: requests - canceledRequests - success,
+    successRate: requests > canceledRequests ? round(success / (requests - canceledRequests) * 100, 1) : null,
     averageDurationMs: durations.length ? Math.round(durationTotal / durations.length) : 0,
     p95DurationMs: durations.length ? durations[Math.max(0, Math.ceil(durations.length * 0.95) - 1)] : 0,
     upstreamWaitRequests: upstreamWait.requests,

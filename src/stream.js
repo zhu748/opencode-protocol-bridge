@@ -6,9 +6,26 @@ import { assertJsonComplexity } from './json-complexity.js';
 
 export const MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 export const SSE_HEARTBEAT_COMMENT = ': opencode-bridge keep-alive\n\n';
+const ITERATOR_CANCEL_GRACE_MS = 250;
 const EMPTY_SSE_BLOCKS = Object.freeze([]);
 const SSE_TEXT_BATCH_CHARS = 4 * 1024;
 const asArray = (value) => Array.isArray(value) ? value : value == null ? [] : [value];
+
+async function cancelAsyncIterator(iterator) {
+  if (typeof iterator?.return !== 'function') return undefined;
+  const closing = Promise.resolve().then(() => iterator.return()).then(
+    () => undefined,
+    (error) => error
+  );
+  let timer;
+  const expired = Symbol('iterator cancellation grace expired');
+  const result = await Promise.race([
+    closing,
+    new Promise((resolve) => { timer = setTimeout(() => resolve(expired), ITERATOR_CANCEL_GRACE_MS); })
+  ]);
+  clearTimeout(timer);
+  return result === expired ? undefined : result;
+}
 
 export async function* withSseHeartbeat(source, intervalMs, options = {}) {
   if (!options || Array.isArray(options) || typeof options !== 'object') throw new TypeError('SSE 心跳选项必须是对象');
@@ -85,11 +102,72 @@ export async function* withSseHeartbeat(source, intervalMs, options = {}) {
       let cancellationError;
       try { onCancel?.(); }
       catch (error) { cancellationError = error; }
-      try { if (typeof iterator.return === 'function') await iterator.return(); }
-      catch (error) { cancellationError ||= error; }
+      cancellationError ||= await cancelAsyncIterator(iterator);
       if (cancellationError) throw cancellationError;
     }
   }
+}
+
+export async function* withSseEventIdleTimeout(source, timeoutMs, options = {}) {
+  if (!options || Array.isArray(options) || typeof options !== 'object') throw new TypeError('SSE 有效事件空闲超时选项必须是对象');
+  const { isActivity = () => true, onActivity, onTimeout } = options;
+  if (!source || typeof source[Symbol.asyncIterator] !== 'function') throw new TypeError('SSE 有效事件空闲超时来源必须可异步迭代');
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 0) throw new TypeError('SSE 有效事件空闲超时必须是非负整数');
+  if (typeof isActivity !== 'function') throw new TypeError('SSE 有效事件判定必须是函数');
+  if (onActivity !== undefined && typeof onActivity !== 'function') throw new TypeError('SSE 有效事件回调必须是函数');
+  if (onTimeout !== undefined && typeof onTimeout !== 'function') throw new TypeError('SSE 有效事件超时回调必须是函数');
+  if (timeoutMs === 0) {
+    yield* source;
+    return;
+  }
+
+  const iterator = source[Symbol.asyncIterator]();
+  let sourceFinished = false;
+  let lastActivityAt = Date.now();
+  try {
+    while (true) {
+      const remaining = lastActivityAt + timeoutMs - Date.now();
+      if (remaining <= 0) {
+        const error = sseEventIdleTimeoutError();
+        onTimeout?.(error);
+        throw error;
+      }
+      let timer;
+      const timeoutError = sseEventIdleTimeoutError();
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(timeoutError), remaining);
+        timer.unref?.();
+      });
+      let result;
+      try {
+        result = await Promise.race([iterator.next(), timeout]);
+      } catch (error) {
+        if (error === timeoutError) onTimeout?.(error);
+        else sourceFinished = true;
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+      if (result.done) {
+        sourceFinished = true;
+        return;
+      }
+      if (isActivity(result.value)) {
+        lastActivityAt = Date.now();
+        onActivity?.();
+      }
+      yield result.value;
+    }
+  } finally {
+    if (!sourceFinished) await cancelAsyncIterator(iterator);
+  }
+}
+
+function sseEventIdleTimeoutError() {
+  return Object.assign(new Error('读取上游流超时：长时间未收到有效 SSE 事件'), {
+    name: 'TimeoutError',
+    code: 'UPSTREAM_STREAM_EVENT_IDLE_TIMEOUT'
+  });
 }
 
 function assertSseEventBytes(bytes) {

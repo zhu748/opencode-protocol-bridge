@@ -8,7 +8,8 @@ export function filterRequestLogs(items, { query = '', provider = 'all', status 
     if (windowMs && (!Number.isFinite(timestamp) || timestamp < now - windowMs || timestamp > now)) return false;
     if (provider !== 'all' && item.provider !== provider) return false;
     if (status === 'success' && !(item.status >= 200 && item.status < 400)) return false;
-    if (status === 'client-error' && !(item.status >= 400 && item.status < 500 && item.status !== 429)) return false;
+    if (status === 'canceled' && item.status !== 499) return false;
+    if (status === 'client-error' && !(item.status >= 400 && item.status < 500 && ![429, 499].includes(item.status))) return false;
     if (status === 'server-error' && item.status < 500) return false;
     if (status === 'rate-limit' && item.status !== 429) return false;
     if (!needle) return true;

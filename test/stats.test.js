@@ -13,7 +13,7 @@ test('统计汇总不会重复计算缓存和推理 token', () => {
   const result = aggregateRequestStats(logs, 'all', now);
   assert.equal(result.retainedRequests, 3);
   assert.deepEqual(result.summary, {
-    requests: 3, success: 2, errors: 1, successRate: 66.7,
+    requests: 3, success: 2, canceledRequests: 0, errors: 1, successRate: 66.7,
     averageDurationMs: 400, p95DurationMs: 900, streamRequests: 1,
     upstreamWaitRequests: 3, upstreamWaitCoverageRate: 100, averageUpstreamWaitMs: 340, p95UpstreamWaitMs: 800,
     upstreamBodyRequests: 2, upstreamBodyCoverageRate: 66.7, averageUpstreamBodyMs: 30, p95UpstreamBodyMs: 40,
@@ -112,6 +112,7 @@ test('状态摘要与完整统计口径一致', () => {
   assert.deepEqual(summarizeRequestStatus(logs, '24h', now), {
     requests: summary.requests,
     success: summary.success,
+    canceledRequests: summary.canceledRequests,
     successRate: summary.successRate,
     averageDurationMs: summary.averageDurationMs,
     upstreamWaitCoverageRate: summary.upstreamWaitCoverageRate,
@@ -283,6 +284,33 @@ test('空统计不会把未知成功率或用量覆盖率伪装成 100%', () => 
   assert.equal(result.summary.requests, 0);
   assert.equal(result.summary.successRate, null);
   assert.equal(result.summary.usageCoverageRate, null);
+});
+
+test('499 客户端取消单独统计且不降低成功率或增加失败数', () => {
+  const items = [
+    { time: '2026-08-04T11:00:00.000Z', status: 200, duration: 100 },
+    { time: '2026-08-04T11:01:00.000Z', status: 502, duration: 200 },
+    { time: '2026-08-04T11:02:00.000Z', status: 499, duration: 300, stream: true }
+  ];
+  const result = aggregateRequestStats(items, 'all', now);
+  assert.equal(result.summary.requests, 3);
+  assert.equal(result.summary.success, 1);
+  assert.equal(result.summary.errors, 1);
+  assert.equal(result.summary.canceledRequests, 1);
+  assert.equal(result.summary.successRate, 50);
+  assert.equal(result.timeline.buckets.reduce((sum, item) => sum + item.errors, 0), 1);
+  assert.equal(result.timeline.buckets.reduce((sum, item) => sum + item.canceledRequests, 0), 1);
+  assert.deepEqual(summarizeRequestStatus(items, 'all', now), {
+    requests: 3,
+    success: 1,
+    canceledRequests: 1,
+    successRate: 50,
+    averageDurationMs: 200,
+    upstreamWaitCoverageRate: 0,
+    averageUpstreamWaitMs: 0,
+    upstreamBodyCoverageRate: 0,
+    averageUpstreamBodyMs: 0
+  });
 });
 
 test('时间趋势按范围生成固定桶并统计错误与 token', () => {

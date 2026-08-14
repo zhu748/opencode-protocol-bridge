@@ -5,13 +5,15 @@ import { compactIdentifier, filterRequestLogs, formatCooldownRemaining, requestL
 const logs = [
   { time: '2026-08-04T11:30:00Z', requestId: 'local-success', upstreamRequestId: 'trace-a', provider: 'zen', status: 200, model: 'model-a', clientName: '工作机' },
   { time: '2026-08-04T10:30:00Z', requestId: 'local-rate', upstreamRequestId: 'trace-b', provider: 'go', status: 429, model: 'model-b', error: 'rate limited' },
+  { time: '2026-08-04T10:00:00Z', requestId: 'local-canceled', provider: 'go', status: 499, errorCode: 'client_closed', error: '客户端取消' },
   { time: '2026-08-03T11:30:00Z', requestId: 'local-bad', provider: 'go', status: 401, upstreamModel: 'real-model', credentialId: 'config:backup', credentialLabel: '备用', credentialAttempts: 2, retryAfter: '9' },
   { time: 'invalid', requestId: 'local-upstream', provider: 'zen', status: 502, protocol: 'claude → chat', requestKind: 'compaction', requestedReasoningEffort: 'max', reasoningEffort: 'high', bridgeWebSearchCalls: 37, responseDegradations: 'claude_iterations', errorCode: 'upstream_dns_error', error: '连接失败' }
 ];
 
 test('日志筛选可组合关键词、上游与互斥状态', () => {
-  assert.deepEqual(filterRequestLogs(logs, { provider: 'go' }).map((item) => item.requestId), ['local-rate', 'local-bad']);
+  assert.deepEqual(filterRequestLogs(logs, { provider: 'go' }).map((item) => item.requestId), ['local-rate', 'local-canceled', 'local-bad']);
   assert.deepEqual(filterRequestLogs(logs, { status: 'rate-limit' }).map((item) => item.requestId), ['local-rate']);
+  assert.deepEqual(filterRequestLogs(logs, { status: 'canceled' }).map((item) => item.requestId), ['local-canceled']);
   assert.deepEqual(filterRequestLogs(logs, { status: 'client-error' }).map((item) => item.requestId), ['local-bad']);
   assert.deepEqual(filterRequestLogs(logs, { status: 'server-error' }).map((item) => item.requestId), ['local-upstream']);
   assert.deepEqual(filterRequestLogs(logs, { query: 'TRACE-B', provider: 'go', status: 'rate-limit' }).map((item) => item.requestId), ['local-rate']);
@@ -25,7 +27,7 @@ test('日志筛选可组合关键词、上游与互斥状态', () => {
   assert.deepEqual(filterRequestLogs(logs, { query: 'compaction' }).map((item) => item.requestId), ['local-upstream']);
   const now = Date.parse('2026-08-04T12:00:00Z');
   assert.deepEqual(filterRequestLogs(logs, { timeRange: '1h', now }).map((item) => item.requestId), ['local-success']);
-  assert.deepEqual(filterRequestLogs(logs, { timeRange: '24h', now }).map((item) => item.requestId), ['local-success', 'local-rate']);
+  assert.deepEqual(filterRequestLogs(logs, { timeRange: '24h', now }).map((item) => item.requestId), ['local-success', 'local-rate', 'local-canceled']);
 });
 
 test('日志时间筛选不会把未来时间记录混入当前窗口', () => {

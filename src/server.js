@@ -11,7 +11,7 @@ import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, singBoxRunt
 import { KeepAliveService, normalizeKeepAliveUrl, resolveKeepAliveConfig } from './keep-alive.js';
 import { configuredProviderCredentials, createProviderCredentialResolver, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
 import { CredentialHealthTracker } from './credential-health.js';
-import { createSseObserver, sanitizeSseErrorStream, streamClaudeMessage, translateSse, withSseHeartbeat } from './stream.js';
+import { createSseObserver, sanitizeSseErrorStream, streamClaudeMessage, translateSse, withSseEventIdleTimeout, withSseHeartbeat } from './stream.js';
 import { BRIDGE_WEB_SEARCH_NAME, bridgeWebSearchCalls, claudeWebSearchForChat, executeBridgeWebSearchDetailed, hasNonBridgeToolCalls, webSearchToolError, withBridgeWebSearchTool } from './bridge-web-search.js';
 import { RequestLogStore } from './request-log.js';
 import { RequestStatsStore } from './request-stats-store.js';
@@ -169,8 +169,9 @@ function upstreamOperationFailure(error) {
 }
 
 function streamFailure(error, res, abort) {
+  const abortReason = abort.signal.reason;
   const clientClosed = ['CLIENT_CLOSED', 'CLIENT_WRITE_TIMEOUT'].includes(error?.code)
-    || (abort.signal.aborted && !res.writableEnded);
+    || ['CLIENT_CLOSED', 'CLIENT_WRITE_TIMEOUT'].includes(abortReason?.code);
   const credentialNeutral = ['UPSTREAM_SSE_EVENT_TOO_LARGE', 'UPSTREAM_JSON_TOO_COMPLEX', 'UPSTREAM_UNSUPPORTED_STREAM_CONTENT'].includes(error?.code);
   const streamCodes = {
     UPSTREAM_INVALID_UTF8: 'upstream_invalid_utf8',
@@ -178,7 +179,16 @@ function streamFailure(error, res, abort) {
   };
   const networkFailure = isUpstreamConnectionError(error) ? upstreamConnectionFailure(error) : null;
   return clientClosed
-    ? { status: 499, message: error?.code === 'CLIENT_WRITE_TIMEOUT' ? error.message : '客户端在流式响应完成前断开', penalizeCredential: false }
+    ? {
+        status: 499,
+        message: error?.code === 'CLIENT_WRITE_TIMEOUT' || abortReason?.code === 'CLIENT_WRITE_TIMEOUT'
+          ? (error?.message || abortReason?.message || '客户端读取响应超时')
+          : '客户端在流式响应完成前断开',
+        code: error?.code === 'CLIENT_WRITE_TIMEOUT' || abortReason?.code === 'CLIENT_WRITE_TIMEOUT'
+          ? 'client_write_timeout'
+          : 'client_closed',
+        penalizeCredential: false
+      }
     : {
         status: networkFailure?.status || upstreamFailureStatus(error),
         message: networkFailure?.message || error?.message || String(error),
@@ -317,7 +327,7 @@ function beginActiveInference(requestId, startedAt = Date.now()) {
         record.lastUpstreamDataAt = 0;
       }
     },
-    upstreamChunk() {
+    upstreamEvent() {
       if (!finished) record.lastUpstreamDataAt = Date.now();
     },
     heartbeat() {
@@ -1104,7 +1114,7 @@ async function adminApiOperation(req, res, url, config) {
     const memory = process.memoryUsage();
     const activeInference = activeInferenceSnapshot();
     return json(res, 200, {
-      uptime: Math.floor(process.uptime()), requests: summary.requests, success: summary.success,
+      uptime: Math.floor(process.uptime()), requests: summary.requests, success: summary.success, canceledRequests: summary.canceledRequests,
       ready: serviceReady(config),
       activeRequests: activePublicRequests,
       ...activeInference,
@@ -1812,8 +1822,10 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     secrets: [credential.apiKey, credential.proxyUrl]
   });
   if (stream && !bridgeWebSearch && incomingProtocol === route.protocol) {
-    const upstreamStream = withStreamIdleTimeout(upstream.body, config.upstreamStreamIdleTimeoutMs, activity.upstreamChunk);
+    const upstreamStream = withStreamIdleTimeout(upstream.body, config.upstreamStreamIdleTimeoutMs);
     const observer = createSseObserver(route.protocol, body.model);
+    let observedEventRevision = 0;
+    let forwardedEventRevision = 0;
     res.writeHead(upstream.status, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-store, no-transform',
@@ -1823,9 +1835,21 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     res.flushHeaders();
     try {
       const sanitizedStream = sanitizeSseErrorStream(upstreamStream, route.protocol, sanitizeStreamError, {
-        onData: observer.observe
+        onData(data, event) {
+          observedEventRevision++;
+          observer.observe(data, event);
+        }
       });
-      for await (const chunk of withSseHeartbeat(sanitizedStream, SSE_HEARTBEAT_MS, {
+      const eventTimedStream = withSseEventIdleTimeout(sanitizedStream, config.upstreamStreamIdleTimeoutMs, {
+        isActivity() {
+          const active = observedEventRevision !== forwardedEventRevision;
+          forwardedEventRevision = observedEventRevision;
+          return active;
+        },
+        onActivity: activity.upstreamEvent,
+        onTimeout: (error) => { if (!abort.signal.aborted) abort.abort(error); }
+      });
+      for await (const chunk of withSseHeartbeat(eventTimedStream, SSE_HEARTBEAT_MS, {
         onHeartbeat: activity.heartbeat,
         onCancel: () => abort.abort()
       })) {
@@ -1858,7 +1882,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     return res.end();
   }
   if (stream && !bridgeWebSearch) {
-    const upstreamStream = withStreamIdleTimeout(upstream.body, config.upstreamStreamIdleTimeoutMs, activity.upstreamChunk);
+    const upstreamStream = withStreamIdleTimeout(upstream.body, config.upstreamStreamIdleTimeoutMs);
     let streamUsage = {};
     let streamError;
     let responseSequenceNumber = 0;
@@ -1885,7 +1909,11 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
         geminiStreamFunctionCallArguments: incomingProtocol === 'gemini'
           && body.toolConfig?.functionCallingConfig?.streamFunctionCallArguments === true
       });
-      for await (const event of withSseHeartbeat(translatedStream, SSE_HEARTBEAT_MS, {
+      const eventTimedStream = withSseEventIdleTimeout(translatedStream, config.upstreamStreamIdleTimeoutMs, {
+        onActivity: activity.upstreamEvent,
+        onTimeout: (error) => { if (!abort.signal.aborted) abort.abort(error); }
+      });
+      for await (const event of withSseHeartbeat(eventTimedStream, SSE_HEARTBEAT_MS, {
         onHeartbeat: activity.heartbeat,
         onCancel: () => abort.abort()
       })) {
