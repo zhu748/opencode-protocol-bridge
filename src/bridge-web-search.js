@@ -1,6 +1,7 @@
 import { fetch } from 'undici';
 
 export const CLAUDE_WEB_SEARCH_TYPE = /^web_search_(\d{8})$/;
+export const RESPONSES_WEB_SEARCH_TYPES = new Set(['web_search', 'web_search_preview', 'web_search_preview_2025_03_11']);
 export const BRIDGE_WEB_SEARCH_NAME = 'web_search';
 export const DEFAULT_EXA_MCP_URL = 'https://mcp.exa.ai/mcp';
 export const DEFAULT_PARALLEL_MCP_URL = 'https://search.parallel.ai/mcp';
@@ -15,6 +16,23 @@ const CLAUDE_DIRECT_DEFAULT_VERSION = 20260209;
 const CLAUDE_WEB_SEARCH_FIELDS = new Set([
   'type', 'name', 'max_uses', 'allowed_domains', 'blocked_domains', 'user_location', 'allowed_callers', 'response_inclusion'
 ]);
+const RESPONSES_WEB_SEARCH_FIELDS = new Set([
+  'type', 'search_context_size', 'user_location', 'filters', 'external_web_access',
+  'search_content_types', 'image_settings', 'return_token_budget'
+]);
+const RESPONSES_SEARCH_FILTER_FIELDS = new Set(['allowed_domains', 'blocked_domains']);
+const RESPONSES_SEARCH_HISTORY_FIELDS = new Set(['type', 'id', 'status', 'action']);
+const RESPONSES_SEARCH_HISTORY_STATUSES = new Set(['in_progress', 'searching', 'completed', 'failed']);
+const RESPONSES_SEARCH_ACTION_FIELDS = {
+  search: new Set(['type', 'query', 'queries', 'sources']),
+  open_page: new Set(['type', 'url']),
+  find_in_page: new Set(['type', 'url', 'pattern'])
+};
+const RESPONSES_SEARCH_CONTEXT_PROFILES = {
+  low: { defaultNumResults: 5, defaultContextMaxCharacters: 12_000 },
+  medium: { defaultNumResults: 8, defaultContextMaxCharacters: 20_000 },
+  high: { defaultNumResults: 10, defaultContextMaxCharacters: MAX_TOOL_RESULT_CHARS }
+};
 const LOCATION_FIELDS = new Set(['type', 'city', 'region', 'country', 'timezone']);
 const CHALLENGE_MARKERS = [
   /WEB 应用防火墙/i,
@@ -85,6 +103,97 @@ function localSearchLocation(tool) {
   if (!city && !region && !country && !timezone) throw new Error('Claude web_search.user_location 至少需要 city、region、country 或 timezone 之一');
   if (country && !/^[A-Za-z]{2}$/.test(country)) throw new Error('Claude web_search.user_location.country 必须是两位 ISO 国家代码');
   return { label: [city, region, country?.toUpperCase(), timezone].filter(Boolean).join(', '), country: country?.toUpperCase() || '' };
+}
+
+function responsesSearchLocation(tool) {
+  if (tool.user_location === undefined || tool.user_location === null) return { label: '', country: '' };
+  const location = objectValue(tool.user_location);
+  if (!location) throw new Error('Responses web_search.user_location 必须是对象或 null');
+  const unsupported = Object.keys(location).filter((field) => !LOCATION_FIELDS.has(field));
+  if (unsupported.length) throw new Error(`Responses web_search.user_location 暂不支持字段：${unsupported.join(', ')}`);
+  if (location.type !== 'approximate') throw new Error('Responses web_search.user_location.type 必须是 approximate');
+  const values = {};
+  for (const [field, maximum] of [['city', 128], ['region', 128], ['country', 2], ['timezone', 128]]) {
+    const value = location[field];
+    values[field] = value === null ? undefined : optionalString(value, `Responses web_search.user_location.${field}`, maximum);
+  }
+  if (values.country && !/^[A-Za-z]{2}$/.test(values.country)) {
+    throw new Error('Responses web_search.user_location.country 必须是两位 ISO 国家代码');
+  }
+  return {
+    label: [values.city, values.region, values.country?.toUpperCase(), values.timezone].filter(Boolean).join(', '),
+    country: values.country?.toUpperCase() || ''
+  };
+}
+
+function responsesSearchFilters(tool) {
+  if (tool.filters === undefined || tool.filters === null) return { allowedDomains: [], blockedDomains: [] };
+  const filters = objectValue(tool.filters);
+  if (!filters) throw new Error('Responses web_search.filters 必须是对象或 null');
+  const unsupported = Object.keys(filters).filter((field) => !RESPONSES_SEARCH_FILTER_FIELDS.has(field));
+  if (unsupported.length) throw new Error(`Responses web_search.filters 暂不支持字段：${unsupported.join(', ')}`);
+  const allowedDomains = normalizeDomains(filters.allowed_domains, 'Responses web_search.filters.allowed_domains');
+  const blockedDomains = normalizeDomains(filters.blocked_domains, 'Responses web_search.filters.blocked_domains');
+  if (allowedDomains.length && blockedDomains.length) {
+    throw new Error('Responses web_search.filters 不能同时设置 allowed_domains 和 blocked_domains');
+  }
+  return { allowedDomains, blockedDomains };
+}
+
+function normalizeResponsesSearchTool(tool) {
+  const unsupported = Object.keys(tool).filter((field) => !RESPONSES_WEB_SEARCH_FIELDS.has(field));
+  if (unsupported.length) throw new Error(`桥接本地 Web Search 暂不支持 Responses ${tool.type} 字段：${unsupported.join(', ')}`);
+  if (tool.external_web_access === false) {
+    throw new Error('本地 Web Search 会访问实时公网，无法保持 Responses external_web_access:false 的仅缓存语义；请使用原生 Responses 路由');
+  }
+  if (tool.external_web_access !== undefined && tool.external_web_access !== true) {
+    throw new Error('Responses web_search.external_web_access 必须是布尔值');
+  }
+  const contextSize = tool.search_context_size ?? 'medium';
+  if (!['low', 'medium', 'high'].includes(contextSize)) {
+    throw new Error('Responses web_search.search_context_size 仅支持 low、medium 或 high');
+  }
+  const contentTypes = tool.search_content_types === undefined
+    ? ['text']
+    : tool.search_content_types;
+  if (!Array.isArray(contentTypes) || !contentTypes.length
+    || contentTypes.some((value) => !['text', 'image'].includes(value))
+    || new Set(contentTypes).size !== contentTypes.length) {
+    throw new Error('Responses web_search.search_content_types 必须是由 text、image 组成的非空去重数组');
+  }
+  if (!contentTypes.includes('text')) {
+    throw new Error('本地 Web Search 暂不能返回仅图片搜索结果；请包含 text 或使用原生 Responses 路由');
+  }
+  if (tool.image_settings !== undefined && !contentTypes.includes('image')) {
+    throw new Error('Responses web_search.image_settings 只能与 search_content_types 中的 image 一起使用');
+  }
+  if (tool.image_settings !== undefined && !objectValue(tool.image_settings)) {
+    throw new Error('Responses web_search.image_settings 必须是对象');
+  }
+  let returnTokenBudget;
+  if (tool.return_token_budget !== undefined && tool.return_token_budget !== 'default') {
+    returnTokenBudget = integer(tool.return_token_budget, 'Responses web_search.return_token_budget', { minimum: 1, maximum: 100_000 });
+  }
+  const profile = RESPONSES_SEARCH_CONTEXT_PROFILES[contextSize];
+  const filters = responsesSearchFilters(tool);
+  const location = responsesSearchLocation(tool);
+  const requestedCharacters = returnTokenBudget ? Math.min(returnTokenBudget * 4, MAX_TOOL_RESULT_CHARS) : profile.defaultContextMaxCharacters;
+  const adaptations = [];
+  if (contentTypes.includes('image')) adaptations.push('responses_web_search_image_results_dropped');
+  if (returnTokenBudget && returnTokenBudget * 4 > MAX_TOOL_RESULT_CHARS) adaptations.push('responses_web_search_token_budget_bounded');
+  if (tool.image_settings !== undefined) adaptations.push('responses_web_search_image_settings_dropped');
+  return {
+    name: BRIDGE_WEB_SEARCH_NAME,
+    maxUses: 8,
+    location: location.label,
+    country: location.country,
+    ...filters,
+    defaultNumResults: profile.defaultNumResults,
+    defaultContextMaxCharacters: requestedCharacters,
+    sourceType: tool.type,
+    outputProtocol: 'responses',
+    adaptations
+  };
 }
 
 function localSearchCallers(tool, version) {
@@ -202,16 +311,105 @@ export function claudeWebSearchForChat(body) {
   if (remainingTools.some((tool) => tool?.name === BRIDGE_WEB_SEARCH_NAME)) throw new Error(`Claude 自定义工具不能与本地 Web Search 同名：${BRIDGE_WEB_SEARCH_NAME}`);
   const toolChoice = claudeToolChoiceKind(body?.tool_choice);
   const forcedName = objectValue(body?.tool_choice)?.name;
-  if (toolChoice === 'tool' && forcedName === BRIDGE_WEB_SEARCH_NAME) throw new Error('桥接本地 Web Search 暂不支持强制 Claude tool_choice=web_search；请使用 auto');
+  const forcedTypedSearch = !clientSearch && toolChoice === 'tool' && forcedName === BRIDGE_WEB_SEARCH_NAME;
   const forcedClientSearch = clientSearch && toolChoice === 'tool' && forcedName === spec.clientToolName;
-  if (forcedClientSearch) spec.force = true;
+  if (forcedTypedSearch || forcedClientSearch) spec.force = true;
   const nextBody = { ...body, tools: remainingTools, messages: portableClaudeSearchHistory(body.messages) };
-  if (forcedClientSearch) nextBody.tool_choice = { type: 'auto' };
+  if (forcedTypedSearch || forcedClientSearch) nextBody.tool_choice = { type: 'auto' };
   return {
     body: nextBody,
     spec,
-    enabled: toolChoice !== 'none' && (toolChoice !== 'tool' || forcedClientSearch)
+    enabled: toolChoice !== 'none' && (toolChoice !== 'tool' || forcedTypedSearch || forcedClientSearch)
   };
+}
+
+function assertKnownFields(value, fields, label) {
+  const unsupported = Object.keys(value).filter((field) => !fields.has(field));
+  if (unsupported.length) throw new Error(`${label} 暂不支持字段：${unsupported.join(', ')}`);
+}
+
+function validateResponsesSearchHistoryItem(item) {
+  assertKnownFields(item, RESPONSES_SEARCH_HISTORY_FIELDS, 'Responses 历史 web_search_call');
+  const action = objectValue(item.action);
+  if (typeof item.id !== 'string' || !item.id || !action || !RESPONSES_SEARCH_ACTION_FIELDS[action.type]) {
+    throw new Error('Responses 历史 web_search_call 结构无效');
+  }
+  if (item.status !== undefined && !RESPONSES_SEARCH_HISTORY_STATUSES.has(item.status)) {
+    throw new Error(`Responses 历史 web_search_call.status 无效：${String(item.status)}`);
+  }
+  assertKnownFields(action, RESPONSES_SEARCH_ACTION_FIELDS[action.type], `Responses 历史 web_search_call.action(${action.type})`);
+  if (action.type === 'search') {
+    const queries = Array.isArray(action.queries) ? action.queries : [];
+    if ((action.query !== undefined && typeof action.query !== 'string')
+      || (action.queries !== undefined && !Array.isArray(action.queries))
+      || queries.some((query) => typeof query !== 'string')
+      || (action.sources !== undefined && !Array.isArray(action.sources))
+      || (!action.query && !queries.some(Boolean))) {
+      throw new Error('Responses 历史 web_search_call.action(search) 结构无效');
+    }
+    return;
+  }
+  if (typeof action.url !== 'string' || !action.url
+    || (action.type === 'find_in_page' && (typeof action.pattern !== 'string' || !action.pattern))) {
+    throw new Error(`Responses 历史 web_search_call.action(${action.type}) 结构无效`);
+  }
+}
+
+function portableResponsesSearchHistory(input) {
+  if (!Array.isArray(input)) return { input, dropped: 0 };
+  let dropped = 0;
+  const nextInput = input.filter((item) => {
+    if (item?.type !== 'web_search_call') return true;
+    validateResponsesSearchHistoryItem(item);
+    dropped++;
+    return false;
+  });
+  return { input: nextInput, dropped };
+}
+
+function responsesAllowedSearchChoice(choice) {
+  if (objectValue(choice)?.type !== 'allowed_tools') return null;
+  assertKnownFields(choice, new Set(['type', 'mode', 'tools']), 'Responses tool_choice.allowed_tools');
+  if (!['auto', 'required'].includes(choice.mode)) throw new Error('Responses tool_choice.allowed_tools.mode 必须是 auto 或 required');
+  if (!Array.isArray(choice.tools) || !choice.tools.length) throw new Error('Responses tool_choice.allowed_tools.tools 必须是非空数组');
+  const searchSelectors = choice.tools.filter((selector) => objectValue(selector) && RESPONSES_WEB_SEARCH_TYPES.has(selector.type));
+  if (searchSelectors.length > 1) throw new Error('Responses tool_choice.allowed_tools 不能重复选择 Web Search');
+  for (const selector of searchSelectors) assertKnownFields(selector, new Set(['type']), 'Responses tool_choice.allowed_tools Web Search 选择器');
+  return {
+    includesSearch: searchSelectors.length === 1,
+    remainingSelectors: choice.tools.filter((selector) => !searchSelectors.includes(selector)),
+    mode: choice.mode
+  };
+}
+
+export function responsesWebSearchForChat(body) {
+  const tools = asArray(body?.tools);
+  const matches = tools.filter((tool) => objectValue(tool) && RESPONSES_WEB_SEARCH_TYPES.has(tool.type));
+  if (!matches.length) return null;
+  if (matches.length !== 1) throw new Error('Responses 请求不能同时声明多个 Web Search 工具');
+  const spec = normalizeResponsesSearchTool(matches[0]);
+  const remainingTools = tools.filter((tool) => tool !== matches[0]);
+  if (remainingTools.some((tool) => tool?.name === BRIDGE_WEB_SEARCH_NAME)) {
+    throw new Error(`Responses 自定义工具不能与本地 Web Search 同名：${BRIDGE_WEB_SEARCH_NAME}`);
+  }
+  const choice = body?.tool_choice;
+  const allowedChoice = responsesAllowedSearchChoice(choice);
+  const explicitlyForced = objectValue(choice) && RESPONSES_WEB_SEARCH_TYPES.has(choice.type);
+  const requiredOnlySearch = choice === 'required' && remainingTools.length === 0;
+  const explicitlyOtherTool = objectValue(choice) && ['function', 'custom', 'tool_search'].includes(choice.type);
+  const allowedOnlySearch = allowedChoice?.includesSearch && allowedChoice.remainingSelectors.length === 0;
+  const enabled = choice !== 'none' && !explicitlyOtherTool && (!allowedChoice || allowedChoice.includesSearch);
+  if (explicitlyForced || requiredOnlySearch || (allowedOnlySearch && allowedChoice.mode === 'required')) spec.force = true;
+  const history = portableResponsesSearchHistory(body.input);
+  const nextBody = { ...body, tools: remainingTools, input: history.input };
+  if (explicitlyForced || requiredOnlySearch) nextBody.tool_choice = 'auto';
+  else if (allowedOnlySearch) {
+    nextBody.tools = [];
+    nextBody.tool_choice = 'auto';
+  }
+  else if (allowedChoice?.includesSearch) nextBody.tool_choice = { ...choice, tools: allowedChoice.remainingSelectors };
+  if (history.dropped) spec.adaptations.push('responses_web_search_history_compacted');
+  return { body: nextBody, spec, enabled };
 }
 
 export function withBridgeWebSearchTool(chatBody, spec) {
@@ -289,7 +487,7 @@ export function hasNonBridgeToolCalls(upstreamBody) {
   return asArray(message?.tool_calls).some((call) => call?.function?.name !== BRIDGE_WEB_SEARCH_NAME);
 }
 
-function parseArguments(call, { allowDynamicDomains = false } = {}) {
+function parseArguments(call, { allowDynamicDomains = false, defaultNumResults = 8, defaultContextMaxCharacters } = {}) {
   const raw = call?.function?.arguments;
   let parsed;
   try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw; }
@@ -299,13 +497,13 @@ function parseArguments(call, { allowDynamicDomains = false } = {}) {
   const unknown = Object.keys(parsed).filter((field) => !known.includes(field));
   if (unknown.length) throw new Error(`模型返回了未知 Web Search 参数：${unknown.join(', ')}`);
   const query = optionalString(parsed.query, 'Web Search query', MAX_QUERY_CHARS);
-  const numResults = parsed.numResults === undefined ? 8 : integer(parsed.numResults, 'Web Search numResults', { minimum: 1, maximum: 10 });
+  const numResults = parsed.numResults === undefined ? defaultNumResults : integer(parsed.numResults, 'Web Search numResults', { minimum: 1, maximum: 10 });
   const type = parsed.type === undefined ? 'auto' : parsed.type;
   if (!['auto', 'fast', 'deep'].includes(type)) throw new Error('Web Search type 仅支持 auto、fast 或 deep');
   const livecrawl = parsed.livecrawl === undefined ? 'fallback' : parsed.livecrawl;
   if (!['fallback', 'preferred'].includes(livecrawl)) throw new Error('Web Search livecrawl 仅支持 fallback 或 preferred');
   const contextMaxCharacters = parsed.contextMaxCharacters === undefined
-    ? undefined
+    ? defaultContextMaxCharacters
     : integer(parsed.contextMaxCharacters, 'Web Search contextMaxCharacters', { minimum: 1, maximum: MAX_TOOL_RESULT_CHARS });
   const allowedDomains = allowDynamicDomains ? normalizeDomains(parsed.allowed_domains, 'Web Search allowed_domains') : [];
   const blockedDomains = allowDynamicDomains ? normalizeDomains(parsed.blocked_domains, 'Web Search blocked_domains') : [];
@@ -532,7 +730,11 @@ function safeProviderFailure(provider, error) {
 export async function executeBridgeWebSearchDetailed(call, {
   signal, endpoint, parallelEndpoint, provider, spec = {}, sessionId, model, onProvider
 } = {}) {
-  const args = parseArguments(call, { allowDynamicDomains: spec.dynamicDomains === true });
+  const args = parseArguments(call, {
+    allowDynamicDomains: spec.dynamicDomains === true,
+    defaultNumResults: spec.defaultNumResults ?? 8,
+    defaultContextMaxCharacters: spec.defaultContextMaxCharacters
+  });
   const executionSpec = {
     ...spec,
     allowedDomains: args.allowedDomains.length ? args.allowedDomains : asArray(spec.allowedDomains),
@@ -601,4 +803,78 @@ export function webSearchToolError(error) {
     : typeof error?.message === 'string' && error.message ? error.message.slice(0, 512)
       : 'Web Search 暂不可用';
   return `Web Search 未能完成：${message}。请根据已有信息继续，或向用户说明联网搜索暂时不可用。`;
+}
+
+function markdownSearchTitle(value) {
+  return String(value || 'Web search result').replaceAll('\\', '\\\\').replaceAll('[', '\\[').replaceAll(']', '\\]');
+}
+
+function markdownSearchUrl(value) {
+  return String(value || '').replaceAll('(', '%28').replaceAll(')', '%29');
+}
+
+export function withResponsesBridgeWebSearchMetadata(response, searches) {
+  if (!response || typeof response !== 'object' || Array.isArray(response) || !asArray(searches).length) return response;
+  const searchItems = searches.map((search) => ({
+    id: String(search.id || '').startsWith('ws_') ? search.id : `ws_${String(search.id || '').replace(/^srvtoolu_/, '')}`,
+    type: 'web_search_call',
+    status: search.errorCode ? 'failed' : 'completed',
+    action: { type: 'search', query: String(search.query || 'Web search request') }
+  }));
+  const sources = [];
+  const seen = new Set();
+  for (const result of searches.flatMap((search) => asArray(search.results))) {
+    const url = publicSearchUrl(result?.url);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    sources.push({ url, title: publicSearchTitle(result?.title, url) });
+    if (sources.length >= 8) break;
+  }
+  let output = asArray(response.output).map((item) => ({
+    ...item,
+    ...(Array.isArray(item?.content) ? { content: item.content.map((part) => ({ ...part })) } : {})
+  }));
+  let textItemIndex = output.findLastIndex((item) => item?.type === 'message'
+    && Array.isArray(item.content) && item.content.some((part) => part?.type === 'output_text'));
+  if (textItemIndex < 0 && sources.length) {
+    output.push({ id: `msg_${Date.now().toString(36)}`, type: 'message', status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: '', annotations: [] }] });
+    textItemIndex = output.length - 1;
+  }
+  if (textItemIndex >= 0 && sources.length) {
+    const item = output[textItemIndex];
+    const partIndex = item.content.findLastIndex((part) => part?.type === 'output_text');
+    const part = item.content[partIndex];
+    let text = String(part.text || '');
+    const missing = sources.filter((source) => !text.includes(source.url));
+    if (missing.length) {
+      const suffix = `\n\n### 搜索来源链接 / Web search sources\n\n${missing
+        .map((source) => `- [${markdownSearchTitle(source.title)}](${markdownSearchUrl(source.url)})`)
+        .join('\n')}`;
+      text = `${text.trimEnd()}${suffix}`;
+    }
+    const annotations = asArray(part.annotations).map((annotation) => ({ ...annotation }));
+    const annotatedUrls = new Set(annotations.filter((annotation) => annotation?.type === 'url_citation').map((annotation) => annotation.url));
+    for (const source of sources) {
+      if (annotatedUrls.has(source.url)) continue;
+      const displayedUrl = markdownSearchUrl(source.url);
+      const rawStart = text.indexOf(source.url);
+      const start = rawStart >= 0 ? rawStart : text.indexOf(displayedUrl);
+      if (start < 0) continue;
+      const citedText = rawStart >= 0 ? source.url : displayedUrl;
+      const startIndex = Array.from(text.slice(0, start)).length;
+      annotations.push({
+        type: 'url_citation', url: source.url, title: source.title,
+        start_index: startIndex, end_index: startIndex + Array.from(citedText).length
+      });
+    }
+    item.content[partIndex] = { ...part, text, annotations };
+  }
+  return {
+    ...response,
+    output: [...searchItems, ...output],
+    tool_usage: {
+      ...(objectValue(response.tool_usage) || {}),
+      web_search: { num_requests: searches.length }
+    }
+  };
 }

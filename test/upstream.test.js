@@ -189,6 +189,7 @@ test('流式上游超时只限制响应头且客户端取消在响应头后仍�
         body: { model: 'slow-headers', stream: true }
       }),
       (error) => error?.name === 'TimeoutError'
+        && upstreamConnectionFailure(error).code === 'upstream_response_timeout'
     );
 
     const errorResponse = await callUpstream({
@@ -402,6 +403,18 @@ test('上游连接错误会转换为安全且可操作的诊断信息', () => {
     status: 502,
     code: 'upstream_dns_error',
     message: '连接上游失败：域名解析失败'
+  });
+  const terminated = new TypeError('terminated');
+  assert.equal(isUpstreamConnectionError(terminated), true);
+  assert.deepEqual(upstreamConnectionFailure(terminated), {
+    status: 502,
+    code: 'upstream_connection_reset',
+    message: '连接上游失败：连接被意外断开'
+  });
+  assert.deepEqual(upstreamConnectionFailure(Object.assign(new Error('premature close'), { code: 'ERR_STREAM_PREMATURE_CLOSE' })), {
+    status: 502,
+    code: 'upstream_connection_reset',
+    message: '连接上游失败：连接被意外断开'
   });
   const generic = upstreamConnectionFailure(new Error('https://user:password@secret.invalid/private'));
   assert.equal(isUpstreamConnectionError(new Error('application conversion failed')), false);

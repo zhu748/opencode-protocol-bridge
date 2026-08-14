@@ -11,8 +11,8 @@ import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, singBoxRunt
 import { KeepAliveService, normalizeKeepAliveUrl, resolveKeepAliveConfig } from './keep-alive.js';
 import { configuredProviderCredentials, createProviderCredentialResolver, environmentProviderCredentials, MAX_PROVIDER_KEYS, storedProviderCredentialEntries } from './provider-credentials.js';
 import { CredentialHealthTracker } from './credential-health.js';
-import { createSseObserver, createSseTerminalTracker, sanitizeSseErrorStream, streamClaudeMessage, translateSse, withSseEventIdleTimeout, withSseHeartbeat } from './stream.js';
-import { BRIDGE_WEB_SEARCH_NAME, bridgeWebSearchCalls, claudeWebSearchForChat, executeBridgeWebSearchDetailed, hasNonBridgeToolCalls, webSearchToolError, withBridgeWebSearchTool } from './bridge-web-search.js';
+import { createSseObserver, createSseTerminalTracker, sanitizeSseErrorStream, streamClaudeMessage, streamResponsesResponse, translateSse, withSseEventIdleTimeout, withSseHeartbeat } from './stream.js';
+import { BRIDGE_WEB_SEARCH_NAME, bridgeWebSearchCalls, claudeWebSearchForChat, executeBridgeWebSearchDetailed, hasNonBridgeToolCalls, responsesWebSearchForChat, webSearchToolError, withBridgeWebSearchTool, withResponsesBridgeWebSearchMetadata } from './bridge-web-search.js';
 import { RequestLogStore } from './request-log.js';
 import { RequestStatsStore } from './request-stats-store.js';
 import { aggregateRequestStats, summarizeRequestStatus } from './stats.js';
@@ -177,7 +177,9 @@ function streamFailure(error, res, abort) {
     UPSTREAM_INVALID_UTF8: 'upstream_invalid_utf8',
     UPSTREAM_JSON_TOO_COMPLEX: 'upstream_response_too_complex'
   };
-  const networkFailure = isUpstreamConnectionError(error) ? upstreamConnectionFailure(error) : null;
+  const networkFailure = isUpstreamConnectionError(abortReason)
+    ? upstreamConnectionFailure(abortReason)
+    : isUpstreamConnectionError(error) ? upstreamConnectionFailure(error) : null;
   return clientClosed
     ? {
         status: 499,
@@ -1370,7 +1372,7 @@ async function callChatWithBridgeWebSearch({ provider, credential, body, signal,
         if (index >= searchesToRun) {
           content = 'Web Search 未执行：已达到本请求允许的最大搜索次数。请基于已有搜索结果直接回答用户。';
         } else {
-          const serverToolId = `srvtoolu_${randomBytes(18).toString('base64url')}`;
+          const serverToolId = `${search.outputProtocol === 'responses' ? 'ws' : 'srvtoolu'}_${randomBytes(18).toString('base64url')}`;
           try {
             const result = await executeBridgeWebSearchDetailed(call, {
               signal: requestSignal,
@@ -1395,6 +1397,10 @@ async function callChatWithBridgeWebSearch({ provider, credential, body, signal,
         ...current,
         messages: [...(Array.isArray(current.messages) ? current.messages : []), assistant, ...results]
       };
+      if (search.force && current.tool_choice?.type === 'function'
+        && current.tool_choice.function?.name === BRIDGE_WEB_SEARCH_NAME) {
+        current.tool_choice = 'auto';
+      }
       if (calls >= search.maxUses) {
         current = withoutBridgeWebSearchTool(current);
         current.messages = [...current.messages, {
@@ -1594,7 +1600,9 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   if (responsesCompact && route.protocol !== 'responses') {
     return protocolError(res, 400, incomingProtocol, 'Responses compact 只能透传到原生 Responses 模型；请将该模型路由设为 responses');
   }
+  const responsesClientConfigBody = body;
   let bridgeWebSearch;
+  let bridgeWebSearchAdaptations = [];
   if (incomingProtocol === 'claude' && route.protocol === 'chat') {
     let localSearch;
     try { localSearch = claudeWebSearchForChat(body); }
@@ -1603,16 +1611,31 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       body = localSearch.body;
       if (localSearch.enabled) {
         if (!config.bridgeWebSearchEnabled) {
-          return protocolError(res, 400, incomingProtocol, 'Claude Web Search 已在桥接设置中关闭；请启用“为 Claude Code 启用本地 Web Search”，或将模型路由设为原生 Claude');
+          return protocolError(res, 400, incomingProtocol, 'Claude Web Search 已在桥接设置中关闭；请启用“为 Claude Code / Codex 启用本地 Web Search”，或将模型路由设为原生 Claude');
         }
         bridgeWebSearch = localSearch.spec;
+      }
+    }
+  }
+  if (incomingProtocol === 'responses' && route.protocol === 'chat') {
+    let localSearch;
+    try { localSearch = responsesWebSearchForChat(body); }
+    catch (error) { return protocolError(res, 400, incomingProtocol, error.message); }
+    if (localSearch) {
+      body = localSearch.body;
+      if (localSearch.enabled) {
+        if (!config.bridgeWebSearchEnabled) {
+          return protocolError(res, 400, incomingProtocol, 'Codex Web Search 已在桥接设置中关闭；请启用本地 Web Search，或将模型路由设为原生 Responses');
+        }
+        bridgeWebSearch = localSearch.spec;
+        bridgeWebSearchAdaptations = ['responses_web_search_to_mcp', ...(localSearch.spec.adaptations || [])];
       }
     }
   }
   const reasoningStateScope = createReasoningStateScope(client.id || client.name || 'client', body.model, route);
   const requestedReasoningEffort = requestReasoningEffort(body, incomingProtocol);
   const requestKind = codexRequestKind(body, incomingProtocol);
-  const responseOptions = responsesOutputOptions(body, incomingProtocol);
+  const responseOptions = responsesOutputOptions(responsesClientConfigBody, incomingProtocol);
   const chatOptions = chatOutputOptions(body, incomingProtocol);
   const webSearchDegraded = incomingProtocol === 'responses' && !['responses', 'gemini'].includes(route.protocol) && hasHostedResponsesWebSearch(body.tools);
   const allowResponsesWebSearch = incomingProtocol === 'gemini' && route.protocol === 'responses' && hasGeminiGoogleSearch(body);
@@ -1624,7 +1647,8 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   if (incomingProtocol === 'responses' && route.protocol === 'gemini' && hasHostedResponsesWebSearch(body.tools)) {
     toolAdaptations.push('responses_web_search_to_gemini_google_search');
   }
-  if (bridgeWebSearch) toolAdaptations.push('claude_web_search_to_mcp');
+  if (bridgeWebSearch && incomingProtocol === 'claude') toolAdaptations.push('claude_web_search_to_mcp');
+  toolAdaptations.push(...bridgeWebSearchAdaptations);
   let inputDegradations;
   try {
     inputDegradations = inputRequestDegradations(body, incomingProtocol, route.protocol);
@@ -2002,6 +2026,9 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     if (bridgeWebSearch && incomingProtocol === 'claude') {
       clientResponse = withClaudeBridgeWebSearchMetadata(clientResponse, bridgeWebSearchEvents);
     }
+    if (bridgeWebSearch && incomingProtocol === 'responses') {
+      clientResponse = withResponsesBridgeWebSearchMetadata(clientResponse, bridgeWebSearchEvents);
+    }
   } catch (error) {
     credentialHealth.releaseProbe(route.provider, credential);
     await writeLog({ status: 502, stream: false, error: error.message });
@@ -2027,7 +2054,10 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     });
     res.flushHeaders();
     try {
-      for await (const event of streamClaudeMessage(clientResponse)) {
+      const syntheticStream = incomingProtocol === 'responses'
+        ? streamResponsesResponse(clientResponse)
+        : streamClaudeMessage(clientResponse);
+      for await (const event of syntheticStream) {
         activity.stage('writing_stream');
         await writeResponseChunk(res, event, STREAM_WRITE_TIMEOUT_MS);
         downstreamTerminal.write(event);

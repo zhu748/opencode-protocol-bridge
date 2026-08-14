@@ -2119,6 +2119,171 @@ export async function* streamClaudeMessage(message) {
   yield sse('message_stop', { type: 'message_stop' });
 }
 
+export async function* streamResponsesResponse(response) {
+  if (!response || typeof response !== 'object' || Array.isArray(response) || response.object !== 'response') {
+    throw new TypeError('Responses 流式响应必须是 response 对象');
+  }
+  const output = Array.isArray(response.output) ? response.output : [];
+  let sequenceNumber = 0;
+  const event = (name, data) => sse(name, { ...data, sequence_number: sequenceNumber++ });
+  yield event('response.created', {
+    type: 'response.created',
+    response: { ...response, status: 'in_progress', completed_at: null, output: [], usage: null }
+  });
+  for (const [outputIndex, sourceItem] of output.entries()) {
+    if (!sourceItem || typeof sourceItem !== 'object' || Array.isArray(sourceItem)) {
+      throw new TypeError(`Responses output[${outputIndex}] 必须是对象`);
+    }
+    const item = { ...sourceItem };
+    if (item.type === 'web_search_call') {
+      yield event('response.output_item.added', {
+        type: 'response.output_item.added', output_index: outputIndex,
+        item: { ...item, status: 'in_progress' }
+      });
+      yield event('response.web_search_call.in_progress', {
+        type: 'response.web_search_call.in_progress', output_index: outputIndex, item_id: item.id
+      });
+      yield event('response.web_search_call.searching', {
+        type: 'response.web_search_call.searching', output_index: outputIndex, item_id: item.id
+      });
+      if (item.status !== 'failed') yield event('response.web_search_call.completed', {
+        type: 'response.web_search_call.completed', output_index: outputIndex, item_id: item.id
+      });
+      yield event('response.output_item.done', { type: 'response.output_item.done', output_index: outputIndex, item });
+      continue;
+    }
+    if (item.type === 'message') {
+      const content = Array.isArray(item.content) ? item.content : [];
+      yield event('response.output_item.added', {
+        type: 'response.output_item.added', output_index: outputIndex,
+        item: { ...item, status: 'in_progress', content: [] }
+      });
+      for (const [contentIndex, part] of content.entries()) {
+        if (part?.type === 'output_text') {
+          const emptyPart = { type: 'output_text', text: '', annotations: [] };
+          yield event('response.content_part.added', {
+            type: 'response.content_part.added', item_id: item.id, output_index: outputIndex, content_index: contentIndex, part: emptyPart
+          });
+          if (part.text) yield event('response.output_text.delta', {
+            type: 'response.output_text.delta', item_id: item.id, output_index: outputIndex, content_index: contentIndex,
+            delta: part.text, logprobs: []
+          });
+          for (const [annotationIndex, annotation] of (Array.isArray(part.annotations) ? part.annotations : []).entries()) {
+            yield event('response.output_text.annotation.added', {
+              type: 'response.output_text.annotation.added', item_id: item.id, output_index: outputIndex,
+              content_index: contentIndex, annotation_index: annotationIndex, annotation
+            });
+          }
+          yield event('response.output_text.done', {
+            type: 'response.output_text.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex,
+            text: part.text || '', logprobs: []
+          });
+          yield event('response.content_part.done', {
+            type: 'response.content_part.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, part
+          });
+        } else if (part?.type === 'refusal') {
+          yield event('response.content_part.added', {
+            type: 'response.content_part.added', item_id: item.id, output_index: outputIndex, content_index: contentIndex,
+            part: { type: 'refusal', refusal: '' }
+          });
+          if (part.refusal) yield event('response.refusal.delta', {
+            type: 'response.refusal.delta', item_id: item.id, output_index: outputIndex, content_index: contentIndex, delta: part.refusal
+          });
+          yield event('response.refusal.done', {
+            type: 'response.refusal.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, refusal: part.refusal || ''
+          });
+          yield event('response.content_part.done', {
+            type: 'response.content_part.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, part
+          });
+        } else {
+          throw new TypeError(`Responses message content[${contentIndex}] 类型无法流式编码：${String(part?.type || 'unknown')}`);
+        }
+      }
+      yield event('response.output_item.done', { type: 'response.output_item.done', output_index: outputIndex, item });
+      continue;
+    }
+    if (item.type === 'function_call') {
+      yield event('response.output_item.added', {
+        type: 'response.output_item.added', output_index: outputIndex,
+        item: { ...item, status: 'in_progress', arguments: '' }
+      });
+      if (item.arguments) yield event('response.function_call_arguments.delta', {
+        type: 'response.function_call_arguments.delta', item_id: item.id, output_index: outputIndex, delta: item.arguments
+      });
+      yield event('response.function_call_arguments.done', {
+        type: 'response.function_call_arguments.done', item_id: item.id, output_index: outputIndex, arguments: item.arguments || ''
+      });
+      yield event('response.output_item.done', { type: 'response.output_item.done', output_index: outputIndex, item });
+      continue;
+    }
+    if (item.type === 'custom_tool_call') {
+      yield event('response.output_item.added', {
+        type: 'response.output_item.added', output_index: outputIndex,
+        item: { ...item, status: 'in_progress', input: '' }
+      });
+      yield event('response.custom_tool_call_input.done', {
+        type: 'response.custom_tool_call_input.done', item_id: item.id, output_index: outputIndex, input: item.input || ''
+      });
+      yield event('response.output_item.done', { type: 'response.output_item.done', output_index: outputIndex, item });
+      continue;
+    }
+    if (item.type === 'tool_search_call') {
+      yield event('response.output_item.added', {
+        type: 'response.output_item.added', output_index: outputIndex,
+        item: { ...item, status: 'in_progress', arguments: {} }
+      });
+      yield event('response.output_item.done', { type: 'response.output_item.done', output_index: outputIndex, item });
+      continue;
+    }
+    if (item.type === 'reasoning') {
+      const summary = Array.isArray(item.summary) ? item.summary : [];
+      const content = Array.isArray(item.content) ? item.content : [];
+      yield event('response.output_item.added', {
+        type: 'response.output_item.added', output_index: outputIndex,
+        item: { ...item, status: 'in_progress', summary: [] }
+      });
+      for (const [summaryIndex, part] of summary.entries()) {
+        yield event('response.reasoning_summary_part.added', {
+          type: 'response.reasoning_summary_part.added', item_id: item.id, output_index: outputIndex,
+          summary_index: summaryIndex, part: { type: 'summary_text', text: '' }
+        });
+        if (part?.text) yield event('response.reasoning_summary_text.delta', {
+          type: 'response.reasoning_summary_text.delta', item_id: item.id, output_index: outputIndex,
+          summary_index: summaryIndex, delta: part.text
+        });
+        yield event('response.reasoning_summary_text.done', {
+          type: 'response.reasoning_summary_text.done', item_id: item.id, output_index: outputIndex,
+          summary_index: summaryIndex, text: part?.text || ''
+        });
+        yield event('response.reasoning_summary_part.done', {
+          type: 'response.reasoning_summary_part.done', item_id: item.id, output_index: outputIndex, summary_index: summaryIndex, part
+        });
+      }
+      for (const [contentIndex, part] of content.entries()) {
+        if (part?.type !== 'reasoning_text') throw new TypeError(`Responses reasoning content[${contentIndex}] 类型无法流式编码`);
+        yield event('response.content_part.added', {
+          type: 'response.content_part.added', item_id: item.id, output_index: outputIndex, content_index: contentIndex,
+          part: { type: 'reasoning_text', text: '' }
+        });
+        if (part.text) yield event('response.reasoning_text.delta', {
+          type: 'response.reasoning_text.delta', item_id: item.id, output_index: outputIndex, content_index: contentIndex, delta: part.text
+        });
+        yield event('response.reasoning_text.done', {
+          type: 'response.reasoning_text.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, text: part.text || ''
+        });
+        yield event('response.content_part.done', {
+          type: 'response.content_part.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, part
+        });
+      }
+      yield event('response.output_item.done', { type: 'response.output_item.done', output_index: outputIndex, item });
+      continue;
+    }
+    throw new TypeError(`Responses output[${outputIndex}] 类型无法流式编码：${String(item.type || 'unknown')}`);
+  }
+  const terminalType = response.status === 'incomplete' ? 'response.incomplete' : 'response.completed';
+  yield event(terminalType, { type: terminalType, response });
+}
+
 function blockToolArguments(block) {
   let parsed;
   try { parsed = parsedToolArguments(block.arguments, 'tool'); }

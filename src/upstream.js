@@ -16,16 +16,21 @@ function upstreamErrorChain(error) {
   return chain;
 }
 
+function hasConnectionTerminationMessage(chain) {
+  return chain.some((item) => /^(?:terminated|socket hang up|premature close)$/i.test(String(item?.message || '').trim()));
+}
+
 export function isUpstreamConnectionError(error) {
   const chain = upstreamErrorChain(error);
   const codes = new Set([
     'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
-    'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'PROXY_TUNNEL_ERROR',
+    'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ERR_STREAM_PREMATURE_CLOSE', 'PROXY_TUNNEL_ERROR',
     'UPSTREAM_STREAM_IDLE_TIMEOUT', 'UPSTREAM_STREAM_EVENT_IDLE_TIMEOUT'
   ]);
   return chain.some((item) => item?.name === 'TimeoutError'
     || codes.has(item?.code)
-    || /^(?:CERT_|ERR_TLS_CERT_ALTNAME_INVALID$|DEPTH_ZERO_SELF_SIGNED_CERT$|SELF_SIGNED_CERT_IN_CHAIN$|UNABLE_TO_VERIFY_LEAF_SIGNATURE$)/.test(String(item?.code || '')));
+    || /^(?:CERT_|ERR_TLS_CERT_ALTNAME_INVALID$|DEPTH_ZERO_SELF_SIGNED_CERT$|SELF_SIGNED_CERT_IN_CHAIN$|UNABLE_TO_VERIFY_LEAF_SIGNATURE$)/.test(String(item?.code || '')))
+    || hasConnectionTerminationMessage(chain);
 }
 
 export function upstreamConnectionFailure(error) {
@@ -58,7 +63,7 @@ export function upstreamConnectionFailure(error) {
   if (hasCode('ECONNREFUSED')) {
     return { status: 502, code: 'upstream_connection_refused', message: '连接上游失败：连接被拒绝' };
   }
-  if (hasCode('ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET')) {
+  if (hasCode('ECONNRESET', 'EPIPE', 'ERR_STREAM_PREMATURE_CLOSE', 'UND_ERR_SOCKET') || hasConnectionTerminationMessage(chain)) {
     return { status: 502, code: 'upstream_connection_reset', message: '连接上游失败：连接被意外断开' };
   }
   if (tlsFailure) {
@@ -81,6 +86,7 @@ function timedSignal(signal, timeoutMs) {
   timeout.unref?.();
   return {
     signal: signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal,
+    timeoutSignal: timeoutController.signal,
     clearTimeout: () => clearTimeout(timeout)
   };
 }
@@ -155,6 +161,7 @@ export async function callUpstream({ provider, protocol, apiKey, proxyUrl, body,
     return response;
   } catch (error) {
     requestControl.clearTimeout();
+    if (requestControl.timeoutSignal.aborted) throw requestControl.timeoutSignal.reason;
     throw error;
   }
 }
@@ -230,6 +237,7 @@ export async function listModels({ provider, apiKey, proxyUrl, signal, timeoutMs
     return response;
   } catch (error) {
     requestControl.clearTimeout();
+    if (requestControl.timeoutSignal.aborted) throw requestControl.timeoutSignal.reason;
     throw error;
   }
 }

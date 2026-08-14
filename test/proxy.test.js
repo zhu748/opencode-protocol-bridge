@@ -1029,7 +1029,8 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
       })
     });
     assert.equal(codexCrossProtocol.status, 200);
-    assert.equal(codexCrossProtocol.headers.get('x-opencode-tool-degradations'), 'web_search');
+    assert.equal(codexCrossProtocol.headers.get('x-opencode-tool-degradations'), null);
+    assert.ok(codexCrossProtocol.headers.get('x-opencode-tool-adaptations').split(',').includes('responses_web_search_to_mcp'));
     assert.equal(codexCrossProtocol.headers.get('x-opencode-input-degradations'), 'responses_client_metadata,responses_item_metadata,responses_item_phase,encrypted_reasoning');
     assert.equal(codexCrossProtocol.headers.get('x-opencode-reasoning-adaptations'), 'reasoning_effort_forced_maximum,reasoning_summary_best_effort_chat,reasoning_history_to_chat_reasoning_content');
     const codexBody = await codexCrossProtocol.json();
@@ -1056,13 +1057,14 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.body.model, 'deepseek-v4-flash');
     assert.equal(captured.body.reasoning_effort, 'max');
     assert.equal(captured.body.client_metadata, undefined);
-    assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['multi_agent_v1__spawn_agent']);
+    assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['multi_agent_v1__spawn_agent', 'web_search']);
     assert.equal(captured.body.messages.some((message) => message.role === 'developer'), false);
     assert.equal(captured.body.messages.some((message) => message.role === 'assistant' && message.content === '正在分派检查任务'), true);
-    assert.match(captured.body.messages.find((message) => message.role === 'system').content, /cannot execute the hosted web_search tool/);
+    assert.doesNotMatch(captured.body.messages.find((message) => message.role === 'system').content, /cannot execute the hosted web_search tool/);
+    assert.match(captured.body.messages.find((message) => message.role === 'system').content, /完整 HTTP\(S\) URL/);
     assert.equal(captured.body.messages.find((message) => message.role === 'assistant').reasoning_content, '先检查任务边界');
     const codexLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(codexLog.protocol, 'responses → chat (web_search unavailable, reasoning degraded, responses client metadata dropped, responses item metadata degraded, responses item phase degraded, reasoning_effort_forced_maximum adapted, reasoning_summary_best_effort_chat adapted, reasoning_history_to_chat_reasoning_content adapted)');
+    assert.equal(codexLog.protocol, 'responses → chat (responses_web_search_to_mcp adapted, reasoning degraded, responses client metadata dropped, responses item metadata degraded, responses item phase degraded, reasoning_effort_forced_maximum adapted, reasoning_summary_best_effort_chat adapted, reasoning_history_to_chat_reasoning_content adapted)');
     assert.equal(codexLog.requestedReasoningEffort, 'low');
     assert.equal(codexLog.reasoningEffort, 'max');
     assert.equal(codexLog.requestKind, 'turn');

@@ -777,6 +777,8 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     assert.equal(direct.headers.get('cache-control'), 'no-store, no-transform');
     const directText = await direct.text();
     assert.match(directText, /"type":"upstream_error"/);
+    assert.match(directText, /"code":"upstream_connection_reset"/);
+    assert.match(directText, /连接被意外断开/);
     assert.match(directText, /data: \[DONE\]/);
 
     const translated = await fetch(`http://127.0.0.1:${port}/zen/v1/messages`, {
@@ -788,6 +790,7 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     const translatedText = await translated.text();
     assert.match(translatedText, /event: error/);
     assert.match(translatedText, /"type":"upstream_error"/);
+    assert.match(translatedText, /连接被意外断开/);
 
     const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'Admin123' })
@@ -796,6 +799,7 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
     const logs = await fetch(`http://127.0.0.1:${port}/api/logs`, { headers: { cookie } }).then((response) => response.json());
     assert.equal(logs.length, 2, JSON.stringify(logs, null, 2));
     assert.ok(logs.every((item) => item.status === 502 && item.stream && item.error));
+    assert.ok(logs.every((item) => item.errorCode === 'upstream_connection_reset'));
     const stats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
     assert.equal(stats.summary.errors, 2);
     assert.equal(stats.credentialHealth[0].consecutiveFailures, 2);

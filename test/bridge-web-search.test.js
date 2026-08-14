@@ -6,8 +6,9 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { unlink } from 'node:fs/promises';
-import { claudeWebSearchForChat, executeBridgeWebSearch, executeBridgeWebSearchDetailed, withBridgeWebSearchTool } from '../src/bridge-web-search.js';
-import { streamClaudeMessage } from '../src/stream.js';
+import { prepareUpstreamRequest } from '../src/adapters.js';
+import { claudeWebSearchForChat, executeBridgeWebSearch, executeBridgeWebSearchDetailed, responsesWebSearchForChat, withBridgeWebSearchTool, withResponsesBridgeWebSearchMetadata } from '../src/bridge-web-search.js';
+import { streamClaudeMessage, streamResponsesResponse, translateSse } from '../src/stream.js';
 
 async function requestBody(req) {
   const chunks = [];
@@ -66,6 +67,13 @@ test('Claude typed Web Search 会作为桥接专用函数注入 Chat 请求', ()
   assert.throws(() => claudeWebSearchForChat({
     tools: [{ type: 'web_search_20250305', future_option: true }]
   }), /暂不支持.*future_option/);
+  const forced = claudeWebSearchForChat({
+    tool_choice: { type: 'tool', name: 'web_search' },
+    tools: [{ type: 'web_search_20250305' }]
+  });
+  assert.equal(forced.enabled, true);
+  assert.equal(forced.spec.force, true);
+  assert.deepEqual(forced.body.tool_choice, { type: 'auto' });
 });
 
 test('Claude Code 客户端 WebSearch 会映射为内部小写搜索函数', () => {
@@ -116,6 +124,109 @@ test('Claude Code 客户端 WebSearch 会映射为内部小写搜索函数', () 
   });
   assert.equal(replayed.body.messages[0].content.some((block) => block.type === 'server_tool_use'), false);
   assert.match(replayed.body.messages[0].content[0].text, /北京天气.*https:\/\/weather\.example\//);
+});
+
+test('Codex Responses Web Search 会保留可执行语义并标记图片结果降级', () => {
+  const source = {
+    model: 'search-chat', stream: true, input: '搜索北京天气', tool_choice: 'auto',
+    tools: [{
+      type: 'web_search', return_token_budget: 'default', search_content_types: ['text', 'image'],
+      search_context_size: 'medium',
+      user_location: { type: 'approximate', city: null, country: 'US', region: null, timezone: null }
+    }]
+  };
+  const adapted = responsesWebSearchForChat(source);
+  assert.equal(adapted.enabled, true);
+  assert.equal(adapted.spec.outputProtocol, 'responses');
+  assert.equal(adapted.spec.country, 'US');
+  assert.equal(adapted.spec.defaultNumResults, 8);
+  assert.equal(adapted.spec.defaultContextMaxCharacters, 20_000);
+  assert.deepEqual(adapted.spec.adaptations, ['responses_web_search_image_results_dropped']);
+  assert.deepEqual(adapted.body.tools, []);
+  assert.equal(adapted.body.input, source.input);
+
+  const replayed = responsesWebSearchForChat({
+    input: [
+      { type: 'web_search_call', id: 'ws_previous', status: 'completed', action: { type: 'search', query: '旧查询' } },
+      { role: 'assistant', content: [{ type: 'output_text', text: '旧答案', annotations: [] }] },
+      { role: 'user', content: [{ type: 'input_text', text: '继续' }] }
+    ],
+    tools: [{ type: 'web_search' }]
+  });
+  assert.equal(replayed.body.input.some((item) => item.type === 'web_search_call'), false);
+  assert.ok(replayed.spec.adaptations.includes('responses_web_search_history_compacted'));
+  assert.throws(() => responsesWebSearchForChat({
+    input: [{ type: 'web_search_call', id: 'ws_unknown', status: 'completed', action: { type: 'search', query: '查询' }, vendor_state: true }],
+    tools: [{ type: 'web_search' }]
+  }), /暂不支持字段.*vendor_state/);
+  const allowed = responsesWebSearchForChat({
+    input: '搜索并检查',
+    tool_choice: { type: 'allowed_tools', mode: 'required', tools: [
+      { type: 'web_search' }, { type: 'function', name: 'inspect' }
+    ] },
+    tools: [
+      { type: 'web_search' },
+      { type: 'function', name: 'inspect', parameters: { type: 'object' } },
+      { type: 'function', name: 'write', parameters: { type: 'object' } }
+    ]
+  });
+  assert.equal(allowed.enabled, true);
+  assert.deepEqual(allowed.body.tool_choice, {
+    type: 'allowed_tools', mode: 'required', tools: [{ type: 'function', name: 'inspect' }]
+  });
+  const allowedUpstream = withBridgeWebSearchTool(
+    prepareUpstreamRequest(allowed.body, 'responses', 'chat', 'search-chat'),
+    allowed.spec
+  );
+  assert.deepEqual(allowedUpstream.tools.map((tool) => tool.function.name), ['inspect', 'web_search']);
+  assert.equal(allowedUpstream.tool_choice, 'required');
+  const allowedOnlySearch = responsesWebSearchForChat({
+    input: '只搜索',
+    tool_choice: { type: 'allowed_tools', mode: 'required', tools: [{ type: 'web_search' }] },
+    tools: [
+      { type: 'web_search' },
+      { type: 'function', name: 'write', parameters: { type: 'object' } }
+    ]
+  });
+  assert.equal(allowedOnlySearch.spec.force, true);
+  assert.deepEqual(allowedOnlySearch.body.tools, []);
+  assert.equal(allowedOnlySearch.body.tool_choice, 'auto');
+  assert.throws(() => responsesWebSearchForChat({
+    tools: [{ type: 'web_search', external_web_access: false }]
+  }), /仅缓存语义/);
+  assert.throws(() => responsesWebSearchForChat({
+    tools: [{ type: 'web_search', search_content_types: ['image'] }]
+  }), /仅图片/);
+});
+
+test('本地搜索结果会编码为 Responses 调用轨迹、引用与流式事件', async () => {
+  const enriched = withResponsesBridgeWebSearchMetadata({
+    id: 'resp_search', object: 'response', created_at: 1, completed_at: 2, status: 'completed', model: 'search-chat',
+    output: [{ id: 'msg_answer', type: 'message', status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: '北京天气回答。', annotations: [] }] }],
+    usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } }
+  }, [{ id: 'ws_bridge', query: '北京天气', results: [{ type: 'web_search_result', title: '权威天气', url: 'https://weather.example/current' }] }]);
+  assert.equal(enriched.output[0].type, 'web_search_call');
+  assert.equal(enriched.tool_usage.web_search.num_requests, 1);
+  const answer = enriched.output[1].content[0];
+  assert.match(answer.text, /https:\/\/weather\.example\/current/);
+  assert.deepEqual(answer.annotations[0], {
+    type: 'url_citation', url: 'https://weather.example/current', title: '权威天气',
+    start_index: answer.annotations[0].start_index, end_index: answer.annotations[0].end_index
+  });
+  assert.equal(answer.text.slice(answer.annotations[0].start_index, answer.annotations[0].end_index), 'https://weather.example/current');
+
+  const stream = await collect(streamResponsesResponse(enriched));
+  const events = stream.split(/\n\n/).filter(Boolean)
+    .map((block) => JSON.parse(block.split(/\r?\n/).find((line) => line.startsWith('data: ')).slice(6)));
+  assert.deepEqual(events.map((item) => item.sequence_number), events.map((_, index) => index));
+  assert.equal(events[0].type, 'response.created');
+  assert.ok(events.some((item) => item.type === 'response.output_item.added' && item.item.type === 'web_search_call'));
+  assert.ok(events.some((item) => item.type === 'response.output_text.annotation.added'));
+  assert.equal(events.at(-1).type, 'response.completed');
+  assert.equal(events.at(-1).response.tool_usage.web_search.num_requests, 1);
+  const validated = await collect(translateSse(new Response(stream), 'responses', 'chat', 'search-chat', { allowResponsesWebSearch: true }));
+  assert.match(validated, /北京天气回答/);
+  assert.match(validated, /data: \[DONE\]/);
 });
 
 test('桥接 Web Search 通过 Exa MCP 的 tools/call 执行', async (t) => {
@@ -403,6 +514,49 @@ test('Claude Code 的 typed Web Search 可经 Chat 上游完成完整工具循�
     assert.equal(chatRequests.length, 4);
     assert.ok(chatRequests.every((request) => request.stream === false));
     assert.equal(searchRequests.length, 4);
+
+    const codexBody = {
+      model: 'search-chat', input: '搜索一下北京天气近几天', tool_choice: { type: 'web_search' },
+      tools: [{
+        type: 'web_search', return_token_budget: 'default', search_content_types: ['text', 'image'],
+        search_context_size: 'medium',
+        user_location: { type: 'approximate', city: null, country: 'US', region: null, timezone: null }
+      }]
+    };
+    const codexResponse = await fetch(`http://127.0.0.1:${bridgePort}/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${setupBody.clientToken}` },
+      body: JSON.stringify({ ...codexBody, stream: false })
+    });
+    assert.equal(codexResponse.status, 200);
+    assert.equal(codexResponse.headers.get('x-opencode-tool-adaptations'), 'responses_web_search_to_mcp,responses_web_search_image_results_dropped');
+    assert.equal(codexResponse.headers.get('x-opencode-tool-degradations'), null);
+    const codexJson = await codexResponse.json();
+    assert.equal(codexJson.output.filter((item) => item.type === 'web_search_call').length, 2);
+    assert.equal(codexJson.tool_usage.web_search.num_requests, 2);
+    const codexText = codexJson.output.find((item) => item.type === 'message').content.find((part) => part.type === 'output_text');
+    assert.match(codexText.text, /搜索来源链接/);
+    assert.equal(codexText.annotations.filter((item) => item.type === 'url_citation').length, 2);
+    assert.equal(chatRequests.length, 6);
+    assert.deepEqual(chatRequests[4].tool_choice, { type: 'function', function: { name: 'web_search' } });
+    assert.equal(chatRequests[5].tool_choice, 'auto');
+    assert.equal(searchRequests.length, 6);
+
+    const codexStreamed = await fetch(`http://127.0.0.1:${bridgePort}/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${setupBody.clientToken}` },
+      body: JSON.stringify({ ...codexBody, stream: true })
+    });
+    assert.equal(codexStreamed.status, 200);
+    assert.match(codexStreamed.headers.get('content-type'), /^text\/event-stream/);
+    const codexStreamText = await codexStreamed.text();
+    const codexEvents = codexStreamText.split(/\n\n/).filter(Boolean)
+      .map((block) => JSON.parse(block.split(/\r?\n/).find((line) => line.startsWith('data: ')).slice(6)));
+    assert.deepEqual(codexEvents.map((item) => item.sequence_number), codexEvents.map((_, index) => index));
+    assert.equal(codexEvents.filter((item) => item.type === 'response.output_item.added' && item.item.type === 'web_search_call').length, 2);
+    assert.ok(codexEvents.some((item) => item.type === 'response.output_text.annotation.added'));
+    assert.equal(codexEvents.at(-1).type, 'response.completed');
+    assert.equal(codexEvents.at(-1).response.tool_usage.web_search.num_requests, 2);
+    assert.equal(chatRequests.length, 8);
+    assert.equal(searchRequests.length, 8);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});
