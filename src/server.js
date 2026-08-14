@@ -1734,6 +1734,8 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     ...(inputDegradations.includes('responses_client_metadata') ? ['responses client metadata dropped'] : []),
     ...(inputDegradations.includes('responses_item_metadata') ? ['responses item metadata degraded'] : []),
     ...(inputDegradations.includes('responses_item_phase') ? ['responses item phase degraded'] : []),
+    ...(inputDegradations.includes('responses_empty_assistant_placeholder') ? ['empty responses assistant placeholder dropped'] : []),
+    ...(inputDegradations.includes('responses_agent_message_to_user') ? ['responses agent message adapted to user'] : []),
     ...reasoningAdaptations.map((kind) => `${kind} adapted`),
     ...contextAdaptations.map((kind) => `${kind} adapted`),
     ...serviceAdaptations.map((kind) => `${kind} adapted`),

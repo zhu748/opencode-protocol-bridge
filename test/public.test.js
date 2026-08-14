@@ -227,7 +227,10 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_client_metadata/);
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_item_metadata/);
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_item_phase/);
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_empty_assistant_placeholder/);
+  assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_agent_message_to_user/);
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /responses_compaction_state/);
+  assert.match(spec.components.headers.InputDegradations.description, /context_compaction/);
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /gemini_thought_signature/);
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /claude_thinking_signature/);
   assert.match(spec.components.headers.InputDegradations.schema.pattern, /claude_redacted_thinking/);
@@ -252,6 +255,9 @@ test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async (
   assert.match(spec.components.headers.ServiceAdaptations.schema.pattern, /claude_fast_speed_to_openai_fast_tier/);
   assert.match(spec.components.headers.ServiceAdaptations.schema.pattern, /openai_default_tier_to_claude_standard_speed/);
   assert.match(spec.components.headers.ReasoningAdaptations.schema.pattern, /reasoning_history_to_chat_reasoning_content/);
+  assert.match(spec.components.headers.ReasoningAdaptations.schema.pattern, /reasoning_context_all_turns_history_replay/);
+  assert.match(spec.components.headers.ReasoningAdaptations.schema.pattern, /reasoning_summary_sequential_cutoff_best_effort/);
+  assert.match(spec.components.headers.ToolAdaptations.schema.pattern, /additional_tools_to_top_level/);
   assert.equal(spec.components.schemas.GenerateContentRequest.properties.toolConfig.$ref, '#/components/schemas/GeminiToolConfig');
   assert.equal(spec.paths['/models'].get.responses['200'].headers['x-opencode-key-attempts'].$ref, '#/components/headers/KeyAttempts');
   assert.equal(spec.paths['/models'].get.responses['400'].$ref, '#/components/responses/InvalidRequest');

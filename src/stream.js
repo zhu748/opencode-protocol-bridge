@@ -697,16 +697,17 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
   };
 
   function* responseCompactionEvents(outputIndex, item, { close = false } = {}) {
-    if (typeof item?.encrypted_content !== 'string' || !item.encrypted_content) return;
+    if (!item || !['compaction', 'context_compaction'].includes(item.type)) return;
+    if (item.type === 'compaction' && (typeof item.encrypted_content !== 'string' || !item.encrypted_content)) return;
     const sourceIndex = responsesProviderStateSourceIndex(outputIndex);
-    const providerState = { protocol: 'responses', kind: 'compaction', value: item };
+    const providerState = { protocol: 'responses', kind: item.type, value: item };
     const state = responseBlocks.get(sourceIndex) || responseBlockState('provider_state', outputIndex, undefined, {
-      streamKind: 'compaction', id: item.id, providerState
+      streamKind: item.type, id: item.id, providerState
     });
     if (state.blockType !== 'provider_state') {
-      throw invalidResponsesStream(`output[${outputIndex}] 无法从 ${state.blockType} 变为 compaction`);
+      throw invalidResponsesStream(`output[${outputIndex}] 无法从 ${state.blockType} 变为 ${item.type}`);
     }
-    Object.assign(state, { streamKind: 'compaction', id: item.id, providerState });
+    Object.assign(state, { streamKind: item.type, id: item.id, providerState });
     rememberResponseBlock(sourceIndex, state);
     for (const event of startResponseBlock(state, sourceIndex)) yield event;
     if (close) for (const event of stopResponseBlock(state, sourceIndex)) yield event;
@@ -714,6 +715,10 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
 
   function* closeClaudeBlock(index, state) {
     if (!state || state.closed) return;
+    if (state.blockType === 'text' && state.started === false) {
+      state.closed = true;
+      return;
+    }
     if (state.blockType === 'reasoning') {
       const reasoningState = claudeReasoningBlocks.get(index) || { started: false, text: '', signature: '' };
       const providerState = reasoningState.providerState || {
@@ -853,9 +858,11 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
             throw invalidClaudeStream(`text block ${index} 的 text 必须是字符串`);
           }
           const text = typeof block.text === 'string' ? block.text : '';
-          claudeBlocks.set(index, { blockType: 'text', closed: false });
-          yield { type: 'block_start', sourceIndex: index, blockType: 'text' };
-          if (text) yield { type: 'text_delta', sourceIndex: index, delta: text };
+          claudeBlocks.set(index, { blockType: 'text', closed: false, started: Boolean(text) });
+          if (text) {
+            yield { type: 'block_start', sourceIndex: index, blockType: 'text' };
+            yield { type: 'text_delta', sourceIndex: index, delta: text };
+          }
         }
         else if (block.type === 'thinking') {
           if (rejectUnsupportedContent && typeof block.thinking !== 'string') {
@@ -912,7 +919,12 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
         if (data.delta?.type === 'text_delta') {
           if (blockState.blockType !== 'text') throw invalidClaudeStream(`text_delta 不能用于 ${blockState.blockType} block ${index}`);
           if (rejectUnsupportedContent && typeof data.delta.text !== 'string') throw invalidClaudeStream(`text_delta block ${index} 的 text 必须是字符串`);
-          yield { type: 'text_delta', sourceIndex: index, delta: data.delta.text || '' };
+          const text = data.delta.text || '';
+          if (text && !blockState.started) {
+            blockState.started = true;
+            yield { type: 'block_start', sourceIndex: index, blockType: 'text' };
+          }
+          if (text) yield { type: 'text_delta', sourceIndex: index, delta: text };
         }
         else if (data.delta?.type === 'input_json_delta') {
           if (blockState.blockType !== 'tool') throw invalidClaudeStream(`input_json_delta 不能用于 ${blockState.blockType} block ${index}`);
@@ -1097,8 +1109,8 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
           Object.assign(state, { blockType: 'tool', streamKind: 'tool', id: item.call_id || item.id, name: item.name });
           rememberResponseBlock(sourceIndex, state);
           for (const event of startResponseBlock(state, sourceIndex)) yield event;
-        } else if (item.type === 'compaction') {
-          // Compaction is opaque and may only become complete in output_item.done.
+        } else if (item.type === 'compaction' || item.type === 'context_compaction') {
+          // Compaction state may only become complete in output_item.done.
           // Defer emission so another protocol never receives a partial ciphertext.
         } else if (rejectUnsupportedContent) {
           throw unsupportedStreamContent(`Responses 输出项：${item.type || 'unknown'}`);
@@ -1371,7 +1383,7 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
             for (const event of stopResponseBlock(state, sourceIndex)) yield event;
           }
           if (metadata.attachedProviderToken) metadata.finalizedProviderToken = metadata.attachedProviderToken;
-        } else if (item.type === 'compaction') {
+        } else if (item.type === 'compaction' || item.type === 'context_compaction') {
           yield* responseCompactionEvents(outputIndex, item, { close: true });
         } else if (rejectUnsupportedContent) {
           throw unsupportedStreamContent(`Responses 输出项：${item.type || 'unknown'}`);
@@ -1468,7 +1480,7 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
             }
             continue;
           }
-          if (item.type === 'compaction') {
+          if (item.type === 'compaction' || item.type === 'context_compaction') {
             yield* responseCompactionEvents(outputIndex, item);
             continue;
           }
@@ -1949,12 +1961,20 @@ function assertPortableResponsesStreamItem(item, label, phase) {
       throw invalidResponsesStream(`${label}.encrypted_content 必须是非空字符串或 null`);
     }
   }
-  if (item.type === 'compaction') {
-    const unsupported = Object.keys(item).filter((key) => !['type', 'id', 'encrypted_content', 'created_by'].includes(key));
+  if (item.type === 'compaction' || item.type === 'context_compaction') {
+    const allowed = item.type === 'compaction'
+      ? ['type', 'id', 'encrypted_content', 'created_by']
+      : ['type', 'id', 'encrypted_content'];
+    const unsupported = Object.keys(item).filter((key) => !allowed.includes(key));
     if (unsupported.length) throw invalidResponsesStream(`${label} 包含不支持的字段：${unsupported.join(', ')}`);
-    if (typeof item.id !== 'string' || !item.id) throw invalidResponsesStream(`${label}.id 必须是非空字符串`);
-    const pending = phase === 'added' && (item.encrypted_content === undefined || item.encrypted_content === null);
-    if (!pending && (typeof item.encrypted_content !== 'string' || !item.encrypted_content)) {
+    if (item.id !== undefined && item.id !== null && (typeof item.id !== 'string' || !item.id)) {
+      throw invalidResponsesStream(`${label}.id 必须是非空字符串`);
+    }
+    const encryptedRequired = item.type === 'compaction';
+    const pending = encryptedRequired && phase === 'added'
+      && (item.encrypted_content === undefined || item.encrypted_content === null);
+    if (((encryptedRequired && !pending) || (item.encrypted_content !== undefined && item.encrypted_content !== null))
+      && (typeof item.encrypted_content !== 'string' || !item.encrypted_content)) {
       throw invalidResponsesStream(`${label}.encrypted_content 必须是非空字符串`);
     }
     if (item.created_by !== undefined && (typeof item.created_by !== 'string' || !item.created_by)) {
@@ -2514,7 +2534,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
         const block = blocks.get(index);
         const responseCompaction = event.blockType === 'provider_state'
           && event.providerState?.protocol === 'responses'
-          && event.providerState.kind === 'compaction'
+          && ['compaction', 'context_compaction'].includes(event.providerState.kind)
           ? event.providerState.value
           : undefined;
         const item = responseCompaction
@@ -2654,7 +2674,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
           block.item.summary = [part];
           if (block.providerState) block.item.encrypted_content = encodeReasoningState(block.providerState.protocol, block.providerState.kind, block.providerState.value);
         } else if (block.type === 'provider_state') {
-          if (block.item.type !== 'compaction') {
+          if (!['compaction', 'context_compaction'].includes(block.item.type)) {
             block.item.encrypted_content = encodeReasoningState(block.providerState.protocol, block.providerState.kind, block.providerState.value);
           }
         } else {
@@ -2748,12 +2768,16 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
         const incomplete = Boolean(incompleteReason);
         for (const [index, block] of blocks) {
           if (!block.item || !block.closed || block.itemDone) continue;
-          if (block.item.type !== 'compaction') block.item.status = incomplete ? 'incomplete' : 'completed';
+          if (!['compaction', 'context_compaction'].includes(block.item.type)) {
+            block.item.status = incomplete ? 'incomplete' : 'completed';
+          }
+          if (block.item.type === 'message') block.item.phase = !incomplete && !hasTools ? 'final_answer' : 'commentary';
           block.itemDone = true;
           yield responseSse('response.output_item.done', { type: 'response.output_item.done', output_index: index, item: block.item });
         }
         const final = {
           id: responseId, object: 'response', created_at: createdAt, status: incomplete ? 'incomplete' : 'completed',
+          end_turn: !incomplete && !hasTools,
           model, ...responsesMetadata(), ...responseConfig,
           ...(!incomplete ? { completed_at: Math.max(createdAt, Math.floor(Date.now() / 1000)) } : { completed_at: null }),
           ...(incomplete ? { incomplete_details: { reason: incompleteReason } } : {}),

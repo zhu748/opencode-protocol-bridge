@@ -96,9 +96,15 @@ export function isValidReasoningState(protocol, kind, value) {
     if (kind === 'compaction') {
       return value.type === 'compaction'
         && Object.keys(value).every((key) => ['type', 'id', 'encrypted_content', 'created_by'].includes(key))
-        && typeof value.id === 'string' && Boolean(value.id)
+        && optionalNonEmptyString(value.id)
         && typeof value.encrypted_content === 'string' && Boolean(value.encrypted_content)
         && (value.created_by === undefined || (typeof value.created_by === 'string' && Boolean(value.created_by)));
+    }
+    if (kind === 'context_compaction') {
+      return value.type === 'context_compaction'
+        && hasOnlyKeys(value, ['type', 'id', 'encrypted_content'])
+        && optionalNonEmptyString(value.id)
+        && optionalNonEmptyString(value.encrypted_content);
     }
     return false;
   }

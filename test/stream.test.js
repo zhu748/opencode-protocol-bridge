@@ -390,6 +390,8 @@ test('Claude SSE 可逐事件转换为 Responses SSE', async () => {
   assert.deepEqual(completed.response.tools, responseTools);
   assert.ok(Number.isSafeInteger(completed.response.completed_at));
   assert.ok(completed.response.completed_at >= completed.response.created_at);
+  assert.equal(completed.response.end_turn, true);
+  assert.equal(events.find((event) => event.type === 'response.output_item.done').item.phase, 'final_answer');
   assert.deepEqual(completed.response.usage.input_tokens_details, { cached_tokens: 0, cache_write_tokens: 0 });
   assert.deepEqual(completed.response.usage.output_tokens_details, { reasoning_tokens: 0 });
 });
@@ -468,6 +470,23 @@ test('Claude content_block_start 的非空文本和完整工具 input 可直接�
   assert.match(output, /"name":"lookup"/);
   assert.deepEqual(reasoningState.toolCalls, [{ id: 'call_initial', name: 'lookup', arguments: '{"q":"起始参数"}' }]);
   assert.match(output, /"finish_reason":"tool_calls"/);
+});
+
+test('Claude 空文本块不会生成可被 Codex 重放的空 Responses message', async () => {
+  const source = responseFrom([
+    ['message_start', { type: 'message_start', message: { id: 'msg_empty', model: 'claude-test', content: [], usage: { input_tokens: 2 } } }],
+    ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
+    ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+    ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 0 } }],
+    ['message_stop', { type: 'message_stop' }]
+  ]);
+
+  const output = await collect(translateSse(source, 'claude', 'responses', 'claude-test'));
+  const events = output.split(/\n\n/).filter(Boolean)
+    .map((block) => JSON.parse(block.split(/\r?\n/).find((line) => line.startsWith('data: ')).slice(6)));
+  assert.equal(events.some((event) => event.type === 'response.output_item.added'), false);
+  assert.equal(events.some((event) => event.type === 'response.output_item.done'), false);
+  assert.deepEqual(events.find((event) => event.type === 'response.completed').response.output, []);
 });
 
 test('Claude fallback 边界跨协议保留并更新最终服务模型', async () => {
@@ -587,6 +606,7 @@ test('Chat SSE 的 Codex namespace 工具别名可还原为 Responses namespace 
   assert.equal(done.item.namespace, 'multi_agent_v1');
   assert.equal(done.item.name, 'spawn_agent');
   assert.equal(done.item.arguments, '{"task":"检查"}');
+  assert.equal(events.find((event) => event.type === 'response.completed').response.end_turn, false);
 });
 
 test('Responses 流式大工具表只为全部并行调用构建一次别名索引', async () => {
@@ -1381,6 +1401,53 @@ test('Responses compaction 流只在密文完整后发出并可恢复原始输�
   assert.deepEqual(done.item, compaction);
   assert.equal('status' in done.item, false);
   assert.deepEqual(responseEvents.find((event) => event.type === 'response.completed').response.output, [compaction]);
+});
+
+test('Codex context_compaction 流允许可选 id/密文并可恢复原始输出项', async () => {
+  const contextCompaction = { type: 'context_compaction' };
+  const source = responseFrom([
+    ['response.created', { type: 'response.created', response: { id: 'resp_context_compaction', object: 'response', status: 'in_progress', model: 'gpt' } }],
+    ['response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: contextCompaction }],
+    ['response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: contextCompaction }],
+    ['response.completed', { type: 'response.completed', response: {
+      id: 'resp_context_compaction', object: 'response', status: 'completed', model: 'gpt',
+      output: [contextCompaction], usage: { input_tokens: 10, output_tokens: 0 }
+    } }]
+  ]);
+  const output = await collect(translateSse(source, 'responses', 'claude', 'alias'));
+  const events = output.split(/\n\n/).filter(Boolean).map((block) => {
+    const data = block.split(/\r?\n/).find((line) => line.startsWith('data: '));
+    return data ? JSON.parse(data.slice(6)) : null;
+  }).filter(Boolean);
+  const redacted = events.find((event) => event.type === 'content_block_start')?.content_block;
+  assert.deepEqual(decodeReasoningState(redacted.data), {
+    protocol: 'responses', kind: 'context_compaction', value: contextCompaction
+  });
+
+  const encoded = encodeReasoningState('responses', 'context_compaction', contextCompaction);
+  const encoder = new TextEncoder();
+  const chatSource = new Response(new ReadableStream({ start(controller) {
+    controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+      id: 'chat_context_compaction', model: 'chat-test', choices: [{ index: 0, delta: {
+        role: 'assistant', reasoning_details: [{ type: 'reasoning.encrypted', data: encoded }]
+      }, finish_reason: null }]
+    })}\n\n`));
+    controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+      id: 'chat_context_compaction', model: 'chat-test', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 0 }
+    })}\n\ndata: [DONE]\n\n`));
+    controller.close();
+  } }), { headers: { 'content-type': 'text/event-stream' } });
+  const responsesOutput = await collect(translateSse(chatSource, 'chat', 'responses', 'alias'));
+  const responseEvents = responsesOutput.split(/\n\n/).filter(Boolean).flatMap((block) => {
+    const data = block.split(/\r?\n/).find((line) => line.startsWith('data: '));
+    if (!data || data === 'data: [DONE]') return [];
+    return [JSON.parse(data.slice(6))];
+  });
+  const done = responseEvents.find((event) => event.type === 'response.output_item.done');
+  assert.deepEqual(done.item, contextCompaction);
+  assert.equal('status' in done.item, false);
+  assert.deepEqual(responseEvents.find((event) => event.type === 'response.completed').response.output, [contextCompaction]);
 });
 
 test('Chat SSE 大量桥接推理状态使用身份集合线性去重', async () => {

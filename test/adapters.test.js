@@ -793,6 +793,62 @@ test('Responses 专属 reasoning 控制不会在跨协议时静默丢失', () =>
   assert.deepEqual(reasoningRequestAdaptations(request({ summary: 'auto' }), 'responses', 'chat', 'deepseek-v4-flash'), ['reasoning_summary_best_effort_chat']);
 });
 
+test('Codex Responses Lite 工具前缀和 all_turns 可由完整历史跨协议承接', () => {
+  const body = {
+    model: 'gpt-5.6-luna', stream: true, store: false,
+    reasoning: { effort: 'high', summary: 'auto', context: 'all_turns' },
+    input: [
+      {
+        type: 'additional_tools', role: 'developer', tools: [{
+          type: 'namespace', name: 'functions', description: '', tools: [
+            { type: 'function', name: 'exec', description: '执行命令', parameters: { type: 'object' } },
+            { type: 'function', name: 'wait', description: '等待任务', parameters: { type: 'object' } }
+          ]
+        }]
+      },
+      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: '遵循项目规则' }] },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: '继续工作' }] }
+    ]
+  };
+  const chat = prepareUpstreamRequest(body, 'responses', 'chat', 'deepseek-v4-flash');
+  assert.deepEqual(chat.tools.map((tool) => tool.function.name), ['functions__exec', 'functions__wait']);
+  assert.deepEqual(chat.messages.map((message) => message.role), ['system', 'user']);
+  assert.equal(chat.messages[0].content, '遵循项目规则');
+  assert.equal(chat.messages[1].content, '继续工作');
+  assert.deepEqual(responsesToolAdaptations(body.tools, body.input), ['additional_tools_to_top_level']);
+  assert.deepEqual(reasoningRequestAdaptations(body, 'responses', 'chat', 'deepseek-v4-flash'), [
+    'reasoning_context_all_turns_history_replay',
+    'reasoning_summary_best_effort_chat'
+  ]);
+
+  for (const invalid of [
+    { type: 'additional_tools', role: 'user', tools: body.input[0].tools },
+    { type: 'additional_tools', role: 'developer', tools: [] }
+  ]) {
+    assert.throws(() => prepareUpstreamRequest({ ...body, input: [invalid, body.input[2]] }, 'responses', 'chat', 'deepseek-v4-flash'), /additional_tools/);
+  }
+});
+
+test('Codex custom_tool_call_output 的可选 name 可在历史重放时保留调用结果', () => {
+  const chat = prepareUpstreamRequest({
+    model: 'alias',
+    tools: [{ type: 'custom', name: 'apply_patch', description: '应用补丁' }],
+    input: [
+      { type: 'custom_tool_call', call_id: 'call_patch', name: 'apply_patch', input: '*** Begin Patch' },
+      { type: 'custom_tool_call_output', call_id: 'call_patch', name: 'apply_patch', output: 'Done!' },
+      { role: 'user', content: [{ type: 'input_text', text: '继续' }] }
+    ]
+  }, 'responses', 'chat', 'deepseek-v4-flash');
+  assert.deepEqual(chat.messages.slice(0, 2).map((message) => message.role), ['assistant', 'tool']);
+  assert.equal(chat.messages[1].tool_call_id, 'call_patch');
+  assert.equal(chat.messages[1].content, 'Done!');
+  assert.throws(() => prepareUpstreamRequest({
+    model: 'alias', tools: [{ type: 'custom', name: 'apply_patch' }], input: [
+      { type: 'custom_tool_call_output', call_id: 'call_patch', name: '', output: 'Done!' }
+    ]
+  }, 'responses', 'chat', 'deepseek-v4-flash'), /custom_tool_call_output\.name/);
+});
+
 test('Claude 推理配置跨协议时严格校验不支持字段和组合', () => {
   const request = (extra) => ({ model: 'alias', max_tokens: 4096, messages: [{ role: 'user', content: '分析' }], ...extra });
   assert.throws(() => normalizeRequest(request({ output_config: { task_budget: { type: 'tokens', total: 1000 } } }), 'claude'), /output_config 字段：task_budget/);
@@ -1686,6 +1742,20 @@ test('OpenAI 跨协议流选项会严格校验且保留可重编码语义', () =
   }, 'responses', 'chat', 'chat-test');
   assert.equal(responses.stream, true);
 
+  const codexSequentialSummary = prepareUpstreamRequest({
+    model: 'alias', stream: true,
+    stream_options: { reasoning_summary_delivery: 'sequential_cutoff' },
+    reasoning: { effort: 'high', summary: 'auto' }, input: '测试'
+  }, 'responses', 'chat', 'chat-test');
+  assert.equal(codexSequentialSummary.stream, true);
+  assert.deepEqual(reasoningRequestAdaptations({
+    stream_options: { reasoning_summary_delivery: 'sequential_cutoff' },
+    reasoning: { effort: 'high', summary: 'auto' }
+  }, 'responses', 'chat', 'chat-test'), [
+    'reasoning_summary_sequential_cutoff_best_effort', 'reasoning_summary_best_effort_chat',
+    'reasoning_effort_unavailable_chat'
+  ]);
+
   const chat = prepareUpstreamRequest({
     model: 'alias', stream: true, stream_options: { include_usage: true, include_obfuscation: false },
     messages: [{ role: 'user', content: '测试' }]
@@ -1696,6 +1766,10 @@ test('OpenAI 跨协议流选项会严格校验且保留可重编码语义', () =
   assert.throws(() => prepareUpstreamRequest({
     model: 'alias', stream: true, stream_options: { include_obfuscation: 'yes' }, input: '测试'
   }, 'responses', 'chat', 'chat-test'), /include_obfuscation.*布尔值/);
+  assert.throws(() => prepareUpstreamRequest({
+    model: 'alias', stream: true,
+    stream_options: { reasoning_summary_delivery: 'parallel' }, input: '测试'
+  }, 'responses', 'chat', 'chat-test'), /reasoning_summary_delivery 仅支持 sequential_cutoff/);
   assert.throws(() => prepareUpstreamRequest({
     model: 'alias', stream: true, stream_options: { vendor_option: true }, messages: []
   }, 'chat', 'responses', 'gpt-test'), /stream_options 字段：vendor_option/);
@@ -2095,6 +2169,57 @@ test('跨协议请求拒绝会消失的空消息和不可移植 Chat 历史字�
     reasoning_details: [{ type: 'reasoning.encrypted', data: 'external-state' }]
   }] };
   assert.deepEqual(inputRequestDegradations(opaque, 'chat', 'responses'), ['chat_reasoning_state']);
+});
+
+test('Responses 跨协议会清理 Codex 空 assistant 占位且保留严格空消息校验', () => {
+  const placeholder = {
+    type: 'message', id: 'msg_empty', status: 'incomplete', role: 'assistant', phase: 'commentary',
+    content: [{ type: 'output_text', text: '' }]
+  };
+  const request = {
+    model: 'alias',
+    input: [
+      ...Array.from({ length: 308 }, (_, index) => ({ role: 'user', content: `历史 ${index}` })),
+      placeholder,
+      { role: 'user', content: [{ type: 'input_text', text: '继续任务' }] }
+    ]
+  };
+
+  const chat = prepareUpstreamRequest(request, 'responses', 'chat', 'chat-test');
+  assert.equal(chat.messages.length, 309);
+  assert.equal(chat.messages.at(-1).content, '继续任务');
+  assert.equal(chat.messages.some((message) => message.role === 'assistant' && message.content === ''), false);
+  assert.deepEqual(inputRequestDegradations(request, 'responses', 'chat'), [
+    'responses_item_metadata', 'responses_item_phase', 'responses_empty_assistant_placeholder'
+  ]);
+  assert.deepEqual(inputRequestDegradations(request, 'responses', 'responses'), []);
+
+  assert.throws(() => prepareUpstreamRequest({
+    model: 'alias', input: [{ role: 'assistant', content: [{
+      type: 'output_text', text: '', prompt_cache_breakpoint: { type: 'ephemeral' }
+    }] }]
+  }, 'responses', 'chat', 'chat-test'), /prompt_cache_breakpoint 位于不受支持的 output_text/);
+  assert.throws(() => prepareUpstreamRequest({
+    model: 'alias', input: [{ role: 'assistant', content: [{ type: 'output_text', text: '', annotations: [] }] }]
+  }, 'responses', 'chat', 'chat-test'), /不能只包含空内容块/);
+  assert.throws(() => prepareUpstreamRequest({
+    model: 'alias', input: [{ role: 'user', content: [{ type: 'input_text', text: '' }] }]
+  }, 'responses', 'chat', 'chat-test'), /不能只包含空内容块/);
+});
+
+test('跨协议响应不会为无语义空文本生成 Codex 可重放 message', () => {
+  const normalized = normalizeResponse({
+    id: 'chat_empty', model: 'deepseek-v4-flash',
+    choices: [{ index: 0, message: {
+      role: 'assistant', content: '',
+      tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'run', arguments: '{}' } }]
+    }, finish_reason: 'tool_calls' }],
+    usage: { prompt_tokens: 4, completion_tokens: 1 }
+  }, 'chat', 'deepseek-v4-flash', { rejectUnknown: true });
+
+  const responses = formatResponse(normalized, 'responses');
+  assert.deepEqual(responses.output.map((item) => item.type), ['function_call']);
+  assert.equal(responses.output.some((item) => item.type === 'message'), false);
 });
 
 test('跨协议请求严格校验消息 role 与内容块类型的协议组合', () => {
@@ -4048,6 +4173,15 @@ test('停止原因转换为目标协议的合法枚举', () => {
   assert.equal(responses.status, 'incomplete');
   assert.equal(responses.incomplete_details.reason, 'max_output_tokens');
   assert.equal(responses.completed_at, null);
+
+  const completed = formatResponse({ ...base, stopReason: 'end_turn' }, 'responses');
+  assert.equal(completed.end_turn, true);
+  assert.equal(completed.output[0].phase, 'final_answer');
+  const withTool = formatResponse({ ...base, parts: [
+    { type: 'text', text: '先检查' }, { type: 'tool_call', id: 'call_1', name: 'inspect', arguments: {} }
+  ] }, 'responses', { tools: [{ type: 'function', name: 'inspect', parameters: {} }] });
+  assert.equal(withTool.end_turn, false);
+  assert.equal(withTool.output[0].phase, 'commentary');
 });
 
 test('内容过滤终止不会被跨协议伪装成正常完成', () => {
@@ -4335,6 +4469,84 @@ test('Responses compaction 跨 Claude 与 Chat 客户端可逆回放且不暴露
   ]);
   assert.throws(() => normalizeResponse({ ...source, output: [{ ...compaction, status: 'completed' }] }, 'responses', 'gpt-test', { rejectUnknown: true }), /包含不支持的字段：status/);
   assert.throws(() => normalizeRequest({ model: 'alias', input: [{ ...compaction, encrypted_content: '' }] }, 'responses'), /encrypted_content 必须是非空字符串/);
+});
+
+test('Codex context_compaction 与无 id compaction 按官方可选字段转换并可逆回放', () => {
+  const compactWithoutId = { type: 'compaction', encrypted_content: 'opaque-no-id' };
+  const contextCompaction = { type: 'context_compaction', encrypted_content: 'opaque-context' };
+  const contextMarker = { type: 'context_compaction', id: 'cmp_marker' };
+
+  const normalizedInput = normalizeRequest({
+    model: 'alias',
+    input: [compactWithoutId, contextCompaction, contextMarker, { role: 'user', content: '继续' }]
+  }, 'responses');
+  assert.deepEqual(normalizedInput.messages.slice(0, 3).map((message) => message.parts[0].providerState), [
+    { protocol: 'responses', kind: 'compaction', value: compactWithoutId },
+    { protocol: 'responses', kind: 'context_compaction', value: contextCompaction },
+    { protocol: 'responses', kind: 'context_compaction', value: contextMarker }
+  ]);
+  assert.deepEqual(inputRequestDegradations({ model: 'alias', input: [contextMarker] }, 'responses', 'chat'), [
+    'responses_item_metadata', 'responses_compaction_state'
+  ]);
+
+  const source = {
+    id: 'resp_context_compaction', object: 'response', model: 'gpt-test', status: 'completed',
+    output: [contextCompaction], usage: { input_tokens: 10, output_tokens: 0 }
+  };
+  const normalized = normalizeResponse(source, 'responses', 'gpt-test', { rejectUnknown: true });
+  assert.equal(normalized.parts[0].providerState.kind, 'context_compaction');
+  assert.deepEqual(formatResponse(normalized, 'responses').output, [contextCompaction]);
+
+  const chatClient = formatResponse(normalized, 'chat');
+  assert.doesNotMatch(JSON.stringify(chatClient), /opaque-context/);
+  const replay = prepareUpstreamRequest({
+    model: 'alias', messages: [chatClient.choices[0].message, { role: 'user', content: '继续任务' }]
+  }, 'chat', 'responses', 'gpt-test');
+  assert.deepEqual(replay.input[0], contextCompaction);
+
+  assert.throws(() => normalizeRequest({
+    model: 'alias', input: [{ ...contextCompaction, created_by: 'server' }]
+  }, 'responses'), /包含不支持的字段：created_by/);
+  assert.throws(() => normalizeRequest({
+    model: 'alias', input: [{ ...contextCompaction, id: '' }]
+  }, 'responses'), /id 必须是非空字符串/);
+});
+
+test('Codex plaintext agent_message 跨协议保留参与者和用户轮次语义', () => {
+  const agentMessage = {
+    type: 'agent_message', id: 'agent_1', author: '/root/worker', recipient: '/root',
+    content: [
+      { type: 'input_text', text: 'Message Type: MESSAGE' },
+      { type: 'input_text', text: 'Payload:\n继续检查流式转换' }
+    ]
+  };
+  const source = {
+    model: 'alias', input: [agentMessage, { role: 'user', content: '继续主任务' }]
+  };
+
+  const chat = prepareUpstreamRequest(source, 'responses', 'chat', 'deepseek-v4-flash');
+  assert.equal(chat.messages[0].role, 'user');
+  assert.equal(chat.messages[0].content,
+    'Agent message from /root/worker to /root:\nMessage Type: MESSAGE\nPayload:\n继续检查流式转换');
+  assert.equal(chat.messages[1].content, '继续主任务');
+
+  const claude = prepareUpstreamRequest(source, 'responses', 'claude', 'claude-test');
+  assert.equal(claude.messages[0].role, 'user');
+  assert.equal(claude.messages[0].content[0].text, chat.messages[0].content);
+  assert.deepEqual(inputRequestDegradations(source, 'responses', 'chat'), [
+    'responses_item_metadata', 'responses_agent_message_to_user'
+  ]);
+  assert.deepEqual(inputRequestDegradations(source, 'responses', 'responses'), []);
+});
+
+test('Codex agent_message 严格校验内容且不跨协议泄漏密文', () => {
+  const base = { type: 'agent_message', author: '/root/worker', recipient: '/root' };
+  assert.throws(() => normalizeRequest({ model: 'alias', input: [{ ...base, content: '消息' }] }, 'responses'), /content 必须是数组/);
+  assert.throws(() => normalizeRequest({ model: 'alias', input: [{ ...base, content: [] }] }, 'responses'), /必须包含非空 input_text/);
+  assert.throws(() => normalizeRequest({ model: 'alias', input: [{ ...base, content: [{ type: 'input_text', text: 1 }] }] }, 'responses'), /text 必须是字符串/);
+  assert.throws(() => normalizeRequest({ model: 'alias', input: [{ ...base, content: [{ type: 'input_text', text: '消息', extra: true }] }] }, 'responses'), /不支持的字段：extra/);
+  assert.throws(() => normalizeRequest({ model: 'alias', input: [{ ...base, content: [{ type: 'encrypted_content', encrypted_content: 'opaque-agent-state' }] }] }, 'responses'), /无法解密 Responses agent_message/);
+  assert.throws(() => normalizeRequest({ model: 'alias', input: [{ ...base, content: [{ type: 'encrypted_content', encrypted_content: '' }] }] }, 'responses'), /必须是非空字符串/);
 });
 
 test('Claude thinking 可转换为 Responses reasoning 输出项', () => {

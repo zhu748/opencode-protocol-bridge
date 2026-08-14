@@ -29,6 +29,14 @@ test('推理状态封装可逆且不会误认普通供应商签名', () => {
   assert.deepEqual(decodeReasoningState(encodeReasoningState('responses', 'compaction', responsesCompaction)), {
     protocol: 'responses', kind: 'compaction', value: responsesCompaction
   });
+  const contextCompaction = { type: 'context_compaction' };
+  assert.deepEqual(decodeReasoningState(encodeReasoningState('responses', 'context_compaction', contextCompaction)), {
+    protocol: 'responses', kind: 'context_compaction', value: contextCompaction
+  });
+  const compactionWithoutId = { type: 'compaction', encrypted_content: 'opaque-no-id' };
+  assert.deepEqual(decodeReasoningState(encodeReasoningState('responses', 'compaction', compactionWithoutId)), {
+    protocol: 'responses', kind: 'compaction', value: compactionWithoutId
+  });
 });
 
 test('Gemini 工具 Part 可封装多个供应商推理状态', () => {
@@ -71,6 +79,9 @@ test('推理状态封装拒绝协议与内容类型不匹配的伪造状态', ()
   assert.throws(() => encodeReasoningState('responses', 'compaction', {
     type: 'compaction', id: 'cmp_1', encrypted_content: '', created_by: 'server'
   }), /无效的 responses\/compaction 状态/);
+  assert.throws(() => encodeReasoningState('responses', 'context_compaction', {
+    type: 'context_compaction', encrypted_content: ''
+  }), /无效的 responses\/context_compaction 状态/);
 
   for (const [protocol, kind, value] of [
     ['claude', 'thinking', { type: 'thinking', thinking: 'x', signature: 'sig', vendor_field: true }],

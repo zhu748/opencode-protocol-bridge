@@ -723,7 +723,8 @@ function assertPortableResponsesReasoning(request, targetProtocol) {
   if (control.mode === 'pro') {
     throw unsupportedFeature(`跨协议转换到 ${targetProtocol} 无法表达 Responses reasoning.mode=pro；请将模型路由设为 responses`);
   }
-  if (control.context && control.context !== 'auto') {
+  if (control.context && control.context !== 'auto'
+    && !(control.context === 'all_turns' && request.responsesLite)) {
     throw unsupportedFeature(`跨协议转换到 ${targetProtocol} 无法表达 Responses reasoning.context=${control.context}；请将模型路由设为 responses`);
   }
 }
@@ -751,7 +752,14 @@ export function reasoningRequestAdaptations(body, incomingProtocol, targetProtoc
       adaptations.push('reasoning_effort_unavailable_chat');
     }
   }
+  if (incomingProtocol === 'responses'
+    && body.stream_options?.reasoning_summary_delivery === 'sequential_cutoff') {
+    adaptations.push('reasoning_summary_sequential_cutoff_best_effort');
+  }
   if (control && incomingProtocol === 'responses') {
+    if (control.context === 'all_turns' && asArray(body.input).some((item) => item?.type === 'additional_tools')) {
+      adaptations.push('reasoning_context_all_turns_history_replay');
+    }
     if (control.summary && targetProtocol === 'claude') adaptations.push('reasoning_summary_to_claude_display');
     if (control.summary && targetProtocol === 'chat') adaptations.push('reasoning_summary_best_effort_chat');
     if (control.summary && targetProtocol === 'gemini') adaptations.push('reasoning_summary_to_gemini_thoughts');
@@ -1372,6 +1380,23 @@ function hasPortableMessagePayload(parts) {
   return parts.some(isPortableMessagePart);
 }
 
+function isEmptyResponsesAssistantPlaceholder(item) {
+  if (item?.role !== 'assistant' || (item.type !== undefined && item.type !== 'message')) return false;
+  if (!Array.isArray(item.content) || item.content.length === 0) return false;
+  return item.content.every((part) => {
+    if (typeof part === 'string') return part.length === 0;
+    if (!part || Array.isArray(part) || typeof part !== 'object') return false;
+    if (['text', 'input_text', 'output_text'].includes(part.type)) {
+      return part.text === '' && part.cache_control === undefined && part.prompt_cache_breakpoint === undefined
+        && part.annotations === undefined && part.logprobs === undefined;
+    }
+    if (part.type === 'refusal') {
+      return part.refusal === '' && part.prompt_cache_breakpoint === undefined;
+    }
+    return false;
+  });
+}
+
 function validateMessageContentRole(content, label, role, allowedByRole) {
   if (!Array.isArray(content)) return false;
   const allowed = allowedByRole[role];
@@ -1425,10 +1450,15 @@ function assertPortableResponsesExecution(body, targetProtocol) {
       throw unsupportedFeature('Responses stream_options 必须是对象');
     }
     if (body.stream !== true) throw unsupportedFeature('Responses stream_options 仅可在 stream=true 时使用');
-    const unknown = Object.keys(body.stream_options).filter((field) => field !== 'include_obfuscation');
+    const unknown = Object.keys(body.stream_options)
+      .filter((field) => !['include_obfuscation', 'reasoning_summary_delivery'].includes(field));
     if (unknown.length) throw unsupportedFeature(`跨协议转换无法保留 Responses stream_options 字段：${unknown.join(', ')}`);
     if (body.stream_options.include_obfuscation !== undefined && typeof body.stream_options.include_obfuscation !== 'boolean') {
       throw unsupportedFeature('Responses stream_options.include_obfuscation 必须是布尔值');
+    }
+    if (body.stream_options.reasoning_summary_delivery !== undefined
+      && body.stream_options.reasoning_summary_delivery !== 'sequential_cutoff') {
+      throw unsupportedFeature('Responses stream_options.reasoning_summary_delivery 仅支持 sequential_cutoff');
     }
   }
   for (const field of ['background', 'store']) {
@@ -1863,7 +1893,7 @@ function mergeResponsesTools(tools, input) {
   const result = [...asArray(tools)];
   const keys = new Set(result.map(responsesToolKey).filter(Boolean));
   for (const item of asArray(input)) {
-    if (item?.type !== 'tool_search_output' || !Array.isArray(item.tools)) continue;
+    if (!['additional_tools', 'tool_search_output'].includes(item?.type) || !Array.isArray(item.tools)) continue;
     for (const tool of item.tools) {
       const key = responsesToolKey(tool);
       if (key && keys.has(key)) continue;
@@ -2118,6 +2148,7 @@ export function responsesToolAdaptations(tools, input, toolChoice) {
   }
   const definitions = activeSource.flatMap((tool) => tool?.type === 'namespace' ? asArray(tool.tools) : [tool]);
   return [
+    ...(asArray(input).some((item) => item?.type === 'additional_tools') ? ['additional_tools_to_top_level'] : []),
     ...(activeSource.some((tool) => tool?.type === 'custom') ? ['custom'] : []),
     ...(activeSource.some((tool) => tool?.type === 'tool_search' && tool.execution === 'client') ? ['client_tool_search'] : []),
     ...(activeSource.some((tool) => tool?.type === 'tool_search' && tool.execution !== 'client') ? ['hosted_tool_search'] : []),
@@ -2164,6 +2195,12 @@ export function inputRequestDegradations(body, incomingProtocol, targetProtocol)
       && item.phase !== undefined && item.phase !== null)) {
       degradations.push('responses_item_phase');
     }
+    if (inputItems.some(isEmptyResponsesAssistantPlaceholder)) {
+      degradations.push('responses_empty_assistant_placeholder');
+    }
+    if (inputItems.some((item) => item?.type === 'agent_message')) {
+      degradations.push('responses_agent_message_to_user');
+    }
   }
   if (incomingProtocol === 'responses' && asArray(body?.input).some((item) => item?.type === 'reasoning'
     && typeof item.encrypted_content === 'string' && item.encrypted_content
@@ -2171,7 +2208,8 @@ export function inputRequestDegradations(body, incomingProtocol, targetProtocol)
     degradations.push('encrypted_reasoning');
   }
   if (incomingProtocol === 'responses' && targetProtocol !== 'responses' && asArray(body?.input).some((item) =>
-    item?.type === 'compaction' && typeof item.encrypted_content === 'string' && item.encrypted_content)) {
+    ['compaction', 'context_compaction'].includes(item?.type)
+    && (item.type === 'context_compaction' || (typeof item.encrypted_content === 'string' && item.encrypted_content)))) {
     degradations.push('responses_compaction_state');
   }
   const geminiContents = [...asArray(body?.contents), ...(body?.systemInstruction ? [body.systemInstruction] : [])];
@@ -2661,6 +2699,7 @@ export function normalizeRequest(body, protocol) {
     normalized.systemMessages = responsesInstructionMessages(body.instructions);
     normalized.system = normalized.systemMessages.map((item) => item.text).join('');
     const input = typeof body.input === 'string' ? [{ role: 'user', content: body.input }] : asArray(body.input);
+    normalized.responsesLite = input.some((item) => item?.type === 'additional_tools');
     if (body.tool_choice === 'programmatic_tool_calling' || body.tool_choice?.type === 'programmatic_tool_calling') {
       throw unsupportedFeature('跨协议转换无法强制选择 Responses programmatic_tool_calling；请将模型路由设为 responses');
     }
@@ -2711,7 +2750,7 @@ export function normalizeRequest(body, protocol) {
       if (item.prompt_cache_breakpoint !== undefined) {
         throw unsupportedFeature(`Responses input[${index}].prompt_cache_breakpoint 必须位于受支持的内容块上`);
       }
-      if (['system', 'developer'].includes(item.role)) {
+      if (item.type !== 'additional_tools' && ['system', 'developer'].includes(item.role)) {
         validateMessageContent(item.content, `Responses input[${index}].content`);
         validateMessageContentRole(item.content, `Responses input[${index}].content`, item.role, RESPONSES_MESSAGE_BLOCKS);
         validateOpenAiContentPromptCache(item.content, `Responses input[${index}].content`);
@@ -2725,7 +2764,12 @@ export function normalizeRequest(body, protocol) {
         continue;
       }
       conversationStarted = true;
-      if (item.type === 'custom_tool_call') {
+      if (item.type === 'additional_tools') {
+        if (item.role !== 'developer') throw unsupportedFeature(`Responses input[${index}] additional_tools.role 必须是 developer`);
+        if (!Array.isArray(item.tools) || item.tools.length === 0) {
+          throw unsupportedFeature(`Responses input[${index}] additional_tools.tools 必须是非空数组`);
+        }
+      } else if (item.type === 'custom_tool_call') {
         if (typeof item.name !== 'string' || !item.name) throw unsupportedFeature(`Responses input[${index}] 的 custom_tool_call 缺少 name`);
         if (typeof item.input !== 'string') throw unsupportedFeature(`Responses input[${index}] 的 custom_tool_call.input 必须是字符串`);
         normalized.messages.push({ role: 'assistant', parts: [{
@@ -2734,6 +2778,7 @@ export function normalizeRequest(body, protocol) {
         }] });
       } else if (item.type === 'custom_tool_call_output') {
         const callId = requiredInputString(item.call_id, `Responses input[${index}] custom_tool_call_output.call_id`);
+        if (item.name !== undefined) requiredInputString(item.name, `Responses input[${index}] custom_tool_call_output.name`);
         if (item.output === undefined) throw unsupportedFeature(`Responses input[${index}] custom_tool_call_output 缺少 output`);
         normalized.messages.push({ role: 'user', parts: [{ type: 'tool_result', id: callId, content: item.output }] });
       } else if (item.type === 'tool_search_call') {
@@ -2772,13 +2817,17 @@ export function normalizeRequest(body, protocol) {
         normalized.messages.push({ role: 'user', parts: [{ type: 'tool_result', id: callId, content: item.output }] });
       } else if (item.type === 'program' || item.type === 'program_output') {
         throw unsupportedFeature(`跨协议转换无法表达 Responses ${item.type} 程序运行项；请将模型路由设为 responses`);
+      } else if (item.type === 'agent_message') {
+        normalized.messages.push({ role: 'user', parts: [{
+          type: 'text', text: normalizedResponsesAgentMessageText(item, index)
+        }] });
       } else if (item.type === 'reasoning') {
         const parts = normalizedResponsesInputReasoning(item, index);
         if (parts.length) normalized.messages.push({ role: 'assistant', parts });
-      } else if (item.type === 'compaction') {
+      } else if (item.type === 'compaction' || item.type === 'context_compaction') {
         normalized.messages.push({ role: 'assistant', parts: [{
           type: 'provider_state',
-          providerState: { protocol: 'responses', kind: 'compaction', value: item }
+          providerState: { protocol: 'responses', kind: item.type, value: item }
         }] });
       } else if (item.type && item.type !== 'message') {
         throw unsupportedFeature(`跨协议转换暂不支持 Responses 输入项类型：${item.type}`);
@@ -2788,7 +2837,10 @@ export function normalizeRequest(body, protocol) {
         validateMessageContentRole(item.content, `Responses input[${index}].content`, item.role, RESPONSES_MESSAGE_BLOCKS);
         validateOpenAiContentPromptCache(item.content, `Responses input[${index}].content`);
         const parts = normalizeParts(item.content, { rejectUnknown: true });
-        if (!hasPortableMessagePayload(parts)) throw unsupportedFeature(`Responses input[${index}].content 不能只包含空内容块`);
+        if (!hasPortableMessagePayload(parts)) {
+          if (isEmptyResponsesAssistantPlaceholder(item)) continue;
+          throw unsupportedFeature(`Responses input[${index}].content 不能只包含空内容块`);
+        }
         normalized.messages.push({ role: item.role || 'user', parts });
       }
     }
@@ -3286,32 +3338,74 @@ function responsesInputCallId(item, label) {
 function validateResponsesInputItemKeys(item, index) {
   const type = item.type || (item.role ? 'message' : '');
   const allowed = {
+    additional_tools: ['type', 'id', 'role', 'tools'],
     message: ['type', 'id', 'status', 'role', 'content', 'phase', 'prompt_cache_breakpoint'],
     reasoning: ['type', 'id', 'status', 'summary', 'content', 'encrypted_content', 'phase'],
     function_call: ['type', 'id', 'status', 'call_id', 'name', 'namespace', 'arguments', 'caller', 'phase'],
     function_call_output: ['type', 'id', 'status', 'call_id', 'output', 'caller', 'phase'],
     custom_tool_call: ['type', 'id', 'status', 'call_id', 'name', 'input', 'phase'],
-    custom_tool_call_output: ['type', 'id', 'status', 'call_id', 'output', 'phase'],
+    custom_tool_call_output: ['type', 'id', 'status', 'call_id', 'name', 'output', 'phase'],
     tool_search_call: ['type', 'id', 'status', 'call_id', 'execution', 'arguments', 'phase'],
     tool_search_output: ['type', 'id', 'status', 'call_id', 'execution', 'tools', 'phase'],
-    compaction: ['type', 'id', 'encrypted_content', 'created_by']
+    agent_message: ['type', 'id', 'author', 'recipient', 'content'],
+    compaction: ['type', 'id', 'encrypted_content', 'created_by'],
+    context_compaction: ['type', 'id', 'encrypted_content']
   }[type];
   if (allowed) {
     const label = `Responses input[${index}] ${type}`;
     assertKnownObjectKeys(item, new Set(allowed), label);
-    if (type === 'compaction') validateResponsesCompactionItem(item, label, (message) => { throw unsupportedFeature(message); });
+    if (type === 'compaction' || type === 'context_compaction') {
+      validateResponsesCompactionItem(item, label, (message) => { throw unsupportedFeature(message); });
+    }
     else validateResponsesInputItemMetadata(item, label);
   }
 }
 
-function validateResponsesCompactionItem(item, label, fail, { allowPendingEncrypted = false } = {}) {
-  if (!item || Array.isArray(item) || typeof item !== 'object' || item.type !== 'compaction') {
-    fail(`${label} 必须是 compaction 对象`);
+function normalizedResponsesAgentMessageText(item, index) {
+  const label = `Responses input[${index}] agent_message`;
+  const author = requiredInputString(item.author, `${label}.author`);
+  const recipient = requiredInputString(item.recipient, `${label}.recipient`);
+  if (!Array.isArray(item.content)) throw unsupportedFeature(`${label}.content 必须是数组`);
+  const text = [];
+  for (const [partIndex, part] of item.content.entries()) {
+    const partLabel = `${label}.content[${partIndex}]`;
+    if (!part || Array.isArray(part) || typeof part !== 'object') {
+      throw unsupportedFeature(`${partLabel} 必须是对象`);
+    }
+    if (part.type === 'encrypted_content') {
+      if (typeof part.encrypted_content !== 'string' || !part.encrypted_content) {
+        throw unsupportedFeature(`${partLabel}.encrypted_content 必须是非空字符串`);
+      }
+      throw unsupportedFeature('跨协议转换无法解密 Responses agent_message；请将模型路由设为 responses');
+    }
+    if (part.type !== 'input_text') {
+      throw unsupportedFeature(`${partLabel}.type 无效：${part.type || 'unknown'}`);
+    }
+    assertKnownObjectKeys(part, new Set(['type', 'text']), partLabel);
+    if (typeof part.text !== 'string') throw unsupportedFeature(`${partLabel}.text 必须是字符串`);
+    text.push(part.text);
   }
-  const unsupported = Object.keys(item).filter((key) => !['type', 'id', 'encrypted_content', 'created_by'].includes(key));
+  const content = text.join('\n');
+  if (!content.trim()) throw unsupportedFeature(`${label}.content 必须包含非空 input_text`);
+  return `Agent message from ${author} to ${recipient}:\n${content}`;
+}
+
+function validateResponsesCompactionItem(item, label, fail, { allowPendingEncrypted = false } = {}) {
+  if (!item || Array.isArray(item) || typeof item !== 'object'
+    || !['compaction', 'context_compaction'].includes(item.type)) {
+    fail(`${label} 必须是 compaction/context_compaction 对象`);
+  }
+  const allowed = item.type === 'compaction'
+    ? ['type', 'id', 'encrypted_content', 'created_by']
+    : ['type', 'id', 'encrypted_content'];
+  const unsupported = Object.keys(item).filter((key) => !allowed.includes(key));
   if (unsupported.length) fail(`${label} 包含不支持的字段：${unsupported.join(', ')}`);
-  if (typeof item.id !== 'string' || !item.id) fail(`${label}.id 必须是非空字符串`);
-  if (!allowPendingEncrypted || (item.encrypted_content !== undefined && item.encrypted_content !== null)) {
+  if (item.id !== undefined && item.id !== null && (typeof item.id !== 'string' || !item.id)) {
+    fail(`${label}.id 必须是非空字符串`);
+  }
+  const encryptedRequired = item.type === 'compaction';
+  if ((encryptedRequired && !allowPendingEncrypted)
+    || (item.encrypted_content !== undefined && item.encrypted_content !== null)) {
     if (typeof item.encrypted_content !== 'string' || !item.encrypted_content) {
       fail(`${label}.encrypted_content 必须是非空字符串`);
     }
@@ -4720,15 +4814,15 @@ export function normalizeResponse(body, protocol, fallbackModel = '', { rejectUn
           parts.push(...reasoningParts);
         } else if (providerState) parts.push({ type: 'provider_state', providerState });
       }
-      if (item.type === 'compaction') {
+      if (item.type === 'compaction' || item.type === 'context_compaction') {
         validateResponsesCompactionItem(item, `上游 Responses output[${index}] compaction`, (message) => { throw new Error(message); });
         parts.push({
           type: 'provider_state',
-          providerState: { protocol: 'responses', kind: 'compaction', value: item }
+          providerState: { protocol: 'responses', kind: item.type, value: item }
         });
       }
       if (rejectUnknown && ['program', 'program_output'].includes(item.type)) throw new Error(`上游 Responses ${item.type} 程序运行项无法跨协议转换`);
-      if (rejectUnknown && !['message', 'function_call', 'reasoning', 'compaction'].includes(item.type)) throw new Error(`上游 Responses 输出项类型无法跨协议转换：${item.type || 'unknown'}`);
+      if (rejectUnknown && !['message', 'function_call', 'reasoning', 'compaction', 'context_compaction'].includes(item.type)) throw new Error(`上游 Responses 输出项类型无法跨协议转换：${item.type || 'unknown'}`);
     }
     return {
       id: body.id, model: body.model || fallbackModel, parts,
@@ -4872,6 +4966,7 @@ export function formatResponse(response, protocol, responsesOptions = {}) {
     const createdAt = Number.isSafeInteger(response.createdAt) ? response.createdAt : Math.floor(Date.now() / 1000);
     return {
     id: response.id || `resp_${randomUUID().replaceAll('-', '')}`, object: 'response', created_at: createdAt, status: 'completed', model: response.model,
+    end_turn: !incomplete && !hasTools,
     ...((response.serviceTier || openAiServiceTierForClaudeSpeed(response.speed))
       ? { service_tier: response.serviceTier || openAiServiceTierForClaudeSpeed(response.speed) }
       : {}),
@@ -4879,7 +4974,8 @@ export function formatResponse(response, protocol, responsesOptions = {}) {
     ...(!incomplete ? { completed_at: Math.max(createdAt, Math.floor(Date.now() / 1000)) } : { completed_at: null }),
     ...(incomplete ? { status: 'incomplete', incomplete_details: { reason: incompleteReason } } : {}),
     output: response.parts.flatMap((part, index) => {
-      if (part.providerState?.protocol === 'responses' && part.providerState.kind === 'compaction') {
+      if (part.providerState?.protocol === 'responses'
+        && ['compaction', 'context_compaction'].includes(part.providerState.kind)) {
         return part.providerState.value;
       }
       if (part.type === 'tool_call') {
@@ -4896,8 +4992,15 @@ export function formatResponse(response, protocol, responsesOptions = {}) {
           : {}),
         ...(part.providerState ? { encrypted_content: encodedProviderState(part) } : {})
       };
-      if (part.type === 'text') return { id: `msg_${index}`, type: 'message', status: itemStatus, role: 'assistant', content: [{ type: 'output_text', text: part.text || '', annotations: part.annotations || [], ...(part.logprobs ? { logprobs: openAiTokenLogprobs(part.logprobs) } : {}) }] };
-      if (part.type === 'refusal') return { id: `msg_${index}`, type: 'message', status: itemStatus, role: 'assistant', content: [{ type: 'refusal', refusal: part.text || '' }] };
+      if (part.type === 'text') {
+        const annotations = part.annotations || [];
+        const logprobs = part.logprobs ? openAiTokenLogprobs(part.logprobs) : [];
+        if (!part.text && !annotations.length && !logprobs.length) return [];
+        return { id: `msg_${index}`, type: 'message', status: itemStatus, role: 'assistant', phase: !incomplete && !hasTools ? 'final_answer' : 'commentary', content: [{ type: 'output_text', text: part.text || '', annotations, ...(logprobs.length ? { logprobs } : {}) }] };
+      }
+      if (part.type === 'refusal') return part.text
+        ? { id: `msg_${index}`, type: 'message', status: itemStatus, role: 'assistant', phase: incomplete ? 'commentary' : 'final_answer', content: [{ type: 'refusal', refusal: part.text }] }
+        : [];
       return [];
     }),
     usage: {
