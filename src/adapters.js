@@ -136,10 +136,10 @@ function supportsReasoningEffort(model) {
     || /^deepseek-v4-(?:flash|pro)$/i.test(model || '');
 }
 
-export function maximumReasoningEffort(model, protocol) {
+export function maximumReasoningEffort(model, protocol, provider) {
   const normalized = typeof model === 'string' ? model.trim().toLowerCase() : '';
   if (!normalized) return undefined;
-  const knownOpenCodeEffort = openCodeMaximumReasoningEffort(normalized, protocol);
+  const knownOpenCodeEffort = openCodeMaximumReasoningEffort(normalized, protocol, provider);
   if (knownOpenCodeEffort) return knownOpenCodeEffort;
   if (protocol === 'gemini') return 'high';
   if (protocol === 'claude') {
@@ -164,8 +164,8 @@ export function maximumReasoningEffort(model, protocol) {
   return undefined;
 }
 
-export function withMaximumReasoningEffort(body, protocol, model) {
-  const effort = maximumReasoningEffort(model, protocol);
+export function withMaximumReasoningEffort(body, protocol, model, provider) {
+  const effort = maximumReasoningEffort(model, protocol, provider);
   if (!effort || !body || Array.isArray(body) || typeof body !== 'object') return body;
   if (protocol === 'responses') {
     const reasoning = body.reasoning && !Array.isArray(body.reasoning) && typeof body.reasoning === 'object' ? body.reasoning : {};

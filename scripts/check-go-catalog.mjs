@@ -2,7 +2,8 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { setDefaultResultOrder } from 'node:dns';
 
-import { OPENCODE_GO_MODEL_CAPABILITIES } from '../src/model-capabilities.js';
+import { openCodeMaximumReasoningEffort, OPENCODE_GO_MODEL_CAPABILITIES } from '../src/model-capabilities.js';
+import { reasoningProfileAuditError } from './reasoning-profile-audit.mjs';
 
 const GO_MODELS_URL = 'https://opencode.ai/zen/go/v1/models';
 const GO_DOC_SOURCE_URL = 'https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/go.mdx';
@@ -25,7 +26,10 @@ export function parseGoEndpointTable(markdown) {
   return protocols;
 }
 
-export function auditGoCatalog({ liveModelIds, documentedProtocols, modelsDevModels, capabilities = OPENCODE_GO_MODEL_CAPABILITIES }) {
+export function auditGoCatalog({
+  liveModelIds, documentedProtocols, modelsDevModels, capabilities = OPENCODE_GO_MODEL_CAPABILITIES,
+  reasoningResolver = (model, protocol) => openCodeMaximumReasoningEffort(model, protocol, 'go')
+}) {
   const errors = [];
   const warnings = [];
   const live = new Set(liveModelIds.map((id) => id.toLowerCase()));
@@ -61,6 +65,11 @@ export function auditGoCatalog({ liveModelIds, documentedProtocols, modelsDevMod
       for (const [label, local, remote] of comparisons) {
         if (local !== remote) errors.push(`${id} ${label}不一致：本地=${String(local)}，models.dev=${String(remote)}`);
       }
+      const reasoningError = reasoningProfileAuditError({
+        model: id, metadata: modelMetadata, protocol: capability.protocol,
+        actual: reasoningResolver(id, capability.protocol)
+      });
+      if (reasoningError) errors.push(reasoningError);
       const sdk = modelMetadata.provider?.npm;
       if (sdk === '@ai-sdk/anthropic' && capability.protocol !== 'claude') {
         errors.push(`${id} SDK 指向 Claude Messages，但本地协议为 ${capability.protocol}`);

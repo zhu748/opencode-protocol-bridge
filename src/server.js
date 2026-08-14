@@ -1644,7 +1644,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     upstreamBody = prepareUpstreamRequest(conversionBody, incomingProtocol, route.protocol, route.upstreamModel, { toolChoiceFallback: route.toolChoiceFallback, imageHandoffEnabled });
     if (bridgeWebSearch) upstreamBody = withBridgeWebSearchTool(upstreamBody, bridgeWebSearch);
     if (config.forceMaximumReasoningEffort && !responsesCompact) {
-      const forcedBody = withMaximumReasoningEffort(upstreamBody, route.protocol, route.upstreamModel);
+      const forcedBody = withMaximumReasoningEffort(upstreamBody, route.protocol, route.upstreamModel, route.provider);
       maximumReasoningForced = forcedBody !== upstreamBody;
       upstreamBody = forcedBody;
     }

@@ -379,7 +379,7 @@ Go 模型可直接使用 `opencode-go/<model-id>`，Zen 模型可使用 `opencod
 | --- | --- |
 | Responses | `gpt-5.6-luna`、`grok-4.5` |
 | Claude Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.5`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`；模型端点仍可发现的兼容型号 `qwen3.5-plus` 也按 Claude 路由 |
-| Chat Completions | `glm-5.2`、`glm-5.1`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3`；兼容/预览型号 `glm-5`、`kimi-k2.5`、`mimo-v2-pro`、`mimo-v2-omni`、`hy3-preview` 同样按 Chat 路由 |
+| Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3`；兼容/预览型号 `glm-5`、`kimi-k2.5`、`mimo-v2-pro`、`mimo-v2-omni`、`hy3-preview` 同样按 Chat 路由。`glm-5.3` 的 models.dev 元数据尚未同步，暂继承 GLM 5.2 的保守限制 |
 
 Zen 当前原生端点按官方端点表分为四类：
 
@@ -390,7 +390,7 @@ Zen 当前原生端点按官方端点表分为四类：
 | Claude Messages | Claude 4.5–5 系列，以及 Qwen3.5/3.6/3.7 系列 |
 | Chat Completions | DeepSeek V4、MiniMax、GLM、Kimi，以及 Zen 的 `hy3-free`、Nemotron 等 free 模型 |
 
-因此入口协议并不限定转换方向：Claude、Responses、Chat 或 Gemini 请求都会转换到模型自己的原生上游协议；入口已经与目标一致时，请求与响应保留厂商扩展字段并直接透传。精确模型路由中的 `protocol` 支持 `auto / claude / responses / chat / gemini` 并始终优先，可用于覆盖官方调整或私有镜像差异。`npm run check:catalogs` 会只读核对 Zen/Go 在线 `/models`、官方端点表和 models.dev 模态/限制，发现新增模型或能力漂移时失败。
+因此入口协议并不限定转换方向：Claude、Responses、Chat 或 Gemini 请求都会转换到模型自己的原生上游协议；入口已经与目标一致时，请求与响应保留厂商扩展字段并直接透传。精确模型路由中的 `protocol` 支持 `auto / claude / responses / chat / gemini` 并始终优先，可用于覆盖官方调整或私有镜像差异。`npm run check:catalogs` 会只读核对 Zen/Go 在线 `/models`、官方端点表，以及 models.dev 的协议、模态、限制和逐模型 `reasoning_options`；发现新增模型或最高思考档位漂移时失败。
 
 ### 图片附件交接模型
 
@@ -447,7 +447,7 @@ Zen 当前原生端点按官方端点表分为四类：
 
 > Chat 角色兼容：下文所述 `developer` 原角色保留仅适用于目标为 Responses；目标为 Chat 时，桥接会把 `developer` 在原位置转换为 `system`，正文与消息顺序不变。这与 Console Go 当前只接受 `system/user/assistant/tool/latest_reminder` 的消息枚举兼容，可避免 Codex 的 Responses `instructions` 被转换为上游无法反序列化的请求。
 
-> 思考强度可观测性：设置中的“始终使用模型最高思考强度”默认开启，Claude、Responses、Chat 与 Gemini 四种入口的普通推理请求都会在协议转换完成后，以最终路由的上游模型为准覆盖客户端强度；同协议透传也不会绕过。这里按 OpenCode 当前逐模型 `reasoning_options` 选择最高档，而不是统一写入 `max`：DeepSeek V4、GLM 5.2、Kimi K3 与 GPT 5.6 使用 `max`；GPT 5.2–5.5、Grok 4.6 与 Muse Spark 1.2 使用 `xhigh`；GPT 5/5.1、Grok 4.5、Gemini 3.x 及明确公开到 `high` 的 compatible 模型使用 `high`。新版 Claude 使用 adaptive thinking 与其最高 effort，Claude Opus 4.5 使用 `high` + 16,000 thinking budget，旧 Claude/Qwen budget 型号使用请求输出上限允许的最高 budget，MiniMax M3 使用 `adaptive`。没有公开可调档位的模型会移除客户端的降档/关闭参数，保留其默认推理模式，日志记为 `model-default`，不会发送未经支持的强度值。请求记录分别保存客户端请求值和最终上游值，例如显示为 `low → max`；用量统计按最终实际发送的强度分组。关闭开关后恢复客户端原始强度与既有协议映射。专用 `/responses/compact` 保留压缩接口语义，不混入普通推理参数。OpenCode Go 当前只有 `gpt-5.6-luna`，`gpt-5.5` 仅存在于 Zen 的 Responses 模型目录。
+> 思考强度可观测性：设置中的“始终使用模型最高思考强度”默认开启，Claude、Responses、Chat 与 Gemini 四种入口的普通推理请求都会在协议转换完成后，以最终路由的上游模型为准覆盖客户端强度；同协议透传也不会绕过。这里按 OpenCode 当前逐模型 `reasoning_options` 选择最高档，而不是统一写入 `max`：DeepSeek V4、GLM 5.2、Kimi K3 与 GPT 5.6 使用 `max`；GPT 5.2–5.5、Grok 4.6 与 Muse Spark 1.2 使用 `xhigh`；GPT 5/5.1、Grok 4.5、Gemini 3.x、Go Hy3 及明确公开到 `high` 的 compatible 模型使用 `high`。新版 Claude 使用 adaptive thinking 与其最高 effort，Claude Opus 4.5 使用 `high` + 16,000 thinking budget，旧 Claude/Qwen budget 型号使用请求输出上限允许的最高 budget；Go 的 Qwen 3.7/3.8 当前也使用最高 31,999 budget，MiniMax M3 使用 `adaptive`。没有公开可调档位的模型会移除客户端的降档/关闭参数，保留其默认推理模式，日志记为 `model-default`，不会发送未经支持的强度值。请求记录分别保存客户端请求值和最终上游值，例如显示为 `low → max`；用量统计按最终实际发送的强度分组。关闭开关后恢复客户端原始强度与既有协议映射。专用 `/responses/compact` 保留压缩接口语义，不混入普通推理参数。OpenCode Go 当前只有 `gpt-5.6-luna`，`gpt-5.5` 仅存在于 Zen 的 Responses 模型目录。
 
 > Codex 压缩可观测性：Codex 客户端通过普通 `/responses` 请求生成可读 checkpoint 交接摘要时，桥接会从经过严格限长解析的 `client_metadata` 中识别 `request_kind=compaction`，并在请求记录中显示“Codex 上下文压缩”；该遥测仍不会进入上游模型上下文。摘要提示、历史工具结果与后续续轮按普通 Responses input 转换。原生 `/responses/compact`、非空 `context_management` 或不透明 compaction item 则仍按其服务端状态语义处理，不能伪装成 Chat 压缩。
 

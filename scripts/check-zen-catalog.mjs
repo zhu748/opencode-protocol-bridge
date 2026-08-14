@@ -2,8 +2,9 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { setDefaultResultOrder } from 'node:dns';
 
-import { OPENCODE_ZEN_MODEL_CAPABILITIES } from '../src/model-capabilities.js';
+import { openCodeMaximumReasoningEffort, OPENCODE_ZEN_MODEL_CAPABILITIES } from '../src/model-capabilities.js';
 import { fetchChecked } from './check-go-catalog.mjs';
+import { reasoningProfileAuditError } from './reasoning-profile-audit.mjs';
 
 const ZEN_MODELS_URL = 'https://opencode.ai/zen/v1/models';
 const ZEN_DOC_SOURCE_URL = 'https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/zen.mdx';
@@ -37,7 +38,8 @@ const SDK_PROTOCOLS = Object.freeze({
 
 export function auditZenCatalog({
   liveModelIds, documentedProtocols, modelsDevModels,
-  capabilities = OPENCODE_ZEN_MODEL_CAPABILITIES
+  capabilities = OPENCODE_ZEN_MODEL_CAPABILITIES,
+  reasoningResolver = (model, protocol) => openCodeMaximumReasoningEffort(model, protocol, 'zen')
 }) {
   const errors = [];
   const warnings = [];
@@ -72,6 +74,11 @@ export function auditZenCatalog({
     for (const [label, local, remote] of comparisons) {
       if (local !== remote) errors.push(`${id} ${label}不一致：本地=${String(local)}，models.dev=${String(remote)}`);
     }
+    const reasoningError = reasoningProfileAuditError({
+      model: id, metadata, protocol: capability.protocol,
+      actual: reasoningResolver(id, capability.protocol)
+    });
+    if (reasoningError) errors.push(reasoningError);
     const sdkProtocol = SDK_PROTOCOLS[metadata.provider?.npm];
     if (sdkProtocol && sdkProtocol !== capability.protocol) {
       errors.push(`${id} SDK 协议不一致：本地=${capability.protocol}，models.dev=${sdkProtocol}`);

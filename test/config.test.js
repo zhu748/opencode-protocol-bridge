@@ -27,7 +27,7 @@ test('图片交接模型默认覆盖 Zen 与 Go 能力表中的纯文本模型',
     ...OPENCODE_GO_TEXT_ONLY_MODELS.map((model) => ({ provider: 'go', model }))
   ]);
   assert.deepEqual(new Set(DEFAULT_IMAGE_HANDOFF_MODELS.map((entry) => entry.provider)), new Set(['zen', 'go']));
-  assert.equal(DEFAULT_IMAGE_HANDOFF_MODELS.length, 31);
+  assert.equal(DEFAULT_IMAGE_HANDOFF_MODELS.length, 32);
   assert.ok(DEFAULT_IMAGE_HANDOFF_MODELS.some((entry) => entry.provider === 'zen' && entry.model === 'hy3-free'));
   assert.ok(DEFAULT_IMAGE_HANDOFF_MODELS.some((entry) => entry.provider === 'zen' && entry.model === 'nemotron-3.5-lightning-free'));
   assert.ok(DEFAULT_IMAGE_HANDOFF_MODELS.some((entry) => entry.provider === 'zen' && entry.model === 'gpt-5.3-codex-spark'));

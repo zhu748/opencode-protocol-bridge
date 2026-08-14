@@ -23,6 +23,9 @@ export const OPENCODE_GO_MODEL_CAPABILITIES = Object.freeze({
   'glm-5': capability('chat', { context: 202_752, output: 32_768 }),
   'glm-5.1': capability('chat', { context: 202_752, output: 32_768 }),
   'glm-5.2': capability('chat', { context: 1_000_000, output: 131_072 }),
+  // Live endpoint metadata can precede the models.dev catalog. Until its
+  // modality and limit metadata lands, inherit GLM 5.2 conservatively.
+  'glm-5.3': capability('chat', { context: 1_000_000, output: 131_072 }),
   'gpt-5.6-luna': capability('responses', { input: ['text', 'image', 'pdf'], temperature: false, context: 1_050_000, inputLimit: 922_000, output: 128_000 }),
   'grok-4.5': capability('responses', { input: ['text', 'image'], context: 500_000, output: 500_000 }),
   hy3: capability('chat', { context: 256_000, output: 64_000 }),
@@ -182,12 +185,26 @@ const OPENCODE_MAX_REASONING_BY_MODEL = Object.freeze(Object.fromEntries([
   ...['claude-opus-4-5'].map((model) => [model, 'legacy-high'])
 ]));
 
-export function openCodeMaximumReasoningEffort(model, protocol) {
+// Reserved for the uncommon case where the same model ID and protocol expose
+// different reasoning controls on Zen and Go.
+const OPENCODE_MAX_REASONING_BY_ROUTE = Object.freeze({
+  'go/hy3': 'high',
+  'go/qwen3.7-max': 'budget:31999',
+  'go/qwen3.7-plus': 'budget:31999',
+  'go/qwen3.8-max': 'budget:31999'
+});
+
+export function openCodeMaximumReasoningEffort(model, protocol, provider) {
   if (typeof model !== 'string') return null;
   const id = model.trim().toLowerCase().replace(/^(?:opencode-go|opencode)\//, '');
-  const capability = [OPENCODE_ZEN_MODEL_CAPABILITIES[id], OPENCODE_GO_MODEL_CAPABILITIES[id]]
+  const catalogs = provider === 'zen' ? [OPENCODE_ZEN_MODEL_CAPABILITIES]
+    : provider === 'go' ? [OPENCODE_GO_MODEL_CAPABILITIES]
+      : [OPENCODE_ZEN_MODEL_CAPABILITIES, OPENCODE_GO_MODEL_CAPABILITIES];
+  const capability = catalogs.map((catalog) => catalog[id])
     .find((item) => item?.protocol === protocol);
   if (!capability) return null;
+  const routeProfile = provider ? OPENCODE_MAX_REASONING_BY_ROUTE[`${provider}/${id}`] : undefined;
+  if (routeProfile) return routeProfile;
   return OPENCODE_MAX_REASONING_BY_MODEL[id] || 'model-default';
 }
 

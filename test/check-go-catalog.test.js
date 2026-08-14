@@ -82,6 +82,26 @@ test('Go 能力审计公开在线模型缺少官方端点表记录的漂移', ()
   assert.match(result.warnings.join('\n'), /catalog-only.*未出现在 OpenCode Go 官方端点表/);
 });
 
+test('Go 能力审计检测 models.dev 最高思考档位漂移', () => {
+  const result = auditGoCatalog({
+    liveModelIds: ['reasoning-model'], documentedProtocols: new Map(),
+    modelsDevModels: {
+      'reasoning-model': {
+        modalities: { input: ['text'] }, reasoning: true, reasoning_options: [{ type: 'effort', values: ['low', 'max'] }],
+        tool_call: true, temperature: true, limit: { context: 100_000, output: 10_000 }
+      }
+    },
+    capabilities: {
+      'reasoning-model': {
+        protocol: 'chat', imageInput: false, inputModalities: ['text'], reasoning: true,
+        toolCall: true, temperature: true, contextLimit: 100_000, outputLimit: 10_000
+      }
+    },
+    reasoningResolver: () => 'high'
+  });
+  assert.match(result.errors.join('\n'), /最高思考策略不一致.*本地=high.*models\.dev=max/);
+});
+
 test('Go 在线目录请求仅重试瞬时网络和可恢复 HTTP 错误', async () => {
   let networkAttempts = 0;
   const recovered = await fetchChecked('https://example.invalid/models', '测试目录', {

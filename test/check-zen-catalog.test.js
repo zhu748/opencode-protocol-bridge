@@ -66,3 +66,25 @@ test('Zen 能力审计允许官方文档已列出但在线目录暂未返回的�
   assert.deepEqual(result.errors, []);
   assert.match(result.warnings.join('\n'), /staged.*未由 Zen \/models 返回/);
 });
+
+test('Zen 能力审计检测 budget 型最高思考策略漂移', () => {
+  const result = auditZenCatalog({
+    liveModelIds: ['budget-model'], documentedProtocols: new Map(),
+    modelsDevModels: {
+      'budget-model': {
+        modalities: { input: ['text'] }, reasoning: true,
+        reasoning_options: [{ type: 'budget_tokens', max: 50_000 }],
+        tool_call: true, temperature: true, limit: { context: 100_000, output: 40_000 },
+        provider: { npm: '@ai-sdk/anthropic' }
+      }
+    },
+    capabilities: {
+      'budget-model': {
+        protocol: 'claude', imageInput: false, inputModalities: ['text'], reasoning: true,
+        toolCall: true, temperature: true, contextLimit: 100_000, outputLimit: 40_000
+      }
+    },
+    reasoningResolver: () => 'model-default'
+  });
+  assert.match(result.errors.join('\n'), /最高思考策略不一致.*models\.dev=budget:31999/);
+});

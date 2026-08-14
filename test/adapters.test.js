@@ -3118,6 +3118,8 @@ test('最高思考强度按最终模型和协议覆盖客户端强度', () => {
   assert.equal(maximumReasoningEffort('claude-opus-4-5', 'claude'), 'legacy-high');
   assert.equal(maximumReasoningEffort('minimax-m3', 'claude'), 'adaptive');
   assert.equal(maximumReasoningEffort('qwen3.8-max', 'claude'), 'model-default');
+  assert.equal(maximumReasoningEffort('qwen3.7-plus', 'claude', 'go'), 'budget:31999');
+  assert.equal(maximumReasoningEffort('qwen3.7-plus', 'claude', 'zen'), 'model-default');
   assert.equal(maximumReasoningEffort('gemini-3.6-flash', 'gemini'), 'high');
   assert.equal(maximumReasoningEffort('future-native-model', 'gemini'), 'high');
   assert.equal(maximumReasoningEffort('future-compatible-model', 'responses'), 'high');

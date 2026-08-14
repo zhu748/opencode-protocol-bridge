@@ -19,7 +19,7 @@ test('OpenCode Go 官方模型协议覆盖 Responses、Claude 和 Chat 三类入
   assert.equal(openCodeGoModelCapability(' QWEN3.8-MAX ').protocol, 'claude');
   assert.equal(openCodeGoModelCapability('kimi-k3').protocol, 'chat');
   assert.equal(openCodeGoModelCapability('unknown-model'), null);
-  assert.equal(Object.keys(OPENCODE_GO_MODEL_CAPABILITIES).length, 25);
+  assert.equal(Object.keys(OPENCODE_GO_MODEL_CAPABILITIES).length, 26);
 });
 
 test('请求模型 ID 会统一修剪并拒绝控制字符或超长输入', () => {
@@ -32,7 +32,7 @@ test('请求模型 ID 会统一修剪并拒绝控制字符或超长输入', () =
 test('OpenCode Go 文本模型列表严格来自图片输入模态', () => {
   assert.deepEqual(OPENCODE_GO_TEXT_ONLY_MODELS, [
     'deepseek-v4-flash', 'deepseek-v4-pro',
-    'glm-5', 'glm-5.1', 'glm-5.2',
+    'glm-5', 'glm-5.1', 'glm-5.2', 'glm-5.3',
     'hy3', 'hy3-preview',
     'mimo-v2-pro', 'mimo-v2.5-pro',
     'minimax-m2.5', 'minimax-m2.7',
@@ -75,12 +75,17 @@ test('OpenCode Zen 能力表按模型选择 Responses、Claude、Chat 与原生 
 test('OpenCode 模型最高思考策略遵循当前 reasoning options', () => {
   assert.equal(openCodeMaximumReasoningEffort('gpt-5.6-luna', 'responses'), 'max');
   assert.equal(openCodeMaximumReasoningEffort('gpt-5.5', 'responses'), 'xhigh');
+  assert.equal(openCodeMaximumReasoningEffort('gpt-5.5', 'responses', 'go'), null);
+  assert.equal(openCodeMaximumReasoningEffort('gpt-5.5', 'responses', 'zen'), 'xhigh');
   assert.equal(openCodeMaximumReasoningEffort('grok-4.5', 'responses'), 'high');
   assert.equal(openCodeMaximumReasoningEffort('grok-4.6', 'responses'), 'xhigh');
   assert.equal(openCodeMaximumReasoningEffort('kimi-k3', 'chat'), 'max');
   assert.equal(openCodeMaximumReasoningEffort('minimax-m3', 'chat'), 'adaptive');
   assert.equal(openCodeMaximumReasoningEffort('minimax-m3', 'claude'), 'adaptive');
   assert.equal(openCodeMaximumReasoningEffort('mimo-v2.5', 'chat'), 'model-default');
+  assert.equal(openCodeMaximumReasoningEffort('hy3', 'chat', 'go'), 'high');
+  assert.equal(openCodeMaximumReasoningEffort('qwen3.7-plus', 'claude', 'go'), 'budget:31999');
+  assert.equal(openCodeMaximumReasoningEffort('qwen3.7-plus', 'claude', 'zen'), 'model-default');
   assert.equal(openCodeMaximumReasoningEffort('unknown-model', 'chat'), null);
 });
 
