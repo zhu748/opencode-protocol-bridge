@@ -3108,11 +3108,13 @@ test('最高思考强度按最终模型和协议覆盖客户端强度', () => {
   assert.equal(maximumReasoningEffort('gpt-5.1-codex', 'responses'), 'high');
   assert.equal(maximumReasoningEffort('o3-mini', 'chat'), 'high');
   assert.equal(maximumReasoningEffort('deepseek-v4-flash', 'chat'), 'max');
-  assert.equal(maximumReasoningEffort('deepseek-v4-flash-free', 'chat'), undefined);
+  assert.equal(maximumReasoningEffort('deepseek-v4-flash-free', 'chat'), 'max');
   assert.equal(maximumReasoningEffort('claude-opus-4-8', 'claude'), 'max');
   assert.equal(maximumReasoningEffort('minimax-m3', 'claude'), 'max');
   assert.equal(maximumReasoningEffort('gemini-3.6-flash', 'gemini'), 'high');
   assert.equal(maximumReasoningEffort('future-native-model', 'gemini'), 'high');
+  assert.equal(maximumReasoningEffort('future-compatible-model', 'responses'), 'max');
+  assert.equal(maximumReasoningEffort('future-compatible-model', 'chat'), 'max');
 
   assert.deepEqual(withMaximumReasoningEffort({ model: 'gpt-5.5', reasoning: { effort: 'none', summary: 'auto' } }, 'responses', 'gpt-5.5').reasoning, { effort: 'xhigh', summary: 'auto' });
   assert.equal(withMaximumReasoningEffort({ model: 'deepseek-v4-flash', reasoning_effort: 'low' }, 'chat', 'deepseek-v4-flash').reasoning_effort, 'max');

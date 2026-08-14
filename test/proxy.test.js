@@ -383,7 +383,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     const logs = await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json());
     assert.equal(logs.length, 1);
     assert.equal(logs[0].requestId, localRequestId);
-    assert.equal(logs[0].protocol, 'claude → responses');
+    assert.equal(logs[0].protocol, 'claude → responses (reasoning_effort_forced_maximum adapted)');
     assert.equal(logs[0].clientId, createdClient.id);
     assert.equal(logs[0].clientName, '测试客户端');
     assert.equal(logs[0].model, 'alias');
@@ -619,7 +619,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.body.service_tier, 'fast');
     assert.equal((await claudeFast.json()).usage.speed, 'fast');
     const claudeFastLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(claudeFastLog.protocol, 'claude → responses (claude_fast_speed_to_openai_fast_tier adapted)');
+    assert.equal(claudeFastLog.protocol, 'claude → responses (reasoning_effort_forced_maximum adapted, claude_fast_speed_to_openai_fast_tier adapted)');
 
     const responsesFast = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
@@ -690,7 +690,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.match(passthroughText, /event: response\.completed/);
     assert.equal(captured.openaiBeta, 'responses-test');
     const passthroughLogs = await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json());
-    assert.equal(passthroughLogs[0].protocol, 'responses → responses');
+    assert.equal(passthroughLogs[0].protocol, 'responses → responses (reasoning_effort_forced_maximum adapted)');
     assert.equal(passthroughLogs[0].inputTokens, 4);
     assert.equal(passthroughLogs[0].outputTokens, 2);
 
@@ -812,7 +812,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.equal(captured.body.model, 'gemini-search-response');
     assert.deepEqual(captured.body.tools, [{ type: 'web_search' }]);
     const geminiSearchLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(geminiSearchLog.protocol, 'gemini → responses (gemini_google_search_to_web_search adapted)');
+    assert.equal(geminiSearchLog.protocol, 'gemini → responses (gemini_google_search_to_web_search adapted, reasoning_effort_forced_maximum adapted)');
 
     const longGeminiToolName = `lookup_${'x'.repeat(80)}`;
     const geminiToolAliasResponse = await fetch(`http://127.0.0.1:${bridgePort}/v1beta/models/gemini-tool-alias:generateContent`, {
@@ -1259,7 +1259,7 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.match(await eagerToolStream.text(), /event: message_stop/);
     assert.match(captured.body.tools[0].description, /Claude input_examples/);
     const eagerToolLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
-    assert.equal(eagerToolLog.protocol, 'claude → responses (input_examples_to_description adapted, allowed_callers_direct_only adapted, eager_input_streaming_best_effort adapted)');
+    assert.equal(eagerToolLog.protocol, 'claude → responses (input_examples_to_description adapted, allowed_callers_direct_only adapted, eager_input_streaming_best_effort adapted, reasoning_effort_forced_maximum adapted)');
 
     const claudePromptCache = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/messages`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },

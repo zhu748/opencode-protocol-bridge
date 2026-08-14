@@ -144,7 +144,7 @@ export function maximumReasoningEffort(model, protocol) {
   if (/^deepseek-v4-(?:flash|pro)$/.test(normalized) || /^gpt-5\.6(?:$|[-.])/.test(normalized)) return 'max';
   if (/^gpt-5\.[2-5](?:$|[-.])/.test(normalized)) return 'xhigh';
   if (/^gpt-5(?:\.1)?(?:$|[-.])/.test(normalized) || /^o\d/.test(normalized)) return 'high';
-  return undefined;
+  return protocol === 'responses' || protocol === 'chat' ? 'max' : undefined;
 }
 
 export function withMaximumReasoningEffort(body, protocol, model) {
