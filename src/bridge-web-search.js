@@ -356,15 +356,43 @@ function validateResponsesSearchHistoryItem(item) {
 }
 
 function portableResponsesSearchHistory(input) {
-  if (!Array.isArray(input)) return { input, dropped: 0 };
-  let dropped = 0;
-  const nextInput = input.filter((item) => {
-    if (item?.type !== 'web_search_call') return true;
+  if (!Array.isArray(input)) return { input, compacted: 0 };
+  let compacted = 0;
+  const nextInput = input.flatMap((item) => {
+    if (item?.type !== 'web_search_call') return [item];
     validateResponsesSearchHistoryItem(item);
-    dropped++;
-    return false;
+    compacted++;
+    return [{
+      role: 'assistant',
+      content: [{ type: 'output_text', text: responsesSearchHistorySummary(item), annotations: [] }]
+    }];
   });
-  return { input: nextInput, dropped };
+  return { input: nextInput, compacted };
+}
+
+function responsesSearchHistorySummary(item) {
+  const status = item.status || 'completed';
+  const action = item.action;
+  if (action.type === 'search') {
+    const seen = new Set();
+    const retained = [];
+    for (const candidates of [[action.query], asArray(action.queries)]) {
+      for (const query of candidates) {
+        if (typeof query !== 'string' || !query || seen.has(query)) continue;
+        seen.add(query);
+        retained.push(JSON.stringify(query.slice(0, 512)));
+        if (retained.length === 4) break;
+      }
+      if (retained.length === 4) break;
+    }
+    const queries = retained.join(', ');
+    return `[Earlier web search ${status}: ${queries}. The execution trace was compacted for cross-protocol replay; detailed results are supplied separately when available, otherwise use the surrounding assistant answer and citations.]`;
+  }
+  const url = JSON.stringify(String(action.url).slice(0, 1024));
+  if (action.type === 'find_in_page') {
+    return `[Earlier web search ${status}: find ${JSON.stringify(action.pattern.slice(0, 512))} in ${url}. The execution trace was compacted for cross-protocol replay.]`;
+  }
+  return `[Earlier web search ${status}: open ${url}. The execution trace was compacted for cross-protocol replay.]`;
 }
 
 function responsesAllowedSearchChoice(choice) {
@@ -403,7 +431,15 @@ function filterResponsesInputTools(input, keep) {
 export function responsesWebSearchForChat(body) {
   const tools = [...asArray(body?.tools), ...responsesInputTools(body?.input)];
   const matches = tools.filter((tool) => objectValue(tool) && RESPONSES_WEB_SEARCH_TYPES.has(tool.type));
-  if (!matches.length) return null;
+  if (!matches.length) {
+    const history = portableResponsesSearchHistory(body?.input);
+    if (!history.compacted) return null;
+    return {
+      body: { ...body, input: history.input },
+      spec: { adaptations: ['responses_web_search_history_compacted'] },
+      enabled: false
+    };
+  }
   if (matches.length !== 1) throw new Error('Responses 请求不能同时声明多个 Web Search 工具');
   const spec = normalizeResponsesSearchTool(matches[0]);
   const remainingTools = tools.filter((tool) => tool !== matches[0]);
@@ -437,7 +473,7 @@ export function responsesWebSearchForChat(body) {
     nextBody.tool_choice = 'auto';
   }
   else if (allowedChoice?.includesSearch) nextBody.tool_choice = { ...choice, tools: allowedChoice.remainingSelectors };
-  if (history.dropped) spec.adaptations.push('responses_web_search_history_compacted');
+  if (history.compacted) spec.adaptations.push('responses_web_search_history_compacted');
   return { body: nextBody, spec, enabled };
 }
 

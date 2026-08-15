@@ -154,10 +154,23 @@ test('Codex Responses Web Search 会保留可执行语义并标记图片结果�
     tools: [{ type: 'web_search' }]
   });
   assert.equal(replayed.body.input.some((item) => item.type === 'web_search_call'), false);
+  assert.equal(replayed.body.input[0].role, 'assistant');
+  assert.match(replayed.body.input[0].content[0].text, /Earlier web search completed.*旧查询.*compacted/);
   assert.ok(replayed.spec.adaptations.includes('responses_web_search_history_compacted'));
+  const historyOnly = responsesWebSearchForChat({
+    input: replayed.body.input.toSpliced(0, 0, {
+      type: 'web_search_call', id: 'ws_history_only', status: 'completed', action: { type: 'search', query: '历史查询' }
+    }),
+    tools: [{ type: 'function', name: 'read_file', parameters: { type: 'object' } }]
+  });
+  assert.equal(historyOnly.enabled, false);
+  assert.deepEqual(historyOnly.spec.adaptations, ['responses_web_search_history_compacted']);
+  assert.equal(historyOnly.body.input.some((item) => item.type === 'web_search_call'), false);
+  assert.match(historyOnly.body.input[0].content[0].text, /历史查询/);
+  assert.deepEqual(historyOnly.body.tools, [{ type: 'function', name: 'read_file', parameters: { type: 'object' } }]);
   assert.throws(() => responsesWebSearchForChat({
     input: [{ type: 'web_search_call', id: 'ws_unknown', status: 'completed', action: { type: 'search', query: '查询' }, vendor_state: true }],
-    tools: [{ type: 'web_search' }]
+    tools: []
   }), /暂不支持字段.*vendor_state/);
   const allowed = responsesWebSearchForChat({
     input: '搜索并检查',
@@ -610,7 +623,7 @@ test('Claude Code 与 Codex 的 Web Search 可经 Chat 上游完成完整及混�
           ...mixedJson.output,
           { type: 'function_call_output', call_id: 'call_read', output: 'README 文件内容' }
         ],
-        tools: mixedTools,
+        tools: mixedTools.slice(1),
         stream: false
       })
     });
