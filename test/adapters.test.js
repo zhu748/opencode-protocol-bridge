@@ -1,8 +1,43 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiGroundingMetadata, geminiToolNameAliases, hasUsageData, maximumReasoningEffort, withMaximumReasoningEffort, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, claudeToolAdaptations, responsesToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations } from '../src/adapters.js';
+import { detectProtocol, upstreamProtocol, normalizeRequest, formatRequest, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiGroundingMetadata, geminiToolNameAliases, hasUsageData, maximumReasoningEffort, mergeResponsesTools, withMaximumReasoningEffort, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, claudeToolAdaptations, responsesToolAdaptations, geminiToolAdaptations, crossProtocolToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations } from '../src/adapters.js';
 import { decodeReasoningState, encodeReasoningStateBundle } from '../src/reasoning-state.js';
 import { OPENCODE_GO_MODEL_CAPABILITIES, OPENCODE_ZEN_MODEL_CAPABILITIES } from '../src/model-capabilities.js';
+
+function codexSolResponsesFixture({ history = false } = {}) {
+  const namespace = {
+    type: 'namespace', name: 'functions', description: 'Codex code-mode tools', tools: [
+      {
+        type: 'custom', name: 'exec', description: 'Run JavaScript tool orchestration code',
+        format: { type: 'grammar', syntax: 'lark', definition: 'start: /[\\s\\S]+/' }
+      },
+      { type: 'function', name: 'wait', description: 'Wait for a running cell', parameters: { type: 'object' } }
+    ]
+  };
+  const input = [
+    { type: 'additional_tools', role: 'developer', tools: [namespace] },
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: '执行检查' }] }
+  ];
+  if (history) input.push(
+    {
+      type: 'custom_tool_call', id: 'ctc_probe', status: 'completed', call_id: 'call_probe',
+      namespace: 'functions', name: 'exec', input: 'text("CUSTOM_EXEC_OK")'
+    },
+    {
+      type: 'custom_tool_call_output', call_id: 'call_probe', output: [
+        { type: 'input_text', text: 'Script completed\n' },
+        { type: 'input_text', text: 'CUSTOM_EXEC_OK' }
+      ]
+    }
+  );
+  return {
+    body: {
+      model: 'gpt-5.6-sol', stream: true, store: false, parallel_tool_calls: false,
+      text: { verbosity: 'low' }, input
+    },
+    namespace
+  };
+}
 
 test('识别四种兼容端点', () => {
   assert.equal(detectProtocol('/v1/messages'), 'claude');
@@ -827,6 +862,105 @@ test('Codex Responses Lite 工具前缀和 all_turns 可由完整历史跨协议
   ]) {
     assert.throws(() => prepareUpstreamRequest({ ...body, input: [invalid, body.input[2]] }, 'responses', 'chat', 'deepseek-v4-flash'), /additional_tools/);
   }
+});
+
+test('真实 Sol additional_tools 的 namespace custom 可转换到 Chat、Claude 与 Gemini', () => {
+  const { body } = codexSolResponsesFixture();
+  assert.deepEqual(responsesToolAdaptations(body.tools, body.input), ['additional_tools_to_top_level', 'custom']);
+
+  const chat = prepareUpstreamRequest(body, 'responses', 'chat', 'deepseek-v4-flash');
+  assert.deepEqual(chat.tools.map((tool) => tool.function.name), ['functions__exec', 'functions__wait']);
+  assert.deepEqual(chat.tools[0].function.parameters, {
+    type: 'object',
+    properties: { input: { type: 'string', description: 'Complete free-form input for the custom tool.' } },
+    required: ['input'],
+    additionalProperties: false
+  });
+  assert.match(chat.tools[0].function.description, /Original lark grammar/);
+
+  const claude = prepareUpstreamRequest(body, 'responses', 'claude', 'claude-test');
+  assert.deepEqual(claude.tools.map((tool) => tool.name), ['functions__exec', 'functions__wait']);
+  assert.match(claude.system, /keep the response concise/);
+  assert.deepEqual(generationRequestAdaptations(body, 'responses', 'claude'), ['verbosity_best_effort_claude']);
+
+  const gemini = prepareUpstreamRequest(body, 'responses', 'gemini', 'gemini-test');
+  assert.deepEqual(gemini.tools[0].functionDeclarations.map((tool) => tool.name), ['functions__exec', 'functions__wait']);
+  assert.match(gemini.systemInstruction.parts[0].text, /keep the response concise/);
+  assert.match(gemini.systemInstruction.parts[0].text, /at most one function/);
+  assert.deepEqual(crossProtocolToolAdaptations(body, 'responses', 'gemini'), ['parallel_tool_calls_false_best_effort_gemini']);
+  assert.deepEqual(generationRequestAdaptations(body, 'responses', 'gemini'), ['verbosity_best_effort_gemini']);
+});
+
+test('Responses 动态工具来源会合并同名 namespace 子工具且保留冲突供严格校验', () => {
+  const run = { type: 'function', name: 'run', parameters: { type: 'object' } };
+  const wait = { type: 'function', name: 'wait', parameters: { type: 'object' } };
+  const merged = mergeResponsesTools([
+    { type: 'namespace', name: 'functions', description: 'base', tools: [run] }
+  ], [
+    { type: 'additional_tools', role: 'developer', tools: [{ type: 'namespace', name: 'functions', tools: [run, wait] }] }
+  ]);
+  assert.equal(merged.length, 1);
+  assert.deepEqual(merged[0].tools.map((tool) => tool.name), ['run', 'wait']);
+
+  const conflicting = {
+    model: 'alias', input: [
+      { type: 'additional_tools', role: 'developer', tools: [{
+        type: 'namespace', name: 'functions', tools: [{ ...run, description: 'conflicting definition' }]
+      }] },
+      { role: 'user', content: '执行' }
+    ],
+    tools: [{ type: 'namespace', name: 'functions', tools: [run] }]
+  };
+  assert.throws(() => prepareUpstreamRequest(conflicting, 'responses', 'chat', 'chat-test'), /工具名称重复/);
+});
+
+test('真实 Sol namespaced custom 历史与数组 output 按目标协议合法回放', () => {
+  const { body } = codexSolResponsesFixture({ history: true });
+
+  const chat = prepareUpstreamRequest(body, 'responses', 'chat', 'chat-test');
+  assert.equal(chat.messages.at(-2).tool_calls[0].function.name, 'functions__exec');
+  assert.equal(chat.messages.at(-1).tool_call_id, 'call_probe');
+  assert.equal(chat.messages.at(-1).content, 'Script completed\nCUSTOM_EXEC_OK');
+
+  const claude = prepareUpstreamRequest(body, 'responses', 'claude', 'claude-test');
+  assert.equal(claude.messages.at(-2).content[0].name, 'functions__exec');
+  assert.deepEqual(claude.messages.at(-1).content[0].content, [
+    { type: 'text', text: 'Script completed\n' },
+    { type: 'text', text: 'CUSTOM_EXEC_OK' }
+  ]);
+
+  const gemini = prepareUpstreamRequest(body, 'responses', 'gemini', 'gemini-test');
+  assert.equal(gemini.contents.at(-2).parts[0].functionCall.name, 'functions__exec');
+  assert.deepEqual(gemini.contents.at(-1).parts[0].functionResponse.response.result, body.input.at(-1).output);
+});
+
+test('namespaced custom alias 避免直接函数和顶层 custom 冲突并恢复完整身份', () => {
+  const { namespace } = codexSolResponsesFixture();
+  const tools = [
+    { type: 'function', name: 'functions__exec', parameters: { type: 'object' } },
+    { type: 'custom', name: 'exec' },
+    namespace
+  ];
+  const body = {
+    model: 'alias', input: '执行', tools,
+    tool_choice: { type: 'custom', namespace: 'functions', name: 'exec' }
+  };
+  const chat = prepareUpstreamRequest(body, 'responses', 'chat', 'chat-test');
+  const namespacedAlias = chat.tools.map((tool) => tool.function.name)
+    .find((name) => name !== 'functions__exec' && name !== 'exec' && name.includes('functions__exec'));
+  assert.ok(namespacedAlias);
+  assert.deepEqual(chat.tool_choice, { type: 'function', function: { name: namespacedAlias } });
+
+  const restored = formatResponse(normalizeResponse({
+    id: 'chat_custom_namespace', model: 'chat-test',
+    choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: null, tool_calls: [
+      { id: 'call_exec', type: 'function', function: { name: namespacedAlias, arguments: '{"input":"text(\\"OK\\")"}' } }
+    ] } }], usage: { prompt_tokens: 1, completion_tokens: 1 }
+  }, 'chat'), 'responses', { tools, toolChoice: body.tool_choice, parallelToolCalls: false });
+  assert.deepEqual(restored.output[0], {
+    id: 'ctc_0', type: 'custom_tool_call', status: 'completed', call_id: 'call_exec',
+    namespace: 'functions', name: 'exec', input: 'text("OK")'
+  });
 });
 
 test('Codex custom_tool_call_output 的可选 name 可在历史重放时保留调用结果', () => {
@@ -2364,6 +2498,21 @@ test('Zen 原生 Gemini 支持同协议透传以及 Chat、Responses、Claude �
   }, 'responses', 'gemini', 'gemini-3.6-flash');
   assert.deepEqual(responses.tools, [{ googleSearch: {} }]);
   assert.equal(responses.contents[0].parts[0].text, '搜索今天的新闻');
+
+  const nestedSearch = prepareUpstreamRequest({
+    model: 'alias', input: [
+      { type: 'additional_tools', role: 'developer', tools: [
+        { type: 'web_search' },
+        { type: 'function', name: 'lookup', parameters: { type: 'object' } }
+      ] },
+      { role: 'user', content: '搜索并核对' }
+    ]
+  }, 'responses', 'gemini', 'gemini-3.6-flash');
+  assert.deepEqual(nestedSearch.tools, [
+    { functionDeclarations: [{ name: 'lookup', parametersJsonSchema: { type: 'object' } }] },
+    { googleSearch: {} }
+  ]);
+  assert.equal(JSON.stringify(nestedSearch).includes('non-Responses upstream cannot execute'), false);
 
   const opaqueReasoning = prepareUpstreamRequest({
     model: 'alias', input: [
@@ -4377,6 +4526,20 @@ test('Chat 与 Responses 转换保留 strict 工具定义', () => {
   assert.throws(() => prepareUpstreamRequest({
     model: 'x', input: '执行', tools: [{ type: 'function', name: 'run', parameters: { type: 'object' }, strict: 1 }]
   }, 'responses', 'chat', 'chat-test'), /Responses tools\[0\]\.strict 必须是布尔值/);
+});
+
+test('strict 工具转 Gemini 时保留 Schema 并公开最佳努力适配', () => {
+  const responses = {
+    model: 'x', input: '执行',
+    tools: [{ type: 'function', name: 'run', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false }, strict: true }]
+  };
+  const output = prepareUpstreamRequest(responses, 'responses', 'gemini', 'gemini-test');
+  const declaration = output.tools[0].functionDeclarations[0];
+  assert.equal(declaration.name, 'run');
+  assert.deepEqual(declaration.parametersJsonSchema, responses.tools[0].parameters);
+  assert.equal('strict' in declaration, false);
+  assert.deepEqual(crossProtocolToolAdaptations(responses, 'responses', 'gemini'), ['strict_tool_schema_best_effort_gemini']);
+  assert.deepEqual(crossProtocolToolAdaptations(responses, 'responses', 'chat'), []);
 });
 
 test('Responses 推理摘要可转换为 Claude thinking 和 Chat reasoning_content', () => {

@@ -161,7 +161,7 @@ export function openCodeModelCapability(provider, model) {
 
 const OPENCODE_MAX_REASONING_BY_MODEL = Object.freeze(Object.fromEntries([
   ...[
-    'deepseek-v4-flash', 'deepseek-v4-flash-free', 'deepseek-v4-pro', 'glm-5.2',
+    'deepseek-v4-flash', 'deepseek-v4-flash-free', 'deepseek-v4-pro', 'glm-5.2', 'glm-5.3',
     'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'kimi-k3',
     'claude-fable-5', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8',
     'claude-opus-5', 'claude-sonnet-4-6', 'claude-sonnet-5'

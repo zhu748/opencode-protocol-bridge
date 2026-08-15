@@ -5,6 +5,9 @@ import { decodeReasoningState, encodeReasoningState, encodeReasoningStateBundle,
 import { assertJsonComplexity } from './json-complexity.js';
 
 export const MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
+export const MAX_TRANSLATED_STREAM_RETAINED_BYTES = 6 * 1024 * 1024;
+export const MAX_TRANSLATED_STREAM_OUTPUT_ITEMS = 1024;
+export const MAX_TRANSLATED_TOOL_ARGUMENT_BYTES = 2 * 1024 * 1024;
 export const SSE_HEARTBEAT_COMMENT = ': opencode-bridge keep-alive\n\n';
 const ITERATOR_CANCEL_GRACE_MS = 250;
 const EMPTY_SSE_BLOCKS = Object.freeze([]);
@@ -176,6 +179,25 @@ function assertSseEventBytes(bytes) {
   }
 }
 
+function translatedStreamTooLarge(message) {
+  return Object.assign(new Error(message), { code: 'UPSTREAM_TRANSLATED_STREAM_TOO_LARGE' });
+}
+
+function translatedJsonBytes(value) {
+  return Buffer.byteLength(JSON.stringify(value) ?? 'null', 'utf8');
+}
+
+function translatedJsonStringContentBytes(value) {
+  return Math.max(0, translatedJsonBytes(String(value)) - 2);
+}
+
+function assertTranslatedSseFrame(frame) {
+  if (Buffer.byteLength(frame, 'utf8') > MAX_SSE_EVENT_BYTES) {
+    throw translatedStreamTooLarge('跨协议转换生成的单个 SSE 事件超过 8 MiB 上限');
+  }
+  return frame;
+}
+
 function sseTextByteLength(value) {
   if (value.length <= 64) {
     for (let index = 0; index < value.length; index++) {
@@ -288,6 +310,16 @@ function parseSseBlock(block) {
   catch { return { event: 'error', data: { error: { message: '上游返回了无法解析的 SSE 数据' } } }; }
   assertJsonComplexity(parsed, { label: '上游 SSE 事件 JSON', code: 'UPSTREAM_JSON_TOO_COMPLEX' });
   return { event, data: parsed };
+}
+
+function isSseDoneBlock(block) {
+  if (!block.includes('[DONE]')) return false;
+  const lines = block.split(/\r\n|\r|\n/);
+  const dataLines = [];
+  for (const line of lines) {
+    if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+  }
+  return dataLines.join('\n') === '[DONE]';
 }
 
 function responsesItemSourceIndex(outputIndex) {
@@ -454,14 +486,18 @@ async function* parseSse(body) {
     for (const { block } of appendSseText(pending, decodeSseUtf8(decoder, chunk, { stream: true }))) {
       const parsed = parseSseBlock(block);
       if (parsed) yield parsed;
+      else if (isSseDoneBlock(block)) yield { event: 'message', data: null, done: true };
     }
   }
   for (const { block } of appendSseText(pending, decodeSseUtf8(decoder))) {
     const parsed = parseSseBlock(block);
     if (parsed) yield parsed;
+    else if (isSseDoneBlock(block)) yield { event: 'message', data: null, done: true };
   }
-  const parsed = parseSseBlock(takeSseText(pending).trim());
+  const remainder = takeSseText(pending).trim();
+  const parsed = parseSseBlock(remainder);
   if (parsed) yield parsed;
+  else if (isSseDoneBlock(remainder)) yield { event: 'message', data: null, done: true };
 }
 
 function sseErrorValue(data, eventName = '') {
@@ -492,6 +528,20 @@ function safeSseErrorFrame(protocol, error, sequenceNumber) {
   return chatSse({ error: { message, type: error?.type || 'upstream_error', code: error?.code || null } });
 }
 
+function isSseSuccessTerminal(protocol, parsed, block) {
+  if (protocol === 'chat') return isSseDoneBlock(block);
+  if (!parsed) return false;
+  const { event, data } = parsed;
+  if (protocol === 'responses') return ['response.completed', 'response.incomplete'].includes(data?.type || event);
+  if (protocol === 'claude') return (data?.type || event) === 'message_stop';
+  if (protocol === 'gemini') {
+    const blockReason = data?.promptFeedback?.blockReason;
+    return Boolean(data?.candidates?.some((candidate) => candidate?.finishReason)
+      || (blockReason && blockReason !== 'BLOCK_REASON_UNSPECIFIED'));
+  }
+  return false;
+}
+
 export async function* sanitizeSseErrorStream(body, protocol, normalizeError = (error) => error, options = {}) {
   if (!options || Array.isArray(options) || typeof options !== 'object') throw new TypeError('SSE 过滤选项必须是对象');
   const { onData } = options;
@@ -505,7 +555,7 @@ export async function* sanitizeSseErrorStream(body, protocol, normalizeError = (
       if (parsed && onData) {
         try { onData(parsed.data, parsed.event); } catch { /* 观察回调不能破坏原始流。 */ }
       }
-      return { chunk: `${block}${separator}`, terminal: false };
+      return { chunk: `${block}${separator}`, terminal: isSseSuccessTerminal(protocol, parsed, block) };
     }
     const normalizedError = normalizeError(rawError);
     if (onData) {
@@ -755,7 +805,21 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
     }
   }
 
-  for await (const { event: eventName, data } of parseSse(response.body)) {
+  for await (const { event: eventName, data, done: sseDone } of parseSse(response.body)) {
+    if (sseDone) {
+      if (protocol !== 'chat') continue;
+      if (!chatFinishReason) {
+        if (started) yield { type: 'error', error: invalidChatStream('[DONE] 出现在 finish_reason 之前') };
+        return;
+      }
+      terminal = true;
+      yield {
+        type: 'done', stopReason: chatFinishReason, inputTokens, outputTokens: chatOutputTokens,
+        cachedInputTokens, cacheCreationInputTokens, reasoningTokens, hasUsage: usageObserved,
+        createdAt, serviceTier, systemFingerprint
+      };
+      return;
+    }
     if (rejectUnsupportedContent && (!data || Array.isArray(data) || typeof data !== 'object')) {
       if (protocol === 'responses') throw invalidResponsesStream('SSE data 必须是 JSON 对象');
       if (protocol === 'claude') throw invalidClaudeStream('SSE data 必须是 JSON 对象');
@@ -1534,6 +1598,7 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
           createdAt, serviceTier,
           ...(responseWebSearchQueries.length ? { webSearchQueries: responseWebSearchQueries } : {})
         };
+        return;
       }
       else if (/^response\.web_search_call\.(?:in_progress|searching|completed|failed)$/.test(data.type)) {
         const outputIndex = responsesStreamIndex(data.output_index, 'output_index');
@@ -1877,7 +1942,7 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
         cachedInputTokens, cacheCreationInputTokens, reasoningTokens, hasUsage: usageObserved,
         createdAt, serviceTier, systemFingerprint
       };
-      chatFinishReason = undefined;
+      return;
     }
   }
   if (protocol === 'claude' && started && !terminal && claudeMessageDeltaSeen) {
@@ -2446,27 +2511,50 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
     ...responsesMetadata(),
     ...(systemFingerprint ? { system_fingerprint: systemFingerprint } : {})
   });
+  let retainedBytes = 0;
+  const reserveRetainedBytes = (bytes) => {
+    retainedBytes += bytes;
+    if (retainedBytes > MAX_TRANSLATED_STREAM_RETAINED_BYTES) {
+      throw translatedStreamTooLarge('跨协议流累计保留内容超过 6 MiB 上限');
+    }
+  };
+  const setRetainedField = (block, field, value) => {
+    const bytes = translatedJsonBytes(value);
+    const previous = block.retainedFields[field] || 0;
+    reserveRetainedBytes(bytes - previous);
+    block.retainedFields[field] = bytes;
+  };
+  const appendRetainedString = (block, field, value) => {
+    const bytes = translatedJsonStringContentBytes(value);
+    reserveRetainedBytes(bytes);
+    block.retainedFields[field] = (block.retainedFields[field] || 0) + bytes;
+    if (field === 'arguments' && block.retainedFields[field] > MAX_TRANSLATED_TOOL_ARGUMENT_BYTES) {
+      throw translatedStreamTooLarge('跨协议流单个工具参数累计超过 2 MiB 上限');
+    }
+  };
+  if (targetProtocol === 'responses') reserveRetainedBytes(translatedJsonBytes(responseConfig));
+  const translatedSse = (event, data) => assertTranslatedSseFrame(sse(event, data));
   const responseSse = (event, data) => {
     const sequenceNumber = responseSequenceNumber++;
     options.onResponsesSequenceNumber?.(responseSequenceNumber);
     const payload = { ...data, sequence_number: sequenceNumber };
-    return sse(event, event.endsWith('.delta') ? withStreamObfuscation(payload, responseIncludeObfuscation) : payload);
+    return translatedSse(event, event.endsWith('.delta') ? withStreamObfuscation(payload, responseIncludeObfuscation) : payload);
   };
   const chatChunk = (data) => {
     const payload = chatIncludeUsage && Array.isArray(data.choices) && data.choices.length
       ? { ...data, usage: null }
       : data;
-    return chatSse(
+    return assertTranslatedSseFrame(chatSse(
       payload.choices.some((choice) => choice?.delta)
         ? withStreamObfuscation(payload, chatIncludeObfuscation)
         : payload
-    );
+    ));
   };
-  const geminiChunk = (data) => geminiSse({
+  const geminiChunk = (data) => assertTranslatedSseFrame(geminiSse({
     ...data,
     modelVersion: model,
     responseId
-  });
+  }));
 
   for await (const event of canonicalEvents(response, sourceProtocol, fallbackModel, {
     rejectUnsupportedContent: sourceProtocol !== targetProtocol,
@@ -2480,15 +2568,15 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       const streamError = options.normalizeError ? options.normalizeError(event.error) : event.error;
       options.onError?.(streamError);
       if (targetProtocol === 'chat') {
-        yield chatSse({ error: streamError });
+        yield assertTranslatedSseFrame(chatSse({ error: streamError }));
         yield 'data: [DONE]\n\n';
       } else if (targetProtocol === 'responses') {
         const message = streamError?.message || String(streamError || '上游流式响应失败');
         const code = streamError?.code || streamError?.type || 'upstream_error';
         yield responseSse('error', { type: 'error', code, message, param: streamError?.param ?? null });
       } else if (targetProtocol === 'gemini') {
-        yield geminiSse({ error: { code: 502, message: streamError?.message || String(streamError || '上游流式响应失败'), status: 'INTERNAL' } });
-      } else yield sse('error', { type: 'error', error: streamError });
+        yield assertTranslatedSseFrame(geminiSse({ error: { code: 502, message: streamError?.message || String(streamError || '上游流式响应失败'), status: 'INTERNAL' } }));
+      } else yield translatedSse('error', { type: 'error', error: streamError });
       return;
     }
     if (event.type === 'start') {
@@ -2500,7 +2588,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       systemFingerprint = event.systemFingerprint || systemFingerprint;
       inputTokens = event.inputTokens || 0; cachedInputTokens = event.cachedInputTokens || 0; cacheCreationInputTokens = event.cacheCreationInputTokens || 0;
       cacheCreation5mInputTokens = event.cacheCreation5mInputTokens || 0; cacheCreation1hInputTokens = event.cacheCreation1hInputTokens || 0;
-      if (targetProtocol === 'claude') yield sse('message_start', { type: 'message_start', message: { id: responseId, type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: inputTokens, output_tokens: 0, ...(cachedInputTokens ? { cache_read_input_tokens: cachedInputTokens } : {}), ...(cacheCreationInputTokens ? { cache_creation_input_tokens: cacheCreationInputTokens } : {}), ...(speed ? { speed } : {}) } } });
+      if (targetProtocol === 'claude') yield translatedSse('message_start', { type: 'message_start', message: { id: responseId, type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: inputTokens, output_tokens: 0, ...(cachedInputTokens ? { cache_read_input_tokens: cachedInputTokens } : {}), ...(cacheCreationInputTokens ? { cache_creation_input_tokens: cacheCreationInputTokens } : {}), ...(speed ? { speed } : {}) } } });
       else if (targetProtocol === 'responses') yield responseSse('response.created', { type: 'response.created', response: { id: responseId, object: 'response', created_at: createdAt, status: 'in_progress', model, ...responsesMetadata(), ...responseConfig, output: [], usage: null } });
       else if (targetProtocol !== 'gemini') yield chatChunk({ id: responseId, object: 'chat.completion.chunk', created: createdAt, model, ...chatMetadata(), choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] });
       continue;
@@ -2511,6 +2599,9 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       continue;
     }
     if (event.type === 'block_start') {
+      if (targetIndex >= MAX_TRANSLATED_STREAM_OUTPUT_ITEMS) {
+        throw translatedStreamTooLarge('跨协议流输出项数量超过 1024 个上限');
+      }
       const index = targetIndex++;
       indices.set(event.sourceIndex, index);
       const toolIdentity = event.blockType === 'tool' && targetProtocol === 'responses'
@@ -2518,18 +2609,28 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
         : { name: targetProtocol === 'gemini'
           ? restoreGeminiToolName(event.name || '')
           : event.name || '' };
-      blocks.set(index, {
+      const block = {
         type: event.blockType, id: event.id || `call_${randomUUID().replaceAll('-', '')}`, ...toolIdentity,
         text: '', arguments: '', logprobs: [], annotations: [],
+        retainedFields: {},
         ...(event.providerState ? { providerState: event.providerState } : {}),
         ...(event.blockType === 'tool' ? { chatToolIndex: chatToolIndex++, geminiPartialArgsEmitted: false, geminiPartialParseAttempts: 0 } : {})
-      });
+      };
+      blocks.set(index, block);
+      reserveRetainedBytes(translatedJsonBytes({
+        type: block.type, id: block.id, name: block.name, namespace: block.namespace,
+        chatToolIndex: block.chatToolIndex, geminiPartialArgsEmitted: block.geminiPartialArgsEmitted,
+        geminiPartialParseAttempts: block.geminiPartialParseAttempts
+      }));
+      setRetainedField(block, 'annotations', block.annotations);
+      setRetainedField(block, 'logprobs', block.logprobs);
+      if (block.providerState) setRetainedField(block, 'providerState', block.providerState);
       if (targetProtocol === 'claude') {
         const content_block = event.blockType === 'tool' ? { type: 'tool_use', id: blocks.get(index).id, name: blocks.get(index).name, input: {} }
           : event.blockType === 'reasoning' ? { type: 'thinking', thinking: '', signature: '' }
             : event.blockType === 'provider_state' ? { type: 'redacted_thinking', data: encodeReasoningState(event.providerState.protocol, event.providerState.kind, event.providerState.value) }
             : { type: 'text', text: '' };
-        yield sse('content_block_start', { type: 'content_block_start', index, content_block });
+        yield translatedSse('content_block_start', { type: 'content_block_start', index, content_block });
       } else if (targetProtocol === 'responses') {
         const block = blocks.get(index);
         const responseCompaction = event.blockType === 'provider_state'
@@ -2539,7 +2640,10 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
           : undefined;
         const item = responseCompaction
           || (event.blockType === 'tool' && block.kind === 'custom'
-          ? { id: `ctc_${randomUUID().replaceAll('-', '')}`, type: 'custom_tool_call', status: 'in_progress', call_id: block.id, name: block.name, input: '' }
+          ? {
+              id: `ctc_${randomUUID().replaceAll('-', '')}`, type: 'custom_tool_call', status: 'in_progress', call_id: block.id,
+              ...(block.namespace ? { namespace: block.namespace } : {}), name: block.name, input: ''
+            }
           : event.blockType === 'tool' && block.kind === 'tool_search'
             ? { id: `tsc_${randomUUID().replaceAll('-', '')}`, type: 'tool_search_call', status: 'in_progress', execution: 'client', call_id: block.id, arguments: {} }
             : event.blockType === 'tool'
@@ -2550,6 +2654,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
               ? { id: `rs_${randomUUID().replaceAll('-', '')}`, type: 'reasoning', status: 'in_progress', summary: [] }
             : { id: `msg_${randomUUID().replaceAll('-', '')}`, type: 'message', status: 'in_progress', role: 'assistant', content: [] });
         blocks.get(index).item = item;
+        setRetainedField(block, 'item', item);
         yield responseSse('response.output_item.added', { type: 'response.output_item.added', output_index: index, item });
         if (event.blockType === 'text') yield responseSse('response.content_part.added', { type: 'response.content_part.added', item_id: item.id, output_index: index, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });
         if (event.blockType === 'refusal') yield responseSse('response.content_part.added', { type: 'response.content_part.added', item_id: item.id, output_index: index, content_index: 0, part: { type: 'refusal', refusal: '' } });
@@ -2562,13 +2667,18 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
     }
     if (event.type === 'provider_state') {
       const index = indices.get(event.sourceIndex);
-      if (index !== undefined) blocks.get(index).providerState = event.providerState;
+      if (index !== undefined) {
+        const block = blocks.get(index);
+        setRetainedField(block, 'providerState', event.providerState);
+        block.providerState = event.providerState;
+      }
       continue;
     }
     if (event.type === 'annotations') {
       const index = indices.get(event.sourceIndex);
       if (index === undefined) continue;
       const block = blocks.get(index);
+      setRetainedField(block, 'annotations', event.annotations);
       block.annotations = event.annotations;
       if (targetProtocol === 'responses') {
         for (const [annotationIndex, annotation] of event.annotations.entries()) {
@@ -2581,9 +2691,10 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       }
       const delta = portableAnnotationText(event.annotations, { excludeUrlCitations: targetProtocol === 'gemini' });
       if (!delta) continue;
+      appendRetainedString(block, 'text', delta);
       block.text += delta;
       if (targetProtocol === 'claude') {
-        yield sse('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: delta } });
+        yield translatedSse('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: delta } });
       } else if (targetProtocol === 'gemini') {
         yield geminiChunk({ candidates: [{ content: { role: 'model', parts: [{ text: delta }] }, index: 0 }] });
       } else {
@@ -2595,15 +2706,24 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       const index = indices.get(event.sourceIndex);
       if (index === undefined) continue;
       const block = blocks.get(index);
-      if (event.type === 'text_delta' || event.type === 'reasoning_delta') block.text += event.delta;
-      else block.arguments += event.delta;
-      if (event.type === 'text_delta' && event.logprobs?.length) block.logprobs.push(...event.logprobs);
+      if (event.type === 'text_delta' || event.type === 'reasoning_delta') {
+        appendRetainedString(block, 'text', event.delta);
+        block.text += event.delta;
+      } else {
+        appendRetainedString(block, 'arguments', event.delta);
+        block.arguments += event.delta;
+      }
+      if (event.type === 'text_delta' && event.logprobs?.length) {
+        reserveRetainedBytes(translatedJsonBytes(event.logprobs));
+        block.retainedFields.logprobs += translatedJsonBytes(event.logprobs);
+        block.logprobs.push(...event.logprobs);
+      }
       if (targetProtocol === 'claude' && event.type === 'tool_delta' && block.name === 'Read') continue;
       if (targetProtocol === 'claude') {
         const delta = event.type === 'text_delta' ? { type: 'text_delta', text: event.delta }
           : event.type === 'reasoning_delta' ? { type: 'thinking_delta', thinking: event.delta }
             : { type: 'input_json_delta', partial_json: event.delta };
-        yield sse('content_block_delta', { type: 'content_block_delta', index, delta });
+        yield translatedSse('content_block_delta', { type: 'content_block_delta', index, delta });
       } else if (targetProtocol === 'responses') {
         if (event.type === 'tool_delta' && ['custom', 'tool_search'].includes(block.kind)) continue;
         const name = event.type === 'text_delta' && block.type === 'refusal' ? 'response.refusal.delta'
@@ -2645,15 +2765,15 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       const toolArguments = block.type === 'tool' ? blockToolArguments(block) : undefined;
       if (targetProtocol === 'claude') {
         if (block.type === 'tool' && block.name === 'Read' && block.arguments) {
-          yield sse('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolArguments) } });
+          yield translatedSse('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolArguments) } });
         }
-        if (block.type === 'reasoning') yield sse('content_block_delta', {
+        if (block.type === 'reasoning') yield translatedSse('content_block_delta', {
           type: 'content_block_delta', index,
           delta: { type: 'signature_delta', signature: block.providerState
             ? encodeReasoningState(block.providerState.protocol, block.providerState.kind, block.providerState.value)
             : 'bridge' }
         });
-        yield sse('content_block_stop', { type: 'content_block_stop', index });
+        yield translatedSse('content_block_stop', { type: 'content_block_stop', index });
       }
       else if (targetProtocol === 'responses') {
         if (block.type === 'text') {
@@ -2689,6 +2809,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
             block.item.arguments = block.arguments;
           }
         }
+        setRetainedField(block, 'item', block.item);
         block.closed = true;
       }
       else if (targetProtocol === 'gemini' && block.type === 'tool') {
@@ -2761,8 +2882,8 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       const portableStopReason = hasRefusal && event.stopReason === 'refusal' ? 'end_turn' : event.stopReason;
       if (targetProtocol === 'claude') {
         const stopReason = claudeStopReason(hasRefusal ? 'refusal' : event.stopReason, hasTools);
-        yield sse('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens, ...(reasoningTokens ? { output_tokens_details: { thinking_tokens: reasoningTokens } } : {}) } });
-        yield sse('message_stop', { type: 'message_stop' });
+        yield translatedSse('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens, ...(reasoningTokens ? { output_tokens_details: { thinking_tokens: reasoningTokens } } : {}) } });
+        yield translatedSse('message_stop', { type: 'message_stop' });
       } else if (targetProtocol === 'responses') {
         const incompleteReason = responsesIncompleteReason(portableStopReason);
         const incomplete = Boolean(incompleteReason);
@@ -2772,6 +2893,7 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
             block.item.status = incomplete ? 'incomplete' : 'completed';
           }
           if (block.item.type === 'message') block.item.phase = !incomplete && !hasTools ? 'final_answer' : 'commentary';
+          setRetainedField(block, 'item', block.item);
           block.itemDone = true;
           yield responseSse('response.output_item.done', { type: 'response.output_item.done', output_index: index, item: block.item });
         }
@@ -2800,10 +2922,10 @@ export async function* translateSse(response, sourceProtocol, targetProtocol, fa
       } else {
         const promptDetails = (cachedInputTokens || cacheCreationInputTokens) ? { ...(cachedInputTokens ? { cached_tokens: cachedInputTokens } : {}), ...(cacheCreationInputTokens ? { cache_creation_tokens: cacheCreationInputTokens } : {}) } : undefined;
         yield chatChunk({ id: responseId, object: 'chat.completion.chunk', created: createdAt, model, ...chatMetadata(), choices: [{ index: 0, delta: {}, finish_reason: chatStopReason(portableStopReason, hasTools) }] });
-        if (chatIncludeUsage) yield chatSse({
+        if (chatIncludeUsage) yield assertTranslatedSseFrame(chatSse({
           id: responseId, object: 'chat.completion.chunk', created: createdAt, model, ...chatMetadata(), choices: [],
           usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: normalizeUsageCount(inputTokens + outputTokens), ...(promptDetails ? { prompt_tokens_details: promptDetails } : {}), ...(reasoningTokens ? { completion_tokens_details: { reasoning_tokens: reasoningTokens } } : {}) }
-        });
+        }));
         yield 'data: [DONE]\n\n';
       }
     }

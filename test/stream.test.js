@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chatStreamContentDeltas, createSseObserver, createSseTerminalTracker, MAX_SSE_EVENT_BYTES, observeSse, sanitizeSseErrorStream, SSE_HEARTBEAT_COMMENT, summarizeStreamBlocks, translateSse, withSseEventIdleTimeout, withSseHeartbeat } from '../src/stream.js';
+import { chatStreamContentDeltas, createSseObserver, createSseTerminalTracker, MAX_SSE_EVENT_BYTES, MAX_TRANSLATED_STREAM_OUTPUT_ITEMS, MAX_TRANSLATED_STREAM_RETAINED_BYTES, MAX_TRANSLATED_TOOL_ARGUMENT_BYTES, observeSse, sanitizeSseErrorStream, SSE_HEARTBEAT_COMMENT, summarizeStreamBlocks, translateSse, withSseEventIdleTimeout, withSseHeartbeat } from '../src/stream.js';
 import { normalizeUpstreamStreamError } from '../src/upstream-error.js';
 import { decodeReasoningState, encodeReasoningState } from '../src/reasoning-state.js';
 
@@ -19,6 +19,148 @@ async function collect(iterable) {
   for await (const chunk of iterable) result += chunk;
   return result;
 }
+
+function holdingSseBody(text) {
+  const encoder = new TextEncoder();
+  let canceled = false;
+  const body = new ReadableStream({
+    start(controller) { controller.enqueue(encoder.encode(text)); },
+    cancel() { canceled = true; }
+  });
+  return { body, canceled: () => canceled };
+}
+
+test('同协议 SSE 在成功终态后立即停止并取消未关闭的上游正文', { timeout: 2_000 }, async () => {
+  const cases = [
+    ['Responses completed', 'responses', 'event: response.completed\ndata: {"type":"response.completed","sequence_number":1,"response":{"status":"completed"}}\n\n', /event: response\.completed/g],
+    ['Responses incomplete', 'responses', 'event: response.incomplete\ndata: {"type":"response.incomplete","sequence_number":1,"response":{"status":"incomplete"}}\n\n', /event: response\.incomplete/g],
+    ['Claude', 'claude', 'event: message_stop\ndata: {"type":"message_stop"}\n\n', /event: message_stop/g],
+    ['Chat', 'chat', 'data: [DONE]\n\n', /data: \[DONE\]/g],
+    ['Gemini', 'gemini', 'data: {"candidates":[{"index":0,"finishReason":"STOP"}]}\n\n', /"finishReason":"STOP"/g]
+  ];
+
+  for (const [label, protocol, terminal, terminalPattern] of cases) {
+    const source = holdingSseBody(`${terminal}data: {"marker":"after-terminal"}\n\n`);
+    const output = await collect(sanitizeSseErrorStream(source.body, protocol));
+    assert.equal((output.match(terminalPattern) || []).length, 1, `${label} 只转发一次终态`);
+    assert.doesNotMatch(output, /after-terminal/, `${label} 不转发终态后的事件`);
+    assert.equal(source.canceled(), true, `${label} 主动释放未关闭的上游正文`);
+  }
+});
+
+test('跨协议 canonical 在终态后立即结束且只生成一个下游终态', { timeout: 2_000 }, async () => {
+  const cases = [
+    ['Responses completed', 'responses', 'claude', [
+      'event: response.created\ndata: {"type":"response.created","sequence_number":0,"response":{"id":"resp_hold","model":"gpt","status":"in_progress"}}\n\n',
+      'event: response.completed\ndata: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_hold","model":"gpt","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
+    ], /event: message_stop/g],
+    ['Responses incomplete', 'responses', 'chat', [
+      'event: response.created\ndata: {"type":"response.created","sequence_number":0,"response":{"id":"resp_incomplete","model":"gpt","status":"in_progress"}}\n\n',
+      'event: response.incomplete\ndata: {"type":"response.incomplete","sequence_number":1,"response":{"id":"resp_incomplete","model":"gpt","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
+    ], /data: \[DONE\]/g],
+    ['Claude', 'claude', 'responses', [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_hold","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    ], /event: response\.completed/g],
+    ['Chat', 'chat', 'responses', [
+      'data: {"id":"chat_hold","object":"chat.completion.chunk","created":1,"model":"chat","choices":[{"index":0,"delta":{"role":"assistant","content":"done"},"finish_reason":null}]}\n\n',
+      'data: {"id":"chat_hold","object":"chat.completion.chunk","created":1,"model":"chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n'
+    ], /event: response\.completed/g],
+    ['Gemini', 'gemini', 'responses', [
+      'data: {"responseId":"gemini-hold","modelVersion":"gemini","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}\n\n'
+    ], /event: response\.completed/g]
+  ];
+
+  for (const [label, sourceProtocol, targetProtocol, frames, terminalPattern] of cases) {
+    const source = holdingSseBody(`${frames.join('')}data: {"marker":"after-terminal"}\n\n`);
+    const output = await collect(translateSse({ body: source.body }, sourceProtocol, targetProtocol, 'fallback'));
+    assert.equal((output.match(terminalPattern) || []).length, 1, `${label} 只生成一次下游终态`);
+    assert.doesNotMatch(output, /after-terminal/, `${label} 不解析终态后的事件`);
+    assert.equal(source.canceled(), true, `${label} 主动释放未关闭的上游正文`);
+  }
+});
+
+test('跨协议累计保留内容限制会拒绝大量合法小 delta', async () => {
+  const delta = 'x'.repeat(4 * 1024);
+  const count = Math.ceil(MAX_TRANSLATED_STREAM_RETAINED_BYTES / delta.length) + 1;
+  const events = [
+    ['message', { id: 'chat_retained_limit', model: 'chat', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] }],
+    ...Array.from({ length: count }, () => ['message', {
+      id: 'chat_retained_limit', model: 'chat',
+      choices: [{ index: 0, delta: { content: delta }, finish_reason: null }]
+    }])
+  ];
+
+  await assert.rejects(
+    collect(translateSse(responseFrom(events), 'chat', 'responses', 'fallback')),
+    (error) => error?.code === 'UPSTREAM_TRANSLATED_STREAM_TOO_LARGE'
+  );
+});
+
+test('跨协议输出项数量限制会拒绝过多小工具调用', async () => {
+  const toolCalls = Array.from({ length: MAX_TRANSLATED_STREAM_OUTPUT_ITEMS + 1 }, (_, index) => ({
+    index, id: `call_${index}`, type: 'function',
+    function: { name: `tool_${index}`, arguments: '{}' }
+  }));
+  const source = responseFrom([
+    ['message', {
+      id: 'chat_item_limit', model: 'chat',
+      choices: [{ index: 0, delta: { role: 'assistant', tool_calls: toolCalls }, finish_reason: null }]
+    }]
+  ]);
+
+  await assert.rejects(
+    collect(translateSse(source, 'chat', 'responses', 'fallback')),
+    (error) => error?.code === 'UPSTREAM_TRANSLATED_STREAM_TOO_LARGE'
+  );
+});
+
+test('跨协议工具参数累计限制会拒绝许多合法小参数 delta', async () => {
+  const delta = 'x'.repeat(4 * 1024);
+  const count = Math.ceil(MAX_TRANSLATED_TOOL_ARGUMENT_BYTES / delta.length) + 1;
+  const events = [
+    ['message', {
+      id: 'chat_tool_argument_limit', model: 'chat',
+      choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{
+        index: 0, id: 'call_limit', type: 'function', function: { name: 'run', arguments: '{"value":"' }
+      }] }, finish_reason: null }]
+    }],
+    ...Array.from({ length: count }, () => ['message', {
+      id: 'chat_tool_argument_limit', model: 'chat',
+      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: delta } }] }, finish_reason: null }]
+    }])
+  ];
+
+  await assert.rejects(
+    collect(translateSse(responseFrom(events), 'chat', 'responses', 'fallback')),
+    (error) => error?.code === 'UPSTREAM_TRANSLATED_STREAM_TOO_LARGE'
+  );
+});
+
+test('跨协议常规长流仍可完成且每个合成 SSE 帧不超过单事件上限', async () => {
+  const delta = '长'.repeat(1024);
+  const count = Math.floor(MAX_TRANSLATED_STREAM_RETAINED_BYTES / 4 / Buffer.byteLength(JSON.stringify(delta), 'utf8'));
+  const events = [
+    ['message', { id: 'chat_long_ok', model: 'chat', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] }],
+    ...Array.from({ length: count }, () => ['message', {
+      id: 'chat_long_ok', model: 'chat',
+      choices: [{ index: 0, delta: { content: delta }, finish_reason: null }]
+    }]),
+    ['message', {
+      id: 'chat_long_ok', model: 'chat',
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: count }
+    }]
+  ];
+
+  const output = await collect(translateSse(responseFrom(events), 'chat', 'responses', 'fallback'));
+  assert.match(output, /event: response\.completed/);
+  for (const frame of output.split('\n\n').filter(Boolean)) {
+    assert.ok(Buffer.byteLength(`${frame}\n\n`, 'utf8') <= MAX_SSE_EVENT_BYTES);
+  }
+});
 
 test('下游 SSE 终态跟踪只在协议终态完整写出后标记成功', () => {
   const responses = createSseTerminalTracker('responses');
@@ -607,6 +749,34 @@ test('Chat SSE 的 Codex namespace 工具别名可还原为 Responses namespace 
   assert.equal(done.item.name, 'spawn_agent');
   assert.equal(done.item.arguments, '{"task":"检查"}');
   assert.equal(events.find((event) => event.type === 'response.completed').response.end_turn, false);
+});
+
+test('Chat SSE 的 Sol namespaced custom alias 可还原为带 namespace 的 custom_tool_call', async () => {
+  const source = responseFrom([
+    ['message', { id: 'chat_custom_namespace', model: 'deepseek-v4-flash', choices: [{ delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_exec', function: { name: 'functions__exec', arguments: '{"input":"text(' } }] }, finish_reason: null }] }],
+    ['message', { id: 'chat_custom_namespace', model: 'deepseek-v4-flash', choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '\\"STREAM_OK\\")"}' } }] }, finish_reason: null }] }],
+    ['message', { id: 'chat_custom_namespace', model: 'deepseek-v4-flash', choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 3, completion_tokens: 4 } }]
+  ]);
+  const tools = [{
+    type: 'namespace', name: 'functions', tools: [{
+      type: 'custom', name: 'exec', description: 'Run code',
+      format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' }
+    }]
+  }];
+  const output = await collect(translateSse(source, 'chat', 'responses', 'deepseek-v4-flash', {
+    responsesOptions: { tools, parallelToolCalls: false }
+  }));
+  const events = output.split(/\n\n/).filter(Boolean)
+    .map((block) => JSON.parse(block.split(/\r?\n/).find((line) => line.startsWith('data: ')).slice(6)));
+  const added = events.find((event) => event.type === 'response.output_item.added');
+  const done = events.find((event) => event.type === 'response.output_item.done');
+  assert.deepEqual({ type: added.item.type, namespace: added.item.namespace, name: added.item.name }, {
+    type: 'custom_tool_call', namespace: 'functions', name: 'exec'
+  });
+  assert.equal(done.item.namespace, 'functions');
+  assert.equal(done.item.name, 'exec');
+  assert.equal(done.item.input, 'text("STREAM_OK")');
+  assert.equal(events.some((event) => event.type === 'response.function_call_arguments.delta'), false);
 });
 
 test('Responses 流式大工具表只为全部并行调用构建一次别名索引', async () => {
@@ -2194,7 +2364,7 @@ test('Responses 跨协议流拒绝非字符串内容、推理和函数参数字�
   }
 });
 
-test('Responses 跨协议流拒绝重复 output item 生命周期事件并兼容 done-only 兜底', async () => {
+test('Responses 跨协议流拒绝重复 output item 生命周期事件、终态后停止并兼容 done-only 兜底', async () => {
   const created = ['response.created', { type: 'response.created', response: { id: 'resp_bad_lifecycle', model: 'gpt' } }];
   const added = ['response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { id: 'msg_lifecycle', type: 'message', role: 'assistant', content: [] } }];
   const done = ['response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: { id: 'msg_lifecycle', type: 'message', role: 'assistant', content: [] } }];
@@ -2228,14 +2398,13 @@ test('Responses 跨协议流拒绝重复 output item 生命周期事件并兼容
     );
   }
 
-  await assert.rejects(
-    collect(translateSse(responseFrom([
-      created,
-      ['response.completed', { type: 'response.completed', response: { status: 'completed', output: [] } }],
-      added
-    ]), 'responses', 'claude', 'alias')),
-    (error) => error.code === 'UPSTREAM_INVALID_STREAM_SEQUENCE' && /output_item\.added 出现在终态事件之后/.test(error.message)
-  );
+  const terminalThenAdded = await collect(translateSse(responseFrom([
+    created,
+    ['response.completed', { type: 'response.completed', response: { status: 'completed', output: [] } }],
+    added
+  ]), 'responses', 'claude', 'alias'));
+  assert.equal((terminalThenAdded.match(/event: message_stop/g) || []).length, 1);
+  assert.doesNotMatch(terminalThenAdded, /msg_lifecycle/);
 
   const doneOnly = await collect(translateSse(responseFrom([
     created,

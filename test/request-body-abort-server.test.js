@@ -108,10 +108,28 @@ test('请求体上传中断会静默释放公开和管理并发槽', { timeout: 
       '',
       '{"model":"gpt-test","input":"partial'
     ].join('\r\n'));
-    await waitForStatus(status, (current) => current.activeRequests === 1);
+    const publicBusy = await waitForStatus(status, (current) => current.activeRequests === 1
+      && current.inflightRequestBody?.currentBytes === 1024 * 1024);
+    assert.deepEqual(publicBusy.inflightRequestBody, {
+      currentBytes: 1024 * 1024,
+      maxBytes: 64 * 1024 * 1024,
+      activeClients: 1,
+      maxClientBytes: 20 * 1024 * 1024
+    });
     publicSocket.destroy();
     publicSocket = null;
-    await waitForStatus(status, (current) => current.activeRequests === 0);
+    const publicIdle = await waitForStatus(status, (current) => current.activeRequests === 0
+      && current.inflightRequestBody?.currentBytes === 0);
+    assert.equal(publicIdle.inflightRequestBody.activeClients, 0);
+
+    const malformed = await fetch(`http://127.0.0.1:${port}/go/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer Api123', 'content-type': 'application/json' },
+      body: '{"model":"gpt-test","input":'
+    });
+    assert.equal(malformed.status, 400);
+    const afterMalformed = await waitForStatus(status, (current) => current.inflightRequestBody?.currentBytes === 0);
+    assert.equal(afterMalformed.inflightRequestBody.activeClients, 0);
 
     adminSocket = await partialRequest(port, [
       'PUT /api/config HTTP/1.1',

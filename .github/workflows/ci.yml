@@ -40,3 +40,5 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - run: npm run check
+      - if: matrix.node-version == '24.18.1'
+        run: npm run test:coverage

@@ -191,9 +191,30 @@ test('Codex Responses Web Search 会保留可执行语义并标记图片结果�
   assert.equal(allowedOnlySearch.spec.force, true);
   assert.deepEqual(allowedOnlySearch.body.tools, []);
   assert.equal(allowedOnlySearch.body.tool_choice, 'auto');
-  assert.throws(() => responsesWebSearchForChat({
+  const cachedOnly = responsesWebSearchForChat({
     tools: [{ type: 'web_search', external_web_access: false }]
-  }), /仅缓存语义/);
+  });
+  assert.equal(cachedOnly.enabled, false);
+  assert.deepEqual(cachedOnly.body.tools, []);
+  assert.ok(cachedOnly.spec.adaptations.includes('responses_web_search_external_access_disabled'));
+  const nestedCachedOnly = responsesWebSearchForChat({
+    input: [
+      { type: 'additional_tools', role: 'developer', tools: [
+        { type: 'web_search', external_web_access: false },
+        { type: 'namespace', name: 'functions', tools: [{ type: 'function', name: 'exec', parameters: { type: 'object' } }] }
+      ] },
+      { role: 'user', content: '继续执行' }
+    ]
+  });
+  assert.equal(nestedCachedOnly.enabled, false);
+  assert.deepEqual(nestedCachedOnly.body.input[0].tools.map((tool) => tool.type), ['namespace']);
+  const nestedUpstream = prepareUpstreamRequest(nestedCachedOnly.body, 'responses', 'chat', 'search-chat');
+  assert.deepEqual(nestedUpstream.tools.map((tool) => tool.function.name), ['functions__exec']);
+  assert.ok(nestedCachedOnly.spec.adaptations.includes('responses_web_search_external_access_disabled'));
+  assert.throws(() => responsesWebSearchForChat({
+    tool_choice: { type: 'web_search' },
+    tools: [{ type: 'web_search', external_web_access: false }]
+  }), /无法执行.*仅缓存搜索/);
   assert.throws(() => responsesWebSearchForChat({
     tools: [{ type: 'web_search', search_content_types: ['image'] }]
   }), /仅图片/);

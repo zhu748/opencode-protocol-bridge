@@ -80,6 +80,7 @@ test('OpenCode 模型最高思考策略遵循当前 reasoning options', () => {
   assert.equal(openCodeMaximumReasoningEffort('grok-4.5', 'responses'), 'high');
   assert.equal(openCodeMaximumReasoningEffort('grok-4.6', 'responses'), 'xhigh');
   assert.equal(openCodeMaximumReasoningEffort('kimi-k3', 'chat'), 'max');
+  assert.equal(openCodeMaximumReasoningEffort('glm-5.3', 'chat', 'go'), 'max');
   assert.equal(openCodeMaximumReasoningEffort('minimax-m3', 'chat'), 'adaptive');
   assert.equal(openCodeMaximumReasoningEffort('minimax-m3', 'claude'), 'adaptive');
   assert.equal(openCodeMaximumReasoningEffort('mimo-v2.5', 'chat'), 'model-default');

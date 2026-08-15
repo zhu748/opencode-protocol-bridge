@@ -36,6 +36,7 @@
 - 管理端变更请求具有独立并发上限；设置、Key 池、命名客户端、主令牌和密码等持久化变更均使用配置修订号防止多页面覆盖
 - 管理面板的上游模型发现具有独立并发上限并在运行状态中可观测，避免多标签页同时刷新占满连接
 - HTTP 层限制总连接数、请求头体积/数量和单连接复用次数，并以 1 秒粒度检查慢头部与慢请求；已建立的 SSE 长响应不设置总时长上限，但会回收长期没有任何上游数据的停滞连接；客户端在收到协议终态后立即收束连接会按已完成请求记账，终态前断开仍单独统计为 499 取消
+- 已鉴权的公开推理与 token 估算请求共享有界正文内存预算：`Content-Length` 在读取前预留，chunked 上传按实收字节增量预留；完成、JSON 解析失败和客户端取消都会精确归还。全局超限返回 503，每客户端超限返回 429，不会把超额正文送往上游
 - 流式推理、超过 64 KiB 的 JSON、远程图片附件和静态文件响应均遵守下游背压；客户端持续停止读取时会在可配置超时后断开并释放上游连接、文件读取租约和并发槽，不会惩罚对应 Key
 - 仅记录请求元数据的日志
 - 可选的有界请求日志持久化，以及默认保留 7 天、可在面板调整的独立统计持久化
@@ -97,9 +98,10 @@ npm start
 | `CONFIG_FILE` | `data/config.json` | 配置文件位置 |
 | `LOG_FILE` | `data/request-logs.json` | 可选持久化请求日志文件位置 |
 | `STATS_FILE` | `data/request-stats.json` | 独立持久化的请求统计元数据文件位置 |
+| `OPENCODE_BRIDGE_STATS_MAX_BYTES` | `67108864` | 请求统计持久化容量上限，范围 1–128 MiB；达到上限时批量淘汰最旧记录并保留诊断，避免内存和写盘量无界增长 |
 | `OPENCODE_ZEN_BASE_URL` | 官方 Zen 地址 | 仅用于开发、测试或私有镜像上游 |
 | `OPENCODE_GO_BASE_URL` | 官方 Go 地址 | 仅用于开发、测试或私有镜像上游 |
-| `CONFIG_ENCRYPTION_KEY` | 空 | 可选配置加密主密钥，至少 16 个字符 |
+| `CONFIG_ENCRYPTION_KEY` | 空 | 可选配置加密主密钥，至少 16 个字符、建议使用 32 字节以上随机值；新配置使用带随机盐的 scrypt + AES-256-GCM，旧 `enc:v1` 可自动读取并在保存时升级 |
 | `OPENCODE_BRIDGE_ADMIN_PASSWORD` | 空 | 配置文件不存在时用于首次引导；6–256 位英文字母或数字 |
 | `OPENCODE_BRIDGE_CLIENT_TOKEN` | 随机生成 | 环境变量引导时设置主访问令牌；6–256 位英文字母或数字 |
 | `OPENCODE_BRIDGE_REQUIRE_ENV_BOOTSTRAP` | `false` | 设为 `true` 时，配置文件不存在且管理密码或主访问令牌缺失会拒绝启动；适合无持久化的公网部署 |
@@ -107,6 +109,8 @@ npm start
 | `OPENCODE_BRIDGE_MAX_ADMIN_MUTATIONS` | `16` | 同时执行的管理端 POST/PUT/PATCH/DELETE 上限，范围 1–128；超限返回 429，避免模型测试或密码哈希占满进程 |
 | `OPENCODE_BRIDGE_MAX_ADMIN_MODEL_DISCOVERIES` | `4` | 管理面板同时拉取上游模型列表的请求上限，范围 1–32；超限返回 429，客户端取消后立即释放名额 |
 | `OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS` | `256` | Node HTTP 服务同时接受的连接数上限，范围 1–10000；包含空闲 Keep-Alive、慢请求和 SSE 连接 |
+| `OPENCODE_BRIDGE_MAX_INFLIGHT_REQUEST_BODY_BYTES` | `67108864` | 已鉴权公开推理与 token 估算请求从上传开始到响应结束的全局正文预留上限，范围 10 MiB–1 GiB；超限返回协议兼容的 503 |
+| `OPENCODE_BRIDGE_MAX_CLIENT_INFLIGHT_REQUEST_BODY_BYTES` | `20971520` | 单个客户端从上传开始到响应结束的正文预留上限，范围 10 MiB–1 GiB；超限返回 429，默认允许两个 10 MiB Codex 长上下文并行执行 |
 | `OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS` | `30000` | 流式推理、大 JSON、图片附件或静态文件遇到下游背压后等待 `drain` 的最长时间，范围 100–300000 毫秒；超时按客户端断开处理并释放上游连接、并发槽或文件读取流 |
 | `OPENCODE_BRIDGE_SSE_HEARTBEAT_MS` | `15000` | 上游暂时没有可转发事件时向客户端发送标准 SSE 注释心跳的间隔，范围 1000–60000 毫秒；设为 `0` 禁用 |
 | `OPENCODE_BRIDGE_WEB_SEARCH_MCP_URL` | `https://mcp.exa.ai/mcp` | Claude → Chat 本地 Web Search 使用的 Exa 兼容 MCP HTTP(S) 地址；仅用于自建/测试替换端点时修改 |
@@ -139,8 +143,12 @@ npm start
 docker compose up -d --build
 ```
 
-Compose 默认只映射到本机 `127.0.0.1:8787`，配置保存在命名卷 `bridge-data` 中。镜像构建时默认会下载 sing-box 到 `/app/vendor/sing-box/sing-box`，因此容器内也能托管 hy2/TUIC/VLESS/VMess 等分享链接；如需禁用下载，可设置构建参数 `INSTALL_SING_BOX=false` 并改为挂载/指定自己的 `OPENCODE_BRIDGE_SING_BOX_PATH`。容器以非 root 用户运行，并通过 `/healthz` 执行健康检查；原 `/health` 路径继续作为兼容别名。
-启动 Compose 前可在 PowerShell 中设置 `$env:CONFIG_ENCRYPTION_KEY`，该变量会传入容器用于配置加密。
+Compose 默认只映射到本机 `127.0.0.1:8787`，配置保存在命名卷 `bridge-data` 中，并按顺序读取可选的 `.env` 与 `.env.local`（后者优先），因此上表中的运行时变量不需要再逐项写入 `compose.yaml`；`HOST` 与 `PORT` 会固定为容器内的 `0.0.0.0:8787`。镜像构建时默认会下载 sing-box 到 `/app/vendor/sing-box/sing-box`，因此容器内也能托管 hy2/TUIC/VLESS/VMess 等分享链接；如需禁用下载，可设置构建参数 `INSTALL_SING_BOX=false` 并把自己的二进制挂载到容器路径，同时将 `OPENCODE_BRIDGE_SING_BOX_PATH` 写成对应的容器内路径。容器以非 root 用户运行，并通过只反映进程存活的 `/livez` 执行健康检查。
+
+`/health` 与 `/healthz` 保持兼容并始终返回 200，同时在正文中给出 `ready`；`/livez` 用于容器存活检查；`/readyz` 在密码、客户端令牌和至少一个上游 Key 就绪前返回 503，适合负载均衡器或 Render 的就绪检查。
+登录后的 `/api/status` 会在 `inflightRequestBody` 中公开当前/全局上限字节、活跃客户端数和每客户端上限，但不记录或返回任何正文内容。
+
+请求统计采用带版本头的增量 NDJSON 写入；已有 JSON 数组文件会在首次加载后自动迁移。常规请求只追加本批新增记录，调整保留期、旧格式迁移或容量整理时才原子重写完整快照。
 
 如需公网访问，建议继续保持服务监听在本机，并使用 Caddy、Nginx 等反向代理提供 HTTPS。SSE 代理必须关闭响应缓冲并设置足够长的读取超时；不要直接将未加密的 `8787` 端口暴露到公网。
 
@@ -148,7 +156,7 @@ Compose 默认只映射到本机 `127.0.0.1:8787`，配置保存在命名卷 `br
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/zhu748/opencode-protocol-bridge)
 
-仓库根目录的 `render.yaml` 会创建一个新加坡区域的免费 Node Web Service，自动执行 `npm ci --omit=dev --ignore-scripts`、显式安装固定版本 sing-box、运行 `npm start`，并使用 `/healthz` 进行健康检查。在 Render 创建 Blueprint 时填写：
+仓库根目录的 `render.yaml` 会创建一个新加坡区域的免费 Node Web Service，自动执行 `npm ci --omit=dev --ignore-scripts`、显式安装固定版本 sing-box、运行 `npm start`，并使用 `/readyz` 进行就绪检查。在 Render 创建 Blueprint 时填写：
 
 - `OPENCODE_BRIDGE_ADMIN_PASSWORD`：**必填，不可留空**的管理面板密码，至少 6 位，仅使用英文字母或数字。
 - `OPENCODE_BRIDGE_CLIENT_TOKEN`：**必填，不可留空**的客户端调用令牌，至少 6 位，仅使用英文字母或数字。
@@ -195,6 +203,38 @@ x-api-key: YOUR_BRIDGE_TOKEN
 ```http
 x-goog-api-key: YOUR_BRIDGE_TOKEN
 ```
+
+### 在 Codex CLI 中使用
+
+Codex 自定义模型提供方只使用 Responses API。先在当前 PowerShell 会话设置管理面板生成的客户端访问令牌；令牌通过 `env_key` 读取，不要直接写入 TOML：
+
+```powershell
+$env:OPENCODE_BRIDGE_TOKEN = "YOUR_BRIDGE_TOKEN"
+```
+
+将下面配置保存到用户级 `~/.codex/config.toml`（Windows 通常为 `%USERPROFILE%\.codex\config.toml`）。不要保存到项目内的 `.codex/config.toml`：Codex 会忽略项目级配置中的 `model_provider` 和 `model_providers`。管理面板“接入指南”会按当前已配置的默认上游生成同款配置。
+
+```toml
+model = "gpt-5.6-terra"
+model_provider = "opencode_bridge"
+
+[model_providers.opencode_bridge]
+name = "OpenCode Bridge (Zen)"
+base_url = "http://127.0.0.1:8787/zen/v1"
+env_key = "OPENCODE_BRIDGE_TOKEN"
+env_key_instructions = "请先设置 OPENCODE_BRIDGE_TOKEN 为管理面板生成的客户端访问令牌"
+wire_api = "responses"
+requires_openai_auth = false
+request_max_retries = 4
+stream_max_retries = 5
+stream_idle_timeout_ms = 330000
+supports_websockets = false
+supports_standalone_web_search = false
+```
+
+只配置 Go 时，将模型改为 `gpt-5.6-luna`、名称改为 `OpenCode Bridge (Go)`，并把 `base_url` 改为 `http://127.0.0.1:8787/go/v1`。生成器把 Codex 的流空闲超时设为 `max(300000, Bridge 上游流空闲超时 + 30000)`，让 Bridge 有时间先返回规范化的超时错误；默认 Bridge 超时为 300000 毫秒，因此示例为 330000。`supports_standalone_web_search = false` 只表示 Bridge 没有实现 Codex 实验性的独立搜索端点，不会关闭普通 Responses 请求中的 `web_search` 适配。
+
+配置不写 `model_reasoning_effort`；管理面板默认开启的“始终使用模型最高思考强度”会按最终上游模型应用其实际支持的最高档。可用 `codex exec --strict-config "只回复 OK"` 检查配置。字段语义与用户级配置限制见 [OpenAI Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference) 和 [高级配置](https://learn.chatgpt.com/docs/config-file/config-advanced)。
 
 Gemini SDK/客户端使用模型 URL 调用，模型名不放在请求 JSON 中。例如：
 
@@ -467,12 +507,12 @@ Zen 当前原生端点按官方端点表分为四类：
 - 通用 `/v1/models` 的 `provider` 查询参数仅接受 `zen`、`go` 或列表场景的 `all`，非法值会明确返回 400，不会静默回退到默认套餐；带 `/zen/v1`、`/go/v1` 的路径始终以路径为准。
 - 同协议请求和成功的非流式响应会在最小结构校验后保留厂商扩展字段；同协议流式成功事件原样透传，错误既按 `data.type/data.error` 也按显式 `event: error` / `event: response.failed` 识别、脱敏并终止，避免非标准错误载荷绕过安全规范化。非 2xx 推理响应不会透传任意扩展字段，而会规范化为客户端协议认可的错误结构，并在返回和写日志前脱敏当前上游 Key 与代理地址。跨协议转换覆盖系统提示、文本、拒绝内容、图片及其 `detail`、Claude Documents/Responses/Chat 文件块、采样参数、函数工具、工具选择、新旧工具调用、工具结果、推理强度及 usage；目标为 Responses 或 Chat 时会保留开头 `system` / `developer` 的原始角色层级，Responses 顶层 `instructions` 按 `developer` 指令处理，Claude/Gemini 的 system 转 Responses 时使用 `system` input；只有目标为 Claude 时才合并到顶层 `system`。会话中途的 system/developer 同样保留原始时序和系统优先级，不会被提升后与整段上下文混合。Claude 的纯文本 Documents 转普通 Chat 模型时会保留附件名、context、块顺序与兼容代理使用的 `cache_control` 并内联到用户消息，只有可验证的文本、自定义文本块或 UTF-8 文本 MIME base64 会使用该降级；GPT-5.6 Chat 则可直接接收 base64/file_id `file` 内容块。Claude 的 `tool_result + 后续用户文本` 转 Chat 时会保持合法的 tool → user 顺序。停止词会在 Claude/Chat 目标间转换；Responses 不支持 stop，收到跨协议停止词时返回明确的 400。Responses 的 `previous_response_id`、`conversation`、`background:true`、`store:true`、自动截断、服务端 `prompt` 模板、`max_tool_calls`、`context_management` 压缩依赖 Responses 服务端状态或执行器，跨到 Chat/Claude 时会在调用上游前返回明确的 400，而不会只发送当前 input 造成失忆、漏压缩或行为漂移；历史消息 `phase` 仅用于区分 Codex commentary/final_answer 展示通道，跨协议时保留正文和顺序并显式标记降级；Codex CLI 当前使用的 `store:false`、`background:false`、`truncation:disabled`、空 `context_management` 和 `include:["reasoning.encrypted_content"]` 属于可安全转换的无状态组合。 Codex 0.147+ 的 Responses `client_metadata` 是字符串键值形式的客户端遥测，不属于模型上下文；跨到 Claude/Chat 时会先限制键数量、键名和单值大小，再移除并通过 `x-opencode-input-degradations: responses_client_metadata` 与请求日志标记，同协议 Responses 仍原样透传。Responses 与 Chat 之间还会双向保留 `service_tier`（包括 OpenCode Fast mode 扩展的 `fast`）、`safety_identifier`、`user`、moderation 和输出 verbosity。Claude 的 `speed:standard|fast` 会分别映射为 OpenAI/OpenCode 的 `service_tier:default|fast`，反向同理，并通过 `x-opencode-service-adaptations` 与请求日志公开标记；`auto`、`flex`、`scale`、`priority` 等容量层不能等价表示 Claude 速度，转 Claude 时明确拒绝。其余没有 Claude 等价表示的服务控制字段也仍会明确拒绝。Claude 转 GPT-5.6 Responses 或 Chat 时，顶层自动缓存映射为 `prompt_cache_options.mode=implicit`，system、文本、图片和文件等受支持缓存点映射为显式 `prompt_cache_breakpoint`。OpenAI 当前只提供请求级 30 分钟 TTL，Claude 的 5 分钟/1 小时 TTL 因而会标记为 `claude_cache_ttl_to_30m`；工具定义、无法承载断点的工具调用等缓存点或不支持原生缓存字段的目标无法精确映射时标记 `claude_cache_control_dropped`。Responses 与 GPT-5.6 Chat 的 `prompt_cache_options`、`prompt_cache_key` 和受支持内容块断点可以双向转换；OpenCode Chat 消息包装上的 Anthropic 风格 `cache_control` 会映射到该消息最后一个可缓存内容块：转 Claude 时保留 5m/1h TTL，转 GPT-5.6 Responses 时转换为显式断点并标记 30 分钟 TTL 适配；Chat 工具定义和历史 `tool_calls[]` 包装上的 `cache_control` 转 Claude 时会分别保留到对应工具定义与 `tool_use` 块，转 Responses 时因 `function_call` 没有等价字段而标记 `responses_cache_control_dropped`。转 Claude 时自动/显式缓存会转换为顶层或块级 `cache_control`，并以保守的 5 分钟 TTL 执行。无法映射的 OpenAI 缓存 key、旧式 retention 或目标模型不支持缓存字段时分别明确标记。所有状态通过 `x-opencode-cache-adaptations` 与请求日志显示，不再静默丢字段。转 Claude 时 metadata 只保留合法的 `user_id`。Codex CLI 的 Responses `namespace` 工具在转往 Chat/Claude 时会生成稳定、可读且避免冲突的函数别名，历史工具调用和非流式/流式响应会自动还原原始 `namespace` 与工具名；重复的直接函数名、namespace 名或 namespace 子函数名会在请求上游前明确拒绝。Responses `custom` 工具会包装成带单个字符串 `input` 字段的普通函数，原始 grammar 会附在描述中，回传时恢复为自由文本 `custom_tool_call`；客户端 `tool_search` 会包装为普通函数，`tool_search_output.tools` 中动态加载的工具会加入后续上游工具集，调用与输出 ID 保持不变；托管 `tool_search` 所管理的延迟工具会在跨协议时直接展开。响应头 `x-opencode-tool-adaptations` 和请求日志协议字段会明确列出这些适配。Responses 托管型 `web_search` 在原生 Responses 路由中会连同全部配置原样透传。非 Responses 上游无法实际执行该托管工具，跨协议时会保留客户端响应中的原始工具声明、移除发往上游的托管工具并向模型注入明确的能力限制提示；响应头 `x-opencode-tool-degradations: web_search` 和请求日志协议字段会标记这次降级。若原请求用 `required` 同时开放搜索和普通函数，降级后会改为 `auto`，避免强迫模型误调用无关函数。如果必须使用真实托管搜索，请将该模型路由到原生 Responses 上游。Responses 历史 `reasoning` 项跨到 Chat 时会保留为 `reasoning_content`，跨到 Claude 时作为历史助手文本保留；目标协议无法使用的 `encrypted_content` 会被忽略，并通过 `x-opencode-input-degradations: encrypted_reasoning` 与日志协议字段明确标记。如果必须保留加密推理状态，请将模型路由到原生 Responses 上游。Gemini 3 历史 Part 的 `thoughtSignature`（同时兼容 `thought_signature`）会校验并在内部规范化模型中保留；由于它是必须原样回传给 Gemini 的不透明供应商状态，跨到 Responses、Claude 或 Chat 时不会伪造为其他 thinking 字段，而会通过 `x-opencode-input-degradations: gemini_thought_signature` 和日志明确标记。需要完整延续原生 Gemini 思考状态时，必须使用原生 Gemini 上游；桥接不会伪造 `skip_thought_signature_validator`。其他 Responses 内置工具、Claude server tool、非法消息角色、未知内容块、普通 Chat 非文本文件输入及 Chat 无法表达的图片 `file_id` 在跨协议请求时返回 400；上游响应包含目标协议无法表达的图片、文档、未知输出项或流式媒体块时返回明确的转换错误，避免静默丢失内容。跨协议的顶层请求字段、消息/input item、内容块、工具调用/定义、Responses `text` 与结构化输出对象中的未知字段会在访问上游前返回 400；同协议路由继续原样保留厂商扩展。只有文档明确列为最佳努力转换的扩展字段才允许忽略，并会通过响应头和请求日志公开标记。
 - Responses `web_search` 跨协议通常按上条降级，但目标是 Zen 原生 Gemini 时有一个严格例外：只有不带额外选项的单个搜索工具可映射为 `googleSearch:{}`；强制搜索、`allowed_tools` 搜索子集、上下文大小、地域或其它 Responses 专属配置都会返回 400，而不会假装等价。原生 Gemini 返回的 grounding chunks/supports 会转换为 Responses URL citations 和搜索词，流式引用保证在文本块完成事件之前发出。
-- Responses → Chat 现在也是一个可执行例外：开启本地 Web Search 后，Codex 的 `web_search` 会映射为桥接内部 function，由 Exa/Parallel MCP 执行，再以 Responses `web_search_call`、`tool_usage.web_search.num_requests` 和 `url_citation` 返回；流式请求会生成严格递增的 Responses SSE 序列。支持 `low|medium|high` 上下文、`return_token_budget`、近似位置、裸域名 allow/block、显式强制搜索，以及包含搜索和普通工具的 `allowed_tools` 子集；required 强制只作用于首轮搜索，拿到结果后恢复 auto，避免重复搜索到上限。`external_web_access:false` 的仅缓存语义和仅图片搜索会明确拒绝。`text+image` 会执行文本搜索并通过 `x-opencode-tool-adaptations` 标记图片结果/设置降级，不再把整个联网工具判为不可用。历史 `web_search_call` 轨迹会在严格校验后于送往 Chat 前压缩，最终已引用答案仍会作为普通 assistant 历史保留。
+- Responses → Chat 现在也是一个可执行例外：开启本地 Web Search 后，Codex 的 `web_search` 会映射为桥接内部 function，由 Exa/Parallel MCP 执行，再以 Responses `web_search_call`、`tool_usage.web_search.num_requests` 和 `url_citation` 返回；流式请求会生成严格递增的 Responses SSE 序列。支持 `low|medium|high` 上下文、`return_token_budget`、近似位置、裸域名 allow/block、显式强制搜索，以及包含搜索和普通工具的 `allowed_tools` 子集；required 强制只作用于首轮搜索，拿到结果后恢复 auto，避免重复搜索到上限。Codex 0.147+ 默认声明的 `external_web_access:false` 仅缓存搜索在 Chat 上游无法执行：未强制搜索时会安全移除该工具、保留其它工具并以 `responses_web_search_external_access_disabled` 标记，不再阻断普通 Codex 任务；显式强制仅缓存搜索时仍返回 400，避免访问实时公网或伪造结果。仅图片搜索仍会明确拒绝；`text+image` 会执行文本搜索并通过 `x-opencode-tool-adaptations` 标记图片结果/设置降级，不再把整个联网工具判为不可用。历史 `web_search_call` 轨迹会在严格校验后于送往 Chat 前压缩，最终已引用答案仍会作为普通 assistant 历史保留。
 - 上一条所述不透明状态降级只适用于客户端自行带入、并非本桥接生成的模型绑定状态。桥接在客户端输出协议允许时会用经过校验的可逆封装保留 Claude `thinking.signature`/`redacted_thinking`、Responses `encrypted_content` 和结构化 Chat `reasoning_details`，下一轮回到原上游协议时再逐字还原；封装在解码时会严格核对协议、状态种类、字段白名单及原始块结构，夹带未知供应商字段的伪造封装不会绕过正常协议校验。流式与非流式 Gemini 客户端工具轮次会把一个或多个状态封装到首个 functionCall Part 的 `thoughtSignature`，并行的后续调用不重复携带；没有工具调用时则绑定到最后一个可读 thought Part，必要时使用不可见状态 Part。回流时先拆开并移除桥接封装，并且只消除与封装状态数量相同的可读 thought 副本，因此不会误删内容相同的独立思考块，也不会把其它供应商密文发给 Google 上游。发往原生 Gemini 上游时只回传真正来自 Gemini 的 Part 和 `thoughtSignature`，其它供应商的密文会按降级标记移除，绝不伪造 Google 签名。对于会丢弃 `reasoning_details` 或 provider metadata 的 OpenCode 交叉配置，服务还会使用最长 10 分钟、最多 1024 项/32 MiB 的进程内缓存补回状态；缓存作用域使用无歧义编码同时包含客户端、请求模型、实际 provider、实际上游模型和目标协议，缓存键再加入工具调用 ID、工具名及规范化参数，避免同名 Zen/Go 模型、路由切换或并发会话串入其它供应商状态。缓存仅是短时兼容兜底，跨实例、重启或超时后不能代替客户端回传。
 - Responses 历史项的 `id/status/phase` 会在跨协议前严格校验；由于 Chat/Claude/Gemini 没有等价的项级元数据字段，`id/status` 通过 `responses_item_metadata` 标记，Codex 历史 assistant 消息的 `phase: commentary|final_answer` 则通过 `responses_item_phase` 标记后降级为普通 assistant 历史。消息正文、工具 `call_id`、工具名称、参数和历史顺序仍完整保留；非法状态或 phase 不会被静默接受。上游或桥接合成响应留下的空 assistant 内容块不包含任何模型语义，跨协议时会在完整校验后移除，并以 `responses_empty_assistant_placeholder` 标记；用户/system 空消息、空内容数组，以及带注解或缓存断点的空块仍会拒绝。这样 Codex 的完整历史可路由到 Chat 上游，而不会因 UI 通道元数据或无语义占位返回 400。
-- Codex Responses Lite 把工具表放在首个 `additional_tools` developer input item，而不是顶层 `tools`。跨到 Chat/Claude/Gemini 时，Bridge 会严格校验其角色和非空工具表，再复用现有 function/namespace/custom/tool-search 规则提升为目标协议工具，并通过 `additional_tools_to_top_level` 标记；同协议 Responses 仍原样透传。桥接生成的 Responses 文本终态还会补充 Codex 使用的 `phase: final_answer|commentary` 和 `end_turn`，使 CLI 能明确区分最终回答与工具前导文本；Codex durable `custom_tool_call_output.name` 也可在历史重放时校验后承接。
+- Codex Responses Lite 把工具表放在首个 `additional_tools` developer input item，而不是顶层 `tools`。跨到 Chat/Claude/Gemini 时，Bridge 会严格校验其角色和非空工具表，再复用现有 function/namespace/custom/tool-search 规则提升为目标协议工具，并通过 `additional_tools_to_top_level` 标记；同协议 Responses 仍原样透传。顶层 `tools`、`additional_tools` 与 `tool_search_output.tools` 会共享同一合并规则：相同 namespace 的新增子工具会合入完整工具表，重复定义去重，冲突定义明确报错，响应回映射不会使用另一套可能漂移的工具身份。Codex 0.147+ 的 Sol 工具表会在 `functions` namespace 内声明 grammar `custom` 类型的 `exec`：Bridge 会生成无冲突函数别名，把自由文本包装进 `input` 字段，并在流式、非流式及历史续轮中恢复 `namespace/name/call_id`；`custom_tool_call_output` 的文本数组转 Claude 时会改写为合法的 `text` 内容块，转 Chat 时会合并成原始工具文本而不是把协议块 JSON 暴露给模型。桥接生成的 Responses 文本终态还会补充 Codex 使用的 `phase: final_answer|commentary` 和 `end_turn`，使 CLI 能明确区分最终回答与工具前导文本；Codex durable `custom_tool_call_output.name` 也可在历史重放时校验后承接。
 - Chat 跨协议只接受单候选 `n=1` 和纯文本输出 `modalities:["text"]`；多候选、音频输出、predicted output、`logit_bias` 与 Chat 托管 `web_search_options` 无法由目标协议和返回结构完整表达时会明确返回 400。旧式 `functions`/`function_call` 会转换成目标协议的现代函数工具和强制工具选择，不需要客户端先升级请求格式。
-- 跨协议配置不会再依赖 JavaScript 真值转换：Claude `tool_choice.disable_parallel_tool_use` 与 Responses/Chat `parallel_tool_calls` 必须是布尔值，错误的字符串或数字会在访问上游前返回 400。三种协议的 `tool_choice` 会按各自官方形状和枚举解析，强制函数必须引用本轮实际定义的工具；未知对象、空函数名和缺失工具不会再变成未设置或无效的目标选择。Chat `logprobs`、Chat/Responses `top_logprobs`（0–20）、函数工具和 JSON Schema 的 `strict` 也按官方类型校验。Claude/Chat 的 `messages`、三种协议的 `tools`、Responses 的数组式 `input`、Claude 的块式 `system` 及 Chat 历史 `tool_calls` 都必须使用官方容器形状，不再把单对象自动包成数组；metadata 必须是对象，发往 Responses/Chat 时进一步限制为最多 16 个、键名最长 64 字符、值最长 512 字符的字符串键值对，转 Claude 时 `user_id` 会校验为最长 512 字符的非空字符串。停止词同样按来源和目标协议校验：Claude 只接受字符串数组，Chat 接受字符串或最多 4 项的字符串数组，超过 Chat 上限或包含非字符串时会在访问上游前返回 400。三种协议的输出 token 上限、`temperature`、`top_p`，以及 Chat 的 seed/惩罚项会校验安全整数、有限数字和官方范围；Chat 同时设置 `max_tokens` 与 `max_completion_tokens` 会明确拒绝，不会把 `0` 或错误字符串丢成默认 8192。OpenAI/Gemini 的 `temperature > 1` 虽可由来源协议接受，但转 Claude 时会在上游前提示不兼容；同协议请求仍完整透传给原生上游处理厂商扩展。
+- 跨协议配置不会再依赖 JavaScript 真值转换：Claude `tool_choice.disable_parallel_tool_use` 与 Responses/Chat `parallel_tool_calls` 必须是布尔值，错误的字符串或数字会在访问上游前返回 400。三种协议的 `tool_choice` 会按各自官方形状和枚举解析，强制函数必须引用本轮实际定义的工具；未知对象、空函数名和缺失工具不会再变成未设置或无效的目标选择。Chat `logprobs`、Chat/Responses `top_logprobs`（0–20）、函数工具和 JSON Schema 的 `strict` 也按官方类型校验。Gemini FunctionDeclaration 没有等价的 `strict` 开关；跨到 Gemini 时会保留完整参数 Schema、移除 `strict:true`，并通过 `strict_tool_schema_best_effort_gemini` 明确标记最佳努力约束，不再阻断 Codex/OpenCode 默认工具集。Gemini 同样没有禁止并行函数调用的等价开关；收到 `parallel_tool_calls:false` 时会加入“每轮最多调用一个函数”的兼容指令，并通过 `parallel_tool_calls_false_best_effort_gemini` 标记。Codex/OpenAI 的 `low|medium|high` verbosity 转 Claude 或 Gemini 时会加入对应详略指令，并分别通过 `verbosity_best_effort_claude` / `verbosity_best_effort_gemini` 的生成适配标记公开。Claude/Chat 的 `messages`、三种协议的 `tools`、Responses 的数组式 `input`、Claude 的块式 `system` 及 Chat 历史 `tool_calls` 都必须使用官方容器形状，不再把单对象自动包成数组；metadata 必须是对象，发往 Responses/Chat 时进一步限制为最多 16 个、键名最长 64 字符、值最长 512 字符的字符串键值对，转 Claude 时 `user_id` 会校验为最长 512 字符的非空字符串。停止词同样按来源和目标协议校验：Claude 只接受字符串数组，Chat 接受字符串或最多 4 项的字符串数组，超过 Chat 上限或包含非字符串时会在访问上游前返回 400。三种协议的输出 token 上限、`temperature`、`top_p`，以及 Chat 的 seed/惩罚项会校验安全整数、有限数字和官方范围；Chat 同时设置 `max_tokens` 与 `max_completion_tokens` 会明确拒绝，不会把 `0` 或错误字符串丢成默认 8192。OpenAI/Gemini 的 `temperature > 1` 虽可由来源协议接受，但转 Claude 时会在上游前提示不兼容；同协议请求仍完整透传给原生上游处理厂商扩展。
 - Chat `tool_calls`/旧式 `function_call` 与 Responses `function_call`、`custom_tool_call`、客户端 `tool_search_call` 的历史调用在跨协议时会严格校验调用对象、非空 ID、非空名称和 JSON 对象参数；对应的 tool/function/custom/search 结果必须携带非空关联 ID，要求输出的类型也不能缺少 `output`。对象形式的兼容参数会继续接受并按稳定键序编码，损坏 JSON、标量参数、空调用项、同时携带新旧 Chat 调用字段或缺少关联字段时会在访问上游前返回 400，不再生成缺字段请求、把损坏参数二次编码成字符串或泄漏为内部 500。
 - Claude、Responses、Chat 与内部规范化的 Gemini 请求都严格要求 `stream` 为布尔值，不会把字符串、数字、`null` 或对象按 JavaScript 真值静默改成流式模式。Gemini 的模型和流式模式由 URL 路径决定，因此客户端正文中的 `model`、`stream` 会被明确拒绝而不是覆盖。Responses 与 Chat 跨协议流还会严格校验 `stream_options`，并要求同时设置 `stream:true`。Codex 官方可能发送的 `reasoning_summary_delivery:"sequential_cutoff"` 会被识别并以目标协议可提供的事件顺序做最佳努力适配，其它值仍拒绝；`include_obfuscation` 默认启用时，Bridge 会给重编码后的 OpenAI delta 添加随机 `obfuscation`，并把 JSON 数据填充到 256 字节边界，显式设为 `false` 时不添加。Chat 的 `include_usage:true` 会按标准为普通 chunk 填入 `usage:null`，并在 `[DONE]` 前生成独立的 `choices:[]` 用量 chunk，不再把 usage 混进 finish chunk。跨协议生成的 Responses 对象还会回显 instructions、metadata、采样、工具选择、持久化、文本格式、截断和推理等客户端配置，并区分 `completed_at`、`error` 与 `incomplete_details`。模型主动拒答会作为 Responses `refusal` 内容块或 Chat `message/delta.refusal` 保留，转换到 Claude 时使用文本内容配合 `stop_reason: refusal`，转换到 Gemini 时使用 `SAFETY`；它与没有拒答正文的内容过滤终止分开处理，不会被混入普通 assistant 文本。内容过滤会映射为 Responses `content_filter`、Chat `content_filter`、Claude `refusal` 或 Gemini `SAFETY`，上下文/输出上限映射为各协议的截断状态；即使响应里已有工具调用，过滤或截断也优先于工具完成状态，避免客户端执行不完整参数。流式 Responses 的 `output_item.done` 会等最终状态已知后再发，并把截断项标记为 `incomplete`。非流式与流式 Responses/Chat 互转会保留上游创建时间和实际 `service_tier`；Chat 专属的 `system_fingerprint` 不会伪装成 Responses 字段。
 - Responses 流式 message 使用 `output_index + content_index` 独立维护每个 `output_text`/`refusal` 内容块；同一 output item 包含多段内容、增量先于 added 到达，或只有 `content_part.done`/`output_item.done` 完整值时都会逐块恢复，不再拼接、覆盖或重复输出。Responses reasoning item 的合法 `reasoning_text` content part 也会与摘要增量共用独立推理状态并从完整事件补齐。相同 `content_index` 中途改变内容类型会作为损坏的上游事件明确失败。
@@ -516,22 +556,26 @@ npm run rekey
 ```
 - 首次初始化采用单飞写入并在保存前重新读取最新配置；并发或延迟到达的初始化请求不能覆盖已经设置的管理密码。所有持久化管理操作都会绑定请求开始时的配置修订，即使 API 调用方省略 `If-Match`，并发旧快照也会返回 412 而不是覆盖较新的设置；显式携带管理 API 返回的 ETag 仍是跨请求更新的推荐方式。管理密码使用随机盐的 scrypt 哈希保存；登录 Cookie 为 HttpOnly、SameSite=Strict，可信 HTTPS 反向代理下同时启用 Secure 与 HSTS。
 - 命名客户端令牌由高强度随机数生成，配置中仅保存不可逆摘要；主访问令牌仍受 `CONFIG_ENCRYPTION_KEY` 加密保护。
-- 请求日志和统计文件都不包含提示词、响应正文或密钥。日志持久化默认关闭；统计默认持久化但仅保留配置天数。两者都应像其他运行日志一样限制文件访问权限。
-- 依赖安装默认关闭第三方生命周期脚本并使用 `package-lock.json`；CI 固定第三方 Action 的完整提交 SHA，执行生产依赖漏洞与 npm 注册表签名审计，并为 Node 24 构建生成保留 14 天的 CycloneDX SBOM。也可在本地运行 `npm run --silent sbom:prod` 输出依赖清单。
-- `/healthz`（兼容别名 `/health`）中的 `ready` 只有在管理密码、至少一个可用客户端令牌和至少一个上游密钥均已配置时才为 `true`。
+- 请求日志和统计文件都不包含提示词、响应正文或密钥。日志持久化默认关闭；统计默认持久化、按配置天数与容量双重限制，并使用增量 NDJSON 避免每秒重写完整历史。两者都应像其他运行日志一样限制文件访问权限。
+- 依赖安装默认关闭第三方生命周期脚本并使用 `package-lock.json`；CI 固定第三方 Action 的完整提交 SHA，执行生产依赖漏洞、npm 注册表签名审计和 80% 覆盖率门槛，并为 Node 24 构建生成保留 14 天的 CycloneDX SBOM。也可在本地运行 `npm run --silent sbom:prod` 输出依赖清单。
+- `/healthz`（兼容别名 `/health`）中的 `ready` 只有在管理密码、至少一个可用客户端令牌和至少一个上游密钥均已配置时才为 `true`；自动化探针应分别使用 `/livez` 与 `/readyz`。
 
 ## 验证
 
 ```powershell
 npm test
 npm run check
+npm run test:coverage
 npm run check:catalogs
+npm run test:cli:codex
 npm run test:cli:installed
 ```
 
-`npm run check` 会自动发现并语法检查 `src`、`public`、`scripts` 与 `test-fixtures` 下的全部 JavaScript 文件，再运行完整测试；新增源码文件无需手工维护检查名单。默认测试不调用真实 OpenCode 接口，因此不会产生费用。
+`npm run check` 会自动发现并语法检查 `src`、`public`、`scripts` 与 `test-fixtures` 下的全部 JavaScript 文件，再运行完整测试；新增源码文件无需手工维护检查名单。`npm run test:coverage` 额外要求源码行、分支和函数总体覆盖率均不低于 80%。默认测试不调用真实 OpenCode 接口，因此不会产生费用。
 
 `npm run check:catalogs` 不读取任何 Key，也不发送推理请求；它会在线对比 OpenCode Zen/Go 当前 `/models`、官方文档端点表和 models.dev 输入模态/限制。发现新模型、原生协议变化、视觉能力或上下文限制漂移时会以非零状态退出；单独检查时可使用 `npm run check:zen-catalog` 或 `npm run check:go-catalog`。
+
+`npm run test:cli:codex` 是独立的 Codex 回归：它复用管理面板的 TOML 生成器写入隔离的用户级 `CODEX_HOME/config.toml`，以 `codex exec --strict-config --ephemeral` 验证 Bearer 鉴权、普通函数续轮、cached-only Web Search 安全降级，以及已知 Sol 模型真实发送的 `additional_tools → functions.exec custom grammar`、数组式 custom 输出、`verbosity:low`、`reasoning.context:all_turns` 和 `parallel_tool_calls:false`。同一个真实 Codex CLI 会再经过 Bridge 分别转换到模拟 Chat、Claude、Gemini 上游并完成两轮工具闭环；报告同时打印 Codex 版本。每周计划任务会在 Ubuntu 与 Windows 上安装最新版 Codex 后运行这项无真实上游、无费用的探针。
 
 `npm run test:cli:installed` 会调用当前 `PATH` 中已安装的 Codex CLI、Claude Code 和 OpenCode。在系统临时目录中，Codex/Claude Code 会先对隔离的原生 Responses/Messages 模拟端点完成工具调用闭环，再经过本项目 Bridge 转到模拟 Chat 上游；OpenCode 则加载管理面板生成器同款配置，验证 Go 的 Responses、Claude Messages、Chat Completions 以及 Zen 的 Gemini 模型分别请求 `/go/v1/responses`、`/go/v1/messages`、`/go/v1/chat/completions` 和 `/zen/v1/models/{model}:streamGenerateContent?alt=sse`。四种原生 SDK 都会执行一次临时文件 `read`，核对续轮带回各自的工具结果；Gemini 还会核对 `thoughtSignature` 原样回传。随后探针让真实 OpenCode 经过 Bridge 完成 Responses、Claude、Chat、Gemini 四者之间全部 12 个有向跨协议流式工具调用闭环，并逐字核对 Responses `encrypted_content`、Claude thinking/redacted thinking、Gemini `thoughtSignature` 等不透明状态。整个过程不会连接真实模型接口，也不会读取或输出真实上游 Key；报告只列出协议角色、输入项类型、工具名称和模拟路径等结构摘要。
 

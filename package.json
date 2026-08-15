@@ -15,9 +15,11 @@
     "check:go-catalog": "node scripts/check-go-catalog.mjs",
     "check:zen-catalog": "node scripts/check-zen-catalog.mjs",
     "check:catalogs": "npm run check:go-catalog && npm run check:zen-catalog",
+    "test:cli:codex": "node scripts/probe-cli-compat.mjs --codex-only",
     "test:cli:installed": "node scripts/probe-cli-compat.mjs",
     "rekey": "node scripts/rekey.js",
     "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=src/**/*.js --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-functions=80",
     "check": "node scripts/check-syntax.mjs && node --test"
   },
   "engines": {

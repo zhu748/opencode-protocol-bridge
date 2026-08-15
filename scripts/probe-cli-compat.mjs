@@ -5,13 +5,16 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
+import { createCodexConfig } from '../public/codex-config.js';
 import { createOpenCodeConfig, SDK_BY_PROTOCOL } from '../public/opencode-config.js';
 import { OPENCODE_GO_MODEL_CAPABILITIES, OPENCODE_ZEN_MODEL_CAPABILITIES } from '../src/model-capabilities.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const PROBE_PREFIX = 'opencode-bridge-cli-probe-';
 const PROBE_MODEL = 'cli-probe';
+const CODEX_SOL_MODEL = 'gpt-5.6-sol';
 const PROBE_TEXT = 'CLI_PROTOCOL_PROBE';
+const PROBE_CUSTOM_TEXT = 'CUSTOM_EXEC_OK';
 const PROBE_REASONING = 'CLI_REASONING_PROBE';
 const PROBE_ENCRYPTED_REASONING = 'CLI_ENCRYPTED_REASONING_PROBE';
 const PROBE_CLAUDE_SIGNATURE = 'CLI_CLAUDE_SIGNATURE_PROBE';
@@ -44,7 +47,13 @@ assertCompleteCrossProtocolMatrix(OPENCODE_CROSS_MODELS);
 const BRIDGE_TOKEN = 'bridgeprobe123';
 const ADMIN_PASSWORD = 'bridgeprobe123';
 const UPSTREAM_KEY = 'upstreamprobe123';
-const COMMAND_TIMEOUT_MS = 45_000;
+const COMMAND_TIMEOUT_MS = Number(process.env.OPENCODE_BRIDGE_CLI_PROBE_TIMEOUT_MS || 45_000);
+if (!Number.isInteger(COMMAND_TIMEOUT_MS) || COMMAND_TIMEOUT_MS < 5_000 || COMMAND_TIMEOUT_MS > 300_000) {
+  throw new Error('OPENCODE_BRIDGE_CLI_PROBE_TIMEOUT_MS 必须是 5000–300000 的整数');
+}
+const CODEX_ONLY = process.argv.includes('--codex-only');
+const unknownArguments = process.argv.slice(2).filter((argument) => argument !== '--codex-only');
+if (unknownArguments.length) throw new Error(`未知 CLI 探针参数：${unknownArguments.join(', ')}`);
 
 function assertCompleteCrossProtocolMatrix(models) {
   const expected = new Set(CROSS_PROTOCOLS.flatMap((incoming) => (
@@ -67,6 +76,7 @@ let bridge;
 try {
   const directCaptures = [];
   let directCodexTurns = 0;
+  let directCodexSolTurns = 0;
   let directClaudeTurns = 0;
   const openCodeToolTurns = new Map();
   directServer = createServer(async (req, res) => {
@@ -85,10 +95,20 @@ try {
     const capturedBody = protocol === 'gemini'
       ? { ...body, model: decodeURIComponent(geminiMatch[1]), stream: geminiMatch[2] === 'streamGenerateContent' }
       : body;
-    directCaptures.push({ path: pathname, search: requestUrl.search, body: capturedBody });
-    if (pathname === '/v1/responses') return directCodexTurns++ === 0
-      ? responsesToolSse(res, body.model, 'shell_command', { command: 'Write-Output CLI_TOOL_PROBE' })
-      : responsesSse(res, body.model);
+    directCaptures.push({
+      path: pathname,
+      search: requestUrl.search,
+      authorized: req.headers.authorization === `Bearer ${BRIDGE_TOKEN}`,
+      body: capturedBody
+    });
+    if (pathname === '/v1/responses') {
+      if (body.model === CODEX_SOL_MODEL) return directCodexSolTurns++ === 0
+        ? responsesCustomToolSse(res, body.model, 'functions', 'exec', `text("${PROBE_CUSTOM_TEXT}")`)
+        : responsesSse(res, body.model);
+      return directCodexTurns++ === 0
+        ? responsesToolSse(res, body.model, 'shell_command', { command: 'Write-Output CLI_TOOL_PROBE' })
+        : responsesSse(res, body.model);
+    }
     if (pathname === '/v1/messages') return directClaudeTurns++ === 0
       ? claudeToolSse(res, body.model, 'Read', { file_path: join(ROOT, 'package.json') })
       : claudeSse(res, body.model);
@@ -119,23 +139,37 @@ try {
   const directPort = await listen(directServer);
   const directBase = `http://127.0.0.1:${directPort}`;
 
+  const codexVersionResult = await runCodexVersion();
+  if (codexVersionResult.code !== 0) throw new Error(`无法读取 Codex CLI 版本：${codexVersionResult.stderr || codexVersionResult.stdout}`);
+  const codexVersion = codexVersionResult.stdout.trim() || codexVersionResult.stderr.trim();
   const codexDirect = await runCodex(directBase, tempRoot);
-  const claudeDirect = await runClaude(directBase, tempRoot);
   assertCliSuccess('Codex CLI 原生 Responses 探针', codexDirect);
-  assertCliSuccess('Claude Code 原生 Messages 探针', claudeDirect);
+  const codexSolDirect = await runCodex(directBase, tempRoot, CODEX_SOL_MODEL);
+  assertCliSuccess(`Codex CLI ${CODEX_SOL_MODEL} 原生 namespaced custom 探针`, codexSolDirect);
+  if (!CODEX_ONLY) {
+    const claudeDirect = await runClaude(directBase, tempRoot);
+    assertCliSuccess('Claude Code 原生 Messages 探针', claudeDirect);
+  }
 
-  const codexCaptures = directCaptures.filter((entry) => entry.path === '/v1/responses');
+  const codexCaptures = directCaptures.filter((entry) => entry.path === '/v1/responses' && entry.body?.model === PROBE_MODEL);
+  const codexSolCaptures = directCaptures.filter((entry) => entry.path === '/v1/responses' && entry.body?.model === CODEX_SOL_MODEL);
   const claudeCaptures = directCaptures.filter((entry) => entry.path === '/v1/messages');
   const codexRequests = codexCaptures.map((entry) => entry.body);
   const claudeRequests = claudeCaptures.map((entry) => entry.body);
   const codexRequest = codexRequests[0];
   const claudeRequest = claudeRequests[0];
   if (!codexRequest) throw new Error('Codex CLI 未发送 /v1/responses 请求');
-  if (!claudeRequest) throw new Error('Claude Code 未发送 /v1/messages 请求');
   if (codexRequests.length < 2) throw new Error('Codex CLI 未在工具调用后发送第二轮 Responses 请求');
-  if (claudeRequests.length < 2) throw new Error('Claude Code 未在工具调用后发送第二轮 Messages 请求');
-  if (claudeCaptures.some((entry) => entry.search !== '?beta=true')) {
-    throw new Error(`Claude Code Messages 请求未使用 Beta SDK 路由：${JSON.stringify(claudeCaptures.map((entry) => entry.search))}`);
+  if (codexCaptures.some((entry) => !entry.authorized)) throw new Error('Codex CLI 未按 config.toml env_key 发送 Bearer 访问令牌');
+  if (!Array.isArray(codexRequest.tools) || !codexRequest.tools.some((tool) => tool?.type === 'web_search' && tool.external_web_access === false)) {
+    throw new Error('Codex CLI 请求未携带预期的 cached-only web_search 契约');
+  }
+  if (!CODEX_ONLY) {
+    if (!claudeRequest) throw new Error('Claude Code 未发送 /v1/messages 请求');
+    if (claudeRequests.length < 2) throw new Error('Claude Code 未在工具调用后发送第二轮 Messages 请求');
+    if (claudeCaptures.some((entry) => entry.search !== '?beta=true')) {
+      throw new Error(`Claude Code Messages 请求未使用 Beta SDK 路由：${JSON.stringify(claudeCaptures.map((entry) => entry.search))}`);
+    }
   }
   const replayedCodexCall = (Array.isArray(codexRequests[1].input) ? codexRequests[1].input : [])
     .find((item) => item?.type === 'function_call');
@@ -148,12 +182,15 @@ try {
   if (replayedCodexOutput?.call_id !== 'call_probe') {
     throw new Error(`Codex CLI 第二轮 function_call_output 未关联原调用：${JSON.stringify(replayedCodexOutput)}`);
   }
+  assertCodexSolRoundTrip(codexSolCaptures, 'Codex CLI 原生 Responses');
 
-  for (const [protocol, model] of Object.entries(OPENCODE_NATIVE_MODELS)) {
-    const result = await runOpenCode(directBase, tempRoot, model);
-    assertCliSuccess(`OpenCode ${protocol} 原生路由探针`, result);
-  }
-  const openCodeNativeRoutes = Object.fromEntries(Object.entries(OPENCODE_NATIVE_MODELS).map(([protocol, model]) => {
+  let openCodeNativeRoutes = {};
+  if (!CODEX_ONLY) {
+    for (const [protocol, model] of Object.entries(OPENCODE_NATIVE_MODELS)) {
+      const result = await runOpenCode(directBase, tempRoot, model);
+      assertCliSuccess(`OpenCode ${protocol} 原生路由探针`, result);
+    }
+    openCodeNativeRoutes = Object.fromEntries(Object.entries(OPENCODE_NATIVE_MODELS).map(([protocol, model]) => {
     const captures = directCaptures.filter((entry) => entry.body?.model === model);
     const agentCaptures = captures.filter((entry) => Array.isArray(entry.body?.tools) && entry.body.tools.length > 0);
     const capture = agentCaptures[0] || captures.at(-1);
@@ -206,19 +243,21 @@ try {
   if (!hasGeminiThoughtSignature(geminiAgentCaptures[1].body, PROBE_GEMINI_SIGNATURE)) {
     throw new Error('OpenCode Gemini 第二轮请求未原样回传 thoughtSignature');
   }
-  openCodeNativeRoutes.gemini = {
-    model: OPENCODE_NATIVE_GEMINI_MODEL,
-    path: expectedGeminiPath,
-    stream: true,
-    requestCount: geminiCaptures.length,
-    agentRequestCount: geminiAgentCaptures.length,
-    toolResultRoundTrip: true,
-    reasoningRoundTrip: true,
-    tools: { count: geminiToolNames(geminiAgentCaptures[0].body).length, names: geminiToolNames(geminiAgentCaptures[0].body) }
-  };
+    openCodeNativeRoutes.gemini = {
+      model: OPENCODE_NATIVE_GEMINI_MODEL,
+      path: expectedGeminiPath,
+      stream: true,
+      requestCount: geminiCaptures.length,
+      agentRequestCount: geminiAgentCaptures.length,
+      toolResultRoundTrip: true,
+      reasoningRoundTrip: true,
+      tools: { count: geminiToolNames(geminiAgentCaptures[0].body).length, names: geminiToolNames(geminiAgentCaptures[0].body) }
+    };
+  }
 
   const upstreamCaptures = [];
   let bridgeCodexTurns = 0;
+  const bridgeCodexSolTurns = new Map();
   let bridgeClaudeTurns = 0;
   const crossToolTurns = new Map();
   upstreamServer = createServer(async (req, res) => {
@@ -235,7 +274,11 @@ try {
     const capturedBody = protocol === 'gemini'
       ? { ...body, model: decodeURIComponent(geminiMatch[1]), stream: geminiMatch[2] === 'streamGenerateContent' }
       : body;
-    upstreamCaptures.push({ path: `${requestUrl.pathname}${requestUrl.search}`, body: capturedBody });
+    upstreamCaptures.push({
+      path: `${requestUrl.pathname}${requestUrl.search}`,
+      authorized: req.headers.authorization === `Bearer ${UPSTREAM_KEY}`,
+      body: capturedBody
+    });
     const cross = Object.values(OPENCODE_CROSS_MODELS).find((item) => item.model === capturedBody.model);
     const toolNames = summarizeRequestTools(body, protocol).names;
     if (cross && toolNames.includes('read')) {
@@ -247,6 +290,17 @@ try {
         if (protocol === 'claude') return claudeToolSse(res, capturedBody.model, 'read', input, { opaqueReasoning: true });
         if (protocol === 'gemini') return geminiToolSse(res, capturedBody.model, 'read', input);
         return chatToolSse(res, capturedBody.model, 'read', input);
+      }
+    }
+    const customExecName = toolNames.find((name) => /(?:^|__)exec(?:__|$)/.test(name));
+    if (customExecName) {
+      const turn = bridgeCodexSolTurns.get(protocol) || 0;
+      bridgeCodexSolTurns.set(protocol, turn + 1);
+      if (turn === 0) {
+        const input = { input: `text("${PROBE_CUSTOM_TEXT}")` };
+        if (protocol === 'claude') return claudeToolSse(res, body.model, customExecName, input);
+        if (protocol === 'gemini') return geminiToolSse(res, body.model, customExecName, input);
+        return chatToolSse(res, body.model, customExecName, input);
       }
     }
     if (protocol === 'chat' && toolNames.includes('shell_command') && bridgeCodexTurns++ === 0) {
@@ -271,30 +325,71 @@ try {
   });
   children.add(bridge);
   await waitForBridge(bridge, bridgePort);
-  await configureBridge(bridgePort);
+  const bridgeSession = await configureBridge(bridgePort);
 
   const bridgeBase = `http://127.0.0.1:${bridgePort}`;
   const codexBridge = await runCodex(bridgeBase, tempRoot);
-  const claudeBridge = await runClaude(bridgeBase, tempRoot);
   assertCliSuccess('Codex CLI → Bridge → Chat 探针', codexBridge);
-  assertCliSuccess('Claude Code → Bridge → Chat 探针', claudeBridge);
-  if (upstreamCaptures.length !== 4) throw new Error(`预期收到 4 个 Chat 上游请求，实际 ${upstreamCaptures.length} 个`);
-  const bridgeChatRequests = upstreamCaptures.map((entry) => summarizeChatRequest(entry.body));
-  const bridgeClaudeRequests = upstreamCaptures.filter((entry) => summarizeRequestTools(entry.body, 'chat').names.includes('Read'));
-  if (bridgeClaudeRequests.length !== 2 || bridgeClaudeRequests.some((entry) => (
-    entry.body.model !== BRIDGE_CHAT_MODEL || entry.body.reasoning_effort !== 'max'
+  const codexSolBridge = await runCodex(bridgeBase, tempRoot, CODEX_SOL_MODEL);
+  assertCliSuccess(`Codex CLI ${CODEX_SOL_MODEL} → Bridge → Chat namespaced custom 探针`, codexSolBridge);
+  await setSolBridgeProtocol(bridgePort, bridgeSession, 'claude');
+  const codexSolClaude = await runCodex(bridgeBase, tempRoot, CODEX_SOL_MODEL);
+  assertCliSuccess(`Codex CLI ${CODEX_SOL_MODEL} → Bridge → Claude namespaced custom 探针`, codexSolClaude);
+  await setSolBridgeProtocol(bridgePort, bridgeSession, 'gemini');
+  const codexSolGemini = await runCodex(bridgeBase, tempRoot, CODEX_SOL_MODEL);
+  assertCliSuccess(`Codex CLI ${CODEX_SOL_MODEL} → Bridge → Gemini namespaced custom 探针`, codexSolGemini);
+  if (!CODEX_ONLY) {
+    const claudeBridge = await runClaude(bridgeBase, tempRoot);
+    assertCliSuccess('Claude Code → Bridge → Chat 探针', claudeBridge);
+  }
+  const expectedBridgeRequests = CODEX_ONLY ? 8 : 10;
+  if (upstreamCaptures.length !== expectedBridgeRequests) throw new Error(`预期收到 ${expectedBridgeRequests} 个 Bridge 上游请求，实际 ${upstreamCaptures.length} 个`);
+  if (upstreamCaptures.some((entry) => !entry.authorized)) throw new Error('Bridge 未使用已配置的上游 Bearer Key');
+  const bridgeChatCaptures = upstreamCaptures.filter((entry) => entry.path === '/chat/completions');
+  const bridgeChatRequests = bridgeChatCaptures.map((entry) => summarizeChatRequest(entry.body));
+  const bridgeCodexRequests = bridgeChatCaptures.filter((entry) => summarizeRequestTools(entry.body, 'chat').names.includes('shell_command'));
+  if (bridgeCodexRequests.length !== 2 || bridgeCodexRequests.some((entry) => summarizeRequestTools(entry.body, 'chat').names.includes('web_search'))) {
+    throw new Error(`Codex cached-only web_search 未安全降级或工具续轮不完整：${JSON.stringify(bridgeCodexRequests.map((entry) => summarizeRequestTools(entry.body, 'chat')))}`);
+  }
+  const bridgeCodexSolRequests = bridgeChatCaptures.filter((entry) => summarizeRequestTools(entry.body, 'chat').names.some((name) => /(?:^|__)exec(?:__|$)/.test(name)));
+  if (bridgeCodexSolRequests.length !== 2 || !bridgeCodexSolRequests[1].body.messages?.some((message) => (
+    message?.role === 'tool' && typeof message.content === 'string'
+      && message.content.includes(PROBE_CUSTOM_TEXT) && !message.content.includes('"type":"input_text"')
   ))) {
+    throw new Error(`Codex ${CODEX_SOL_MODEL} namespaced custom 调用/数组输出未完整转为 Chat：${JSON.stringify(bridgeCodexSolRequests.map((entry) => summarizeChatRequest(entry.body)))}`);
+  }
+  const bridgeCodexSolClaudeRequests = upstreamCaptures.filter((entry) => entry.path === '/messages'
+    && summarizeRequestTools(entry.body, 'claude').names.some((name) => /(?:^|__)exec(?:__|$)/.test(name)));
+  const claudeToolResult = bridgeCodexSolClaudeRequests[1]?.body.messages?.flatMap((message) => Array.isArray(message?.content) ? message.content : [])
+    .find((part) => part?.type === 'tool_result');
+  if (bridgeCodexSolClaudeRequests.length !== 2 || !Array.isArray(claudeToolResult?.content)
+    || claudeToolResult.content.some((part) => part?.type === 'input_text')
+    || !claudeToolResult.content.some((part) => part?.type === 'text' && String(part.text).includes(PROBE_CUSTOM_TEXT))) {
+    throw new Error(`Codex ${CODEX_SOL_MODEL} custom 数组输出未合法转为 Claude tool_result：${JSON.stringify(claudeToolResult)}`);
+  }
+  const expectedGeminiSolPath = `/models/${BRIDGE_CHAT_MODEL}:streamGenerateContent?alt=sse`;
+  const bridgeCodexSolGeminiRequests = upstreamCaptures.filter((entry) => entry.path === expectedGeminiSolPath
+    && summarizeRequestTools(entry.body, 'gemini').names.some((name) => /(?:^|__)exec(?:__|$)/.test(name)));
+  if (bridgeCodexSolGeminiRequests.length !== 2 || !JSON.stringify(bridgeCodexSolGeminiRequests[1].body.contents).includes(PROBE_CUSTOM_TEXT)) {
+    throw new Error(`Codex ${CODEX_SOL_MODEL} custom 数组输出未合法转为 Gemini functionResponse`);
+  }
+  const bridgeClaudeRequests = upstreamCaptures.filter((entry) => summarizeRequestTools(entry.body, 'chat').names.includes('Read'));
+  if (!CODEX_ONLY && (bridgeClaudeRequests.length !== 2 || bridgeClaudeRequests.some((entry) => (
+    entry.body.model !== BRIDGE_CHAT_MODEL || entry.body.reasoning_effort !== 'max'
+  )))) {
     throw new Error(`Claude Code max 思考强度未完整传给 ${BRIDGE_CHAT_MODEL}：${JSON.stringify(bridgeClaudeRequests.map((entry) => summarizeChatRequest(entry.body)))}`);
   }
 
-  const crossConfig = createOpenCodeCrossConfig(bridgeBase);
-  const crossCliResults = new Map();
-  for (const item of Object.values(OPENCODE_CROSS_MODELS)) {
-    const result = await runOpenCode(bridgeBase, tempRoot, item.model, { config: crossConfig, providerID: 'bridge-cross' });
-    crossCliResults.set(item.model, result);
-    assertCliSuccess(`OpenCode ${item.incoming} → Bridge → ${item.target} 探针`, result);
-  }
-  const openCodeBridgeConversions = Object.fromEntries(Object.entries(OPENCODE_CROSS_MODELS).map(([name, item]) => {
+  let openCodeBridgeConversions = {};
+  if (!CODEX_ONLY) {
+    const crossConfig = createOpenCodeCrossConfig(bridgeBase);
+    const crossCliResults = new Map();
+    for (const item of Object.values(OPENCODE_CROSS_MODELS)) {
+      const result = await runOpenCode(bridgeBase, tempRoot, item.model, { config: crossConfig, providerID: 'bridge-cross' });
+      crossCliResults.set(item.model, result);
+      assertCliSuccess(`OpenCode ${item.incoming} → Bridge → ${item.target} 探针`, result);
+    }
+    openCodeBridgeConversions = Object.fromEntries(Object.entries(OPENCODE_CROSS_MODELS).map(([name, item]) => {
     const captures = upstreamCaptures.filter((entry) => entry.body?.model === item.model);
     const agentCaptures = captures.filter((entry) => Array.isArray(entry.body?.tools) && entry.body.tools.length > 0);
     const expectedPath = item.target === 'responses' ? '/responses'
@@ -338,15 +433,28 @@ try {
       reasoning: summarizeTargetReasoning(representative.body, item.target),
       tools: summarizeRequestTools(agentCaptures[0].body, item.target)
     }];
-  }));
+    }));
+  }
 
   const report = {
+    codexVersion,
+    codexConfig: { strict: true, userLevel: true, authorization: 'bearer' },
     codex: summarizeResponsesRequest(codexRequest),
     codexContinuation: summarizeResponsesRequest(codexRequests[1]),
-    claudeCode: { endpointQuery: claudeCaptures[0].search, ...summarizeClaudeRequest(claudeRequest) },
-    claudeCodeContinuation: { endpointQuery: claudeCaptures[1].search, ...summarizeClaudeRequest(claudeRequests[1]) },
-    openCodeNativeRoutes,
-    openCodeBridgeConversions,
+    codexSol: summarizeResponsesRequest(codexSolCaptures[0].body),
+    codexSolContinuation: summarizeResponsesRequest(codexSolCaptures[1].body),
+    codexSolBridgeTargets: {
+      chat: { path: '/chat/completions', requestCount: bridgeCodexSolRequests.length, customOutputRoundTrip: true },
+      claude: { path: '/messages', requestCount: bridgeCodexSolClaudeRequests.length, customOutputRoundTrip: true },
+      gemini: { path: expectedGeminiSolPath, requestCount: bridgeCodexSolGeminiRequests.length, customOutputRoundTrip: true }
+    },
+    cachedOnlyWebSearchSafelyDegraded: true,
+    ...(!CODEX_ONLY ? {
+      claudeCode: { endpointQuery: claudeCaptures[0].search, ...summarizeClaudeRequest(claudeRequest) },
+      claudeCodeContinuation: { endpointQuery: claudeCaptures[1].search, ...summarizeClaudeRequest(claudeRequests[1]) },
+      openCodeNativeRoutes,
+      openCodeBridgeConversions
+    } : {}),
     bridgeChatRequests
   };
   process.stdout.write(`真实 CLI 隔离探针通过\n${JSON.stringify(report, null, 2)}\n`);
@@ -376,10 +484,7 @@ try {
 }
 
 function bridgeEnvironment(source, { bridgePort, upstreamPort, configFile, logFile }) {
-  const env = { ...source };
-  for (const key of Object.keys(env)) {
-    if (/^OPENCODE_(?:ZEN|GO)_(?:KEYS?|KEY_\d+|PROXY_URLS?|PROXY_URL_\d+)$/i.test(key)) delete env[key];
-  }
+  const env = cleanProbeEnvironment(source);
   return {
     ...env,
     HOST: '127.0.0.1',
@@ -392,6 +497,45 @@ function bridgeEnvironment(source, { bridgePort, upstreamPort, configFile, logFi
     OPENCODE_BRIDGE_IMAGE_HANDOFF: 'false',
     OPENCODE_BRIDGE_KEEP_ALIVE_URL: ''
   };
+}
+
+function assertCodexSolRoundTrip(captures, label) {
+  if (captures.length < 2) throw new Error(`${label} 未完成 namespaced custom 工具两轮请求`);
+  if (captures.some((entry) => !entry.authorized)) throw new Error(`${label} 未使用 Bearer 访问令牌`);
+  const first = captures[0].body;
+  const continuation = captures[1].body;
+  const additional = (Array.isArray(first.input) ? first.input : []).find((item) => item?.type === 'additional_tools');
+  const namespace = (Array.isArray(additional?.tools) ? additional.tools : []).find((tool) => tool?.type === 'namespace' && tool.name === 'functions');
+  const custom = (Array.isArray(namespace?.tools) ? namespace.tools : []).find((tool) => tool?.type === 'custom' && tool.name === 'exec');
+  if (additional?.role !== 'developer' || !custom || custom.format?.type !== 'grammar') {
+    throw new Error(`${label} 未发送 ${CODEX_SOL_MODEL} 的 additional_tools → functions.exec custom grammar 契约`);
+  }
+  if (!['low', 'medium', 'high'].includes(first.text?.verbosity) || first.parallel_tool_calls !== false) {
+    throw new Error(`${label} 未发送 ${CODEX_SOL_MODEL} 的 verbosity/parallel_tool_calls 契约`);
+  }
+  const history = Array.isArray(continuation.input) ? continuation.input : [];
+  const call = history.find((item) => item?.type === 'custom_tool_call' && item.call_id === 'call_probe_sol');
+  const output = history.find((item) => item?.type === 'custom_tool_call_output' && item.call_id === 'call_probe_sol');
+  if (call?.namespace !== 'functions' || call?.name !== 'exec' || call?.input !== `text("${PROBE_CUSTOM_TEXT}")`) {
+    throw new Error(`${label} 未原样回传 namespaced custom_tool_call：${JSON.stringify(call)}`);
+  }
+  if (!Array.isArray(output?.output) || !output.output.some((part) => part?.type === 'input_text' && String(part.text).includes(PROBE_CUSTOM_TEXT))) {
+    throw new Error(`${label} 未回传真实 Codex custom_tool_call_output 数组：${JSON.stringify(output)}`);
+  }
+}
+
+function cleanProbeEnvironment(source) {
+  const env = { ...source };
+  const exact = new Set([
+    'CONFIG_ENCRYPTION_KEY', 'CONFIG_FILE', 'LOG_FILE', 'STATS_FILE',
+    'OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
+    'GOOGLE_API_KEY', 'GEMINI_API_KEY', 'OPENCODE_CONFIG', 'OPENCODE_CONFIG_CONTENT',
+    'NODE_TEST_CONTEXT'
+  ]);
+  for (const key of Object.keys(env)) {
+    if (/^OPENCODE_(?:BRIDGE|ZEN|GO)_/i.test(key) || exact.has(key.toUpperCase())) delete env[key];
+  }
+  return env;
 }
 
 async function configureBridge(port) {
@@ -407,6 +551,7 @@ async function configureBridge(port) {
       requestLogLimit: 10, persistLogs: false, upstreamTimeoutMs: 10_000, maxConcurrentRequests: 4,
       modelRoutes: {
         [PROBE_MODEL]: { provider: 'zen', protocol: 'chat', upstreamModel: BRIDGE_CHAT_MODEL },
+        [CODEX_SOL_MODEL]: { provider: 'zen', protocol: 'chat', upstreamModel: BRIDGE_CHAT_MODEL },
         ...Object.fromEntries(Object.values(OPENCODE_CROSS_MODELS).map((item) => [item.model, {
           provider: 'zen', protocol: item.target, upstreamModel: item.model
         }]))
@@ -415,25 +560,46 @@ async function configureBridge(port) {
     })
   });
   if (!saved.ok) throw new Error(`Bridge 配置失败：HTTP ${saved.status} ${(await saved.text()).slice(0, 200)}`);
+  return { cookie, config: await saved.json() };
 }
 
-async function runCodex(baseUrl, parentTemp) {
+async function setSolBridgeProtocol(port, session, protocol) {
+  const next = {
+    defaultProvider: session.config.defaultProvider,
+    modelRoutes: {
+      ...(session.config.modelRoutes || {}),
+      [CODEX_SOL_MODEL]: { provider: 'zen', protocol, upstreamModel: BRIDGE_CHAT_MODEL }
+    }
+  };
+  const response = await fetch(`http://127.0.0.1:${port}/api/config`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', cookie: session.cookie },
+    body: JSON.stringify(next)
+  });
+  if (!response.ok) throw new Error(`切换 Sol ${protocol} 路由失败：HTTP ${response.status} ${(await response.text()).slice(0, 200)}`);
+  session.config = await response.json();
+}
+
+async function runCodex(baseUrl, parentTemp, model = PROBE_MODEL) {
   const home = join(parentTemp, `codex-${Math.random().toString(16).slice(2)}`);
   const workspace = join(parentTemp, 'workspace');
   await Promise.all([mkdir(home, { recursive: true }), mkdir(workspace, { recursive: true })]);
+  const config = createCodexConfig(baseUrl, {
+    provider: 'zen', model, providerId: 'bridge_probe', providerName: 'Bridge Probe',
+    endpointPath: '/v1', envKey: 'BRIDGE_PROBE_API_KEY', upstreamStreamIdleTimeoutMs: 10_000
+  });
+  await writeFile(join(home, 'config.toml'), `${config}\n`, 'utf8');
   return runCommand(codexCommand(), [
-    'exec', '--ignore-user-config', '--ephemeral', '--skip-git-repo-check', '--color', 'never',
+    'exec', '--strict-config', '--ephemeral', '--skip-git-repo-check', '--color', 'never',
     '--disable', 'plugins', '--disable', 'remote_plugin', '--disable', 'plugin_sharing', '--disable', 'apps',
-    '--sandbox', 'read-only', '--cd', workspace, '--model', PROBE_MODEL,
+    '--sandbox', 'read-only', '--cd', workspace,
     '-c', 'approval_policy="never"',
-    '-c', 'model_provider="bridge_probe"',
-    '-c', 'model_providers.bridge_probe.name="Bridge Probe"',
-    '-c', `model_providers.bridge_probe.base_url="${baseUrl}/v1"`,
-    '-c', 'model_providers.bridge_probe.env_key="BRIDGE_PROBE_API_KEY"',
-    '-c', 'model_providers.bridge_probe.wire_api="responses"',
-    '-c', 'model_providers.bridge_probe.requires_openai_auth=false',
     PROBE_TEXT
-  ], { ...process.env, CODEX_HOME: home, BRIDGE_PROBE_API_KEY: BRIDGE_TOKEN });
+  ], { ...cleanProbeEnvironment(process.env), CODEX_HOME: home, BRIDGE_PROBE_API_KEY: BRIDGE_TOKEN });
+}
+
+function runCodexVersion() {
+  return runCommand(codexCommand(), ['--version'], cleanProbeEnvironment(process.env));
 }
 
 function codexCommand() {
@@ -449,7 +615,7 @@ async function runClaude(baseUrl, parentTemp) {
     '--print', '--bare', '--no-session-persistence', '--output-format', 'json', '--model', PROBE_MODEL,
     '--system-prompt', 'You are a protocol compatibility probe.', PROBE_TEXT
   ], {
-    ...process.env,
+    ...cleanProbeEnvironment(process.env),
     HOME: home,
     USERPROFILE: home,
     ANTHROPIC_BASE_URL: baseUrl,
@@ -473,7 +639,7 @@ async function runOpenCode(baseUrl, parentTemp, model, { config: suppliedConfig,
     'run', '--pure', '--format', 'json', '--model', `${providerID}/${model}`, '--agent', 'build',
     '--dangerously-skip-permissions', '--dir', workspace, OPENCODE_TOOL_PROMPT
   ], {
-    ...process.env,
+    ...cleanProbeEnvironment(process.env),
     HOME: home,
     USERPROFILE: home,
     XDG_CONFIG_HOME: join(home, 'config'),
@@ -606,6 +772,27 @@ function responsesToolSse(res, model, name, args, { opaqueReasoning = false } = 
     ['response.completed', { type: 'response.completed', response }]
   );
   eventStream(res, events);
+}
+
+function responsesCustomToolSse(res, model, namespace, name, input) {
+  const item = {
+    id: 'ctc_probe_sol', type: 'custom_tool_call', status: 'completed', call_id: 'call_probe_sol',
+    namespace, name, input
+  };
+  const response = {
+    id: 'resp_probe_sol_tool', object: 'response', created_at: Math.floor(Date.now() / 1000),
+    status: 'completed', model, output: [item], parallel_tool_calls: false, tool_choice: 'auto', tools: [],
+    usage: { input_tokens: 1, input_tokens_details: { cached_tokens: 0 }, output_tokens: 1, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 2 }
+  };
+  eventStream(res, [
+    ['response.created', { type: 'response.created', response: { ...response, status: 'in_progress', output: [], usage: null } }],
+    ['response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { ...item, status: 'in_progress', input: '' } }],
+    ['response.custom_tool_call_input.done', {
+      type: 'response.custom_tool_call_input.done', item_id: item.id, output_index: 0, input
+    }],
+    ['response.output_item.done', { type: 'response.output_item.done', output_index: 0, item }],
+    ['response.completed', { type: 'response.completed', response }]
+  ]);
 }
 
 function claudeSse(res, model) {

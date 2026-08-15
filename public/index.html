@@ -5,9 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenCode Bridge</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2228%22 fill=%22%2338f8ac%22/><text x=%2250%25%22 y=%2255%25%22 dominant-baseline=%22central%22 text-anchor=%22middle%22 font-family=%22monospace%22 font-weight=%22900%22 font-size=%2245%22 fill=%22%23080a0d%22>OC</text></svg>">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400..800;1,400..800&family=Plus+Jakarta+Sans:ital,wght@0,400..800;1,400..800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/settings.css">
 </head>
@@ -40,10 +37,10 @@
         <button data-view="logs"><i>≡</i>请求记录</button>
         <button data-view="guide"><i>?</i>接入指南</button>
       </nav>
-      <div class="side-foot"><span class="dot"></span><div><strong>服务在线</strong><small>OpenCode Zen / Go</small></div><button id="logout" class="side-logout" title="退出登录">↪</button></div>
+      <div class="side-foot"><span class="dot"></span><div><strong>服务在线</strong><small>OpenCode Zen / Go</small></div><button id="logout" class="side-logout" title="退出登录" aria-label="退出登录">↪</button></div>
     </aside>
     <main>
-      <header><div><p class="eyebrow">CONTROL CENTER</p><h2 id="page-title">运行概览</h2></div><div class="header-actions"><span id="config-draft-status" class="config-draft-status hidden" role="status" aria-live="polite" aria-atomic="true"></span><button id="refresh" class="icon-btn" title="刷新">↻</button></div></header>
+      <header><div><p class="eyebrow">CONTROL CENTER</p><h2 id="page-title">运行概览</h2></div><div class="header-actions"><span id="config-draft-status" class="config-draft-status hidden" role="status" aria-live="polite" aria-atomic="true"></span><button id="refresh" class="icon-btn" title="刷新" aria-label="刷新控制台数据">↻</button></div></header>
       <div id="data-source-warning" class="data-source-warning hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 
       <section id="overview" class="view active">
@@ -86,7 +83,7 @@
           </section>
           <label>日志保留条数<input id="requestLogLimit" type="number" min="10" max="1000"></label>
           <label class="check-field"><input id="persistLogs" type="checkbox"><span>持久化请求日志<small>仅保存请求元数据，不保存提示词和响应正文</small></span></label>
-          <label>统计保留天数<input id="statsRetentionDays" type="number" min="1" max="365" value="7" required><small>默认 7 天；独立于日志条数，过期统计会自动删除</small></label>
+          <label>统计保留天数<input id="statsRetentionDays" type="number" min="1" max="365" value="7" required><small>默认 7 天；独立于日志条数，过期统计会自动删除，容量不足时优先保留最新记录</small></label>
           <label class="check-field"><input id="forceMaximumReasoningEffort" type="checkbox" checked><span>始终使用模型最高思考强度<small>默认开启；Claude、Responses、Chat、Gemini 的普通推理请求都会忽略客户端强度，并按最终上游模型发送其支持的最高档。会增加延迟与 Token 消耗。</small></span></label>
           <label class="check-field"><input id="bridgeWebSearchEnabled" type="checkbox"><span>为 Claude Code / Codex 启用本地 Web Search<small>当 Chat 上游收到 Claude typed Web Search、Claude Code 内置 WebSearch 或 Codex Responses web_search 时，桥接会通过 Exa 或 Parallel MCP 完成搜索并回填结果；搜索关键词会发送到选中的搜索服务。</small></span></label>
           <label>本地 Web Search 提供方<select id="bridgeWebSearchProvider"><option value="auto">自动（Exa 优先，失败回退 Parallel）</option><option value="exa">仅 Exa</option><option value="parallel">仅 Parallel</option></select><small>自动模式兼顾 OpenCode 的双后端能力与稳定性；域名过滤和国家定位会固定使用 Exa Advanced。</small></label>
@@ -242,10 +239,11 @@
           <article class="panel"><div class="panel-head"><div><span class="tag green">OPENAI</span><h3>Responses API</h3></div><button class="ghost copy-code" data-target="#responses-example" type="button">复制代码</button></div><code>POST /zen/v1/responses</code><pre id="responses-example"></pre></article>
           <article class="panel"><div class="panel-head"><div><span class="tag orange">COMPATIBLE</span><h3>Chat Completions</h3></div><button class="ghost copy-code" data-target="#chat-example" type="button">复制代码</button></div><code>POST /go/v1/chat/completions</code><pre id="chat-example"></pre></article>
           <article class="panel"><div class="panel-head"><div><span class="tag purple">GOOGLE</span><h3>Gemini GenerateContent</h3></div><button class="ghost copy-code" data-target="#gemini-example" type="button">复制代码</button></div><code>POST /v1beta/models/{model}:generateContent</code><pre id="gemini-example"></pre></article>
+          <article class="panel"><div class="panel-head"><div><span class="tag green">CODEX</span><h3>用户级 config.toml</h3></div><span class="client-actions"><button class="ghost copy-code" data-target="#codex-env-example" type="button">复制令牌命令</button><button class="ghost copy-code" data-target="#codex-example" type="button">复制配置</button></span></div><code>保存到 ~/.codex/config.toml，不要放在项目 .codex 目录</code><pre id="codex-example"></pre><code>PowerShell 当前会话</code><pre id="codex-env-example"></pre></article>
           <article class="panel"><div class="panel-head"><div><span class="tag green">OPENCODE</span><h3>opencode.json</h3></div><button class="ghost copy-code" data-target="#opencode-example" type="button">复制代码</button></div><code>按模型直连 Responses / Claude / Chat / Gemini</code><pre id="opencode-example"></pre></article>
         </div>
       </section>
-      <div id="toast"></div>
+      <div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
     </main>
   </div>
   <script type="module" src="/app.js"></script>

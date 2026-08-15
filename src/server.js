@@ -3,9 +3,10 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { hashPassword, verifyPassword, createSession, verifySession, loginAllowed, recordLogin, cookieValue, hashClientToken, clientAddress } from './auth.js';
 import { loadConfig, saveConfig, updateConfig, publicConfig, configRevision, normalizeImageHandoffModels, normalizeModelRoutes, ROOT } from './config.js';
-import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiToolNameAliases, hasGeminiGoogleSearch, hasHostedResponsesWebSearch, responsesToolAdaptations, claudeToolAdaptations, geminiToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations, hasUsageData, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, withMaximumReasoningEffort } from './adapters.js';
+import { detectProtocol, upstreamProtocol, prepareUpstreamRequest, normalizeResponse, formatResponse, geminiToolNameAliases, hasGeminiGoogleSearch, hasHostedResponsesWebSearch, mergeResponsesTools, responsesToolAdaptations, claudeToolAdaptations, geminiToolAdaptations, crossProtocolToolAdaptations, claudeCacheAdaptations, responsesCacheAdaptations, chatCacheAdaptations, inputRequestDegradations, hasUsageData, reasoningRequestAdaptations, requestReasoningEffort, codexRequestKind, contextRequestAdaptations, responseMetadataDegradations, serviceRequestAdaptations, generationRequestAdaptations, withMaximumReasoningEffort } from './adapters.js';
 import { callUpstream, closeDirectUpstreamDispatcher, discardUpstreamResponse, isUpstreamConnectionError, listModels, MAX_MODEL_LIST_BYTES, MAX_UPSTREAM_ERROR_BYTES, readResponseJsonPayload, readResponseText, upstreamConnectionFailure, withStreamIdleTimeout } from './upstream.js';
 import { closeProxyDispatchers, normalizeProxyUrl, providerProxyUrl, singBoxRuntimeStatus } from './proxy.js';
 import { KeepAliveService, normalizeKeepAliveUrl, resolveKeepAliveConfig } from './keep-alive.js';
@@ -29,6 +30,10 @@ import { clientAbortController, clientAbortSignal } from './request-abort.js';
 import { assertJsonComplexity } from './json-complexity.js';
 import { SharedOperationPool } from './shared-operation.js';
 import { DeferredToolContextStore } from './deferred-tool-context-store.js';
+import { applySecurityResponseHeaders, healthEndpointKind, healthResponse } from './http-policy.js';
+import { RequestBodyBudget, RequestBodyBudgetError } from './request-body-budget.js';
+
+const RUNNING_AS_MAIN = Boolean(process.argv[1]) && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
@@ -45,6 +50,12 @@ const STREAM_WRITE_TIMEOUT_MS = Number(process.env.OPENCODE_BRIDGE_STREAM_WRITE_
 if (!Number.isInteger(STREAM_WRITE_TIMEOUT_MS) || STREAM_WRITE_TIMEOUT_MS < 100 || STREAM_WRITE_TIMEOUT_MS > 300_000) throw new Error('OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS 必须是 100–300000 之间的整数');
 const SSE_HEARTBEAT_MS = Number(process.env.OPENCODE_BRIDGE_SSE_HEARTBEAT_MS || 15_000);
 if (!Number.isInteger(SSE_HEARTBEAT_MS) || (SSE_HEARTBEAT_MS !== 0 && (SSE_HEARTBEAT_MS < 1_000 || SSE_HEARTBEAT_MS > 60_000))) throw new Error('OPENCODE_BRIDGE_SSE_HEARTBEAT_MS 必须是 0 或 1000–60000 之间的整数');
+const STATS_MAX_BYTES = Number(process.env.OPENCODE_BRIDGE_STATS_MAX_BYTES || 64 * 1024 * 1024);
+if (!Number.isInteger(STATS_MAX_BYTES) || STATS_MAX_BYTES < 1024 * 1024 || STATS_MAX_BYTES > 128 * 1024 * 1024) throw new Error('OPENCODE_BRIDGE_STATS_MAX_BYTES 必须是 1048576–134217728 之间的整数');
+const MAX_INFLIGHT_REQUEST_BODY_BYTES = Number(process.env.OPENCODE_BRIDGE_MAX_INFLIGHT_REQUEST_BODY_BYTES || 64 * 1024 * 1024);
+if (!Number.isInteger(MAX_INFLIGHT_REQUEST_BODY_BYTES) || MAX_INFLIGHT_REQUEST_BODY_BYTES < 10 * 1024 * 1024 || MAX_INFLIGHT_REQUEST_BODY_BYTES > 1024 * 1024 * 1024) throw new Error('OPENCODE_BRIDGE_MAX_INFLIGHT_REQUEST_BODY_BYTES 必须是 10485760–1073741824 之间的整数');
+const MAX_CLIENT_INFLIGHT_REQUEST_BODY_BYTES = Number(process.env.OPENCODE_BRIDGE_MAX_CLIENT_INFLIGHT_REQUEST_BODY_BYTES || 20 * 1024 * 1024);
+if (!Number.isInteger(MAX_CLIENT_INFLIGHT_REQUEST_BODY_BYTES) || MAX_CLIENT_INFLIGHT_REQUEST_BODY_BYTES < 10 * 1024 * 1024 || MAX_CLIENT_INFLIGHT_REQUEST_BODY_BYTES > 1024 * 1024 * 1024) throw new Error('OPENCODE_BRIDGE_MAX_CLIENT_INFLIGHT_REQUEST_BODY_BYTES 必须是 10485760–1073741824 之间的整数');
 const MAX_HTTP_HEADER_BYTES = 16 * 1024;
 const MAX_HTTP_HEADERS = 128;
 const MAX_REQUESTS_PER_SOCKET = 1000;
@@ -66,7 +77,11 @@ const JSON_DECODER = new TextDecoder('utf-8', { fatal: true });
 const PUBLIC = join(ROOT, 'public');
 const PUBLIC_ROOT = await canonicalStaticRoot(PUBLIC);
 const requestLogs = new RequestLogStore(process.env.LOG_FILE || resolve(ROOT, 'data', 'request-logs.json'));
-const requestStats = new RequestStatsStore(process.env.STATS_FILE || (process.env.NODE_TEST_CONTEXT ? '' : resolve(ROOT, 'data', 'request-stats.json')));
+const requestStats = new RequestStatsStore(process.env.STATS_FILE || (process.env.NODE_TEST_CONTEXT ? '' : resolve(ROOT, 'data', 'request-stats.json')), { maxBytes: STATS_MAX_BYTES });
+const requestBodyBudget = new RequestBodyBudget({
+  maxBytes: MAX_INFLIGHT_REQUEST_BODY_BYTES,
+  maxClientBytes: MAX_CLIENT_INFLIGHT_REQUEST_BODY_BYTES
+});
 const keepAlive = new KeepAliveService();
 const sharedModelDiscoveries = new SharedOperationPool();
 const imageHandoffPublicUrl = resolveImageHandoffPublicUrl(process.env);
@@ -174,10 +189,16 @@ function streamFailure(error, res, abort) {
   const abortReason = abort.signal.reason;
   const clientClosed = ['CLIENT_CLOSED', 'CLIENT_WRITE_TIMEOUT'].includes(error?.code)
     || ['CLIENT_CLOSED', 'CLIENT_WRITE_TIMEOUT'].includes(abortReason?.code);
-  const credentialNeutral = ['UPSTREAM_SSE_EVENT_TOO_LARGE', 'UPSTREAM_JSON_TOO_COMPLEX', 'UPSTREAM_UNSUPPORTED_STREAM_CONTENT'].includes(error?.code);
+  const credentialNeutral = [
+    'UPSTREAM_SSE_EVENT_TOO_LARGE',
+    'UPSTREAM_JSON_TOO_COMPLEX',
+    'UPSTREAM_UNSUPPORTED_STREAM_CONTENT',
+    'UPSTREAM_TRANSLATED_STREAM_TOO_LARGE'
+  ].includes(error?.code);
   const streamCodes = {
     UPSTREAM_INVALID_UTF8: 'upstream_invalid_utf8',
-    UPSTREAM_JSON_TOO_COMPLEX: 'upstream_response_too_complex'
+    UPSTREAM_JSON_TOO_COMPLEX: 'upstream_response_too_complex',
+    UPSTREAM_TRANSLATED_STREAM_TOO_LARGE: 'upstream_translated_stream_too_large'
   };
   const networkFailure = isUpstreamConnectionError(abortReason)
     ? upstreamConnectionFailure(abortReason)
@@ -222,7 +243,23 @@ function requestBodyTooLarge(req, limit) {
   return Object.assign(new Error(`请求体超过 ${formatSizeLimit(limit)} 上限`), { status: 413, closeConnection: true });
 }
 
-async function bodyJson(req, limit = MAX_ADMIN_REQUEST_BYTES) {
+function retainRequestBodyBudgetUntilResponse(budgetLease, res) {
+  if (!budgetLease || !res) return false;
+  const release = () => {
+    res.off('finish', release);
+    res.off('close', release);
+    budgetLease.release();
+  };
+  if (res.writableEnded || res.destroyed) {
+    release();
+    return true;
+  }
+  res.once('finish', release);
+  res.once('close', release);
+  return true;
+}
+
+async function bodyJson(req, limit = MAX_ADMIN_REQUEST_BYTES, budgetClientId = null, budgetResponse = null) {
   const contentType = typeof req.headers['content-type'] === 'string'
     ? req.headers['content-type'].split(';', 1)[0].trim().toLowerCase()
     : '';
@@ -235,15 +272,39 @@ async function bodyJson(req, limit = MAX_ADMIN_REQUEST_BYTES) {
   }
   const declared = Number(req.headers['content-length']);
   if (Number.isFinite(declared) && declared > limit) throw requestBodyTooLarge(req, limit);
+  let budgetLease;
+  if (budgetClientId) {
+    try { budgetLease = requestBodyBudget.acquire(budgetClientId, Number.isSafeInteger(declared) && declared >= 0 ? declared : 0); }
+    catch (error) {
+      req.resume();
+      error.closeConnection = true;
+      throw error;
+    }
+  }
   let size = 0;
   const chunks = [];
   try {
     for await (const chunk of req.iterator({ destroyOnReturn: false })) {
       size += chunk.length;
       if (size > limit) throw requestBodyTooLarge(req, limit);
+      if (budgetLease) budgetLease.reserveTo(size);
       chunks.push(chunk);
     }
+    let body;
+    try { body = JSON.parse(JSON_DECODER.decode(Buffer.concat(chunks, size)) || '{}'); }
+    catch { throw Object.assign(new Error('JSON 格式无效'), { status: 400 }); }
+    if (!body || Array.isArray(body) || typeof body !== 'object') {
+      throw Object.assign(new Error('JSON 格式无效'), { status: 400 });
+    }
+    assertJsonComplexity(body, { depthStatus: 400, nodesStatus: 413 });
+    if (retainRequestBodyBudgetUntilResponse(budgetLease, budgetResponse)) budgetLease = undefined;
+    return body;
   } catch (error) {
+    if (error instanceof RequestBodyBudgetError) {
+      req.resume();
+      error.closeConnection = true;
+      throw error;
+    }
     if (error?.status) throw error;
     const interrupted = req.aborted || error?.code === 'ECONNRESET'
       || error?.code === 'ERR_STREAM_PREMATURE_CLOSE' || error?.message === 'aborted';
@@ -251,15 +312,9 @@ async function bodyJson(req, limit = MAX_ADMIN_REQUEST_BYTES) {
       throw Object.assign(new Error('客户端在请求体上传完成前断开', { cause: error }), { code: 'CLIENT_CLOSED' });
     }
     throw error;
+  } finally {
+    budgetLease?.release();
   }
-  let body;
-  try { body = JSON.parse(JSON_DECODER.decode(Buffer.concat(chunks, size)) || '{}'); }
-  catch { throw Object.assign(new Error('JSON 格式无效'), { status: 400 }); }
-  if (!body || Array.isArray(body) || typeof body !== 'object') {
-    throw Object.assign(new Error('JSON 格式无效'), { status: 400 });
-  }
-  assertJsonComplexity(body, { depthStatus: 400, nodesStatus: 413 });
-  return body;
 }
 
 function formatSizeLimit(bytes) {
@@ -1107,7 +1162,7 @@ async function adminApiOperation(req, res, url, config) {
     await ensureRequestStats(config);
     await requestStats.flush().catch(() => {});
     const stats = aggregateStoredRequestStats(url.searchParams.get('window') || 'all', config, timezoneOffsetMinutes);
-    return json(res, 200, { ...stats, persistenceError: requestStats.lastError || null, credentialHealth: credentialHealthSnapshot(config) });
+    return json(res, 200, { ...stats, storage: requestStats.status(), persistenceError: requestStats.lastError || null, credentialHealth: credentialHealthSnapshot(config) });
   }
   if (url.pathname === '/api/status' && req.method === 'GET') {
     await ensureRequestStats(config);
@@ -1138,6 +1193,8 @@ async function adminApiOperation(req, res, url, config) {
       memoryMb: Math.round(memory.rss / 1024 / 1024),
       logPersistenceError: requestLogs.lastError || null,
       statsPersistenceError: requestStats.lastError || null,
+      statsStorage: requestStats.status(),
+      inflightRequestBody: requestBodyBudget.status(),
       keepAlive: keepAlive.status()
     });
   }
@@ -1573,8 +1630,18 @@ function upstreamSystemText(body, protocol) {
     .filter(Boolean).join('\n');
 }
 
-async function countClaudeTokens(req, res) {
-  const body = await bodyJson(req, MAX_PROXY_REQUEST_BYTES);
+function requestBodyBudgetErrorResponse(res, protocol, error) {
+  if (error.closeConnection && !res.headersSent) res.setHeader('connection', 'close');
+  return protocolError(res, error.status, protocol, error.message, error.type, { 'retry-after': '1' }, error.code);
+}
+
+async function countClaudeTokens(req, res, client) {
+  let body;
+  try { body = await bodyJson(req, MAX_PROXY_REQUEST_BYTES, client.id, res); }
+  catch (error) {
+    if (error instanceof RequestBodyBudgetError) return requestBodyBudgetErrorResponse(res, 'claude', error);
+    throw error;
+  }
   try {
     const inputTokens = estimateClaudeInputTokens(body);
     return json(res, 200, { input_tokens: inputTokens }, { 'x-opencode-token-count': 'estimated' });
@@ -1592,17 +1659,7 @@ function messageContentText(content) {
 function responsesOutputOptions(body, protocol) {
   if (protocol === 'gemini') return { geminiToolAliases: geminiToolNameAliases(body) };
   if (protocol !== 'responses') return {};
-  const tools = [...(Array.isArray(body.tools) ? body.tools : [])];
-  const toolKeys = new Set(tools.map((tool) => `${tool?.type || 'function'}\n${tool?.name || tool?.execution || ''}`));
-  for (const item of Array.isArray(body.input) ? body.input : []) {
-    if (item?.type !== 'tool_search_output' || !Array.isArray(item.tools)) continue;
-    for (const tool of item.tools) {
-      const key = `${tool?.type || 'function'}\n${tool?.name || tool?.execution || ''}`;
-      if (toolKeys.has(key)) continue;
-      toolKeys.add(key);
-      tools.push(tool);
-    }
-  }
+  const tools = mergeResponsesTools(body.tools, body.input);
   return {
     parallelToolCalls: typeof body.parallel_tool_calls === 'boolean' ? body.parallel_tool_calls : true,
     toolChoice: body.tool_choice ?? 'auto',
@@ -1639,7 +1696,12 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   if (!incomingProtocol) return protocolError(res, 404, 'chat', '仅支持 messages、responses、responses/compact、chat/completions 和 Gemini generateContent 端点');
   if (!client) return protocolError(res, 401, incomingProtocol, '访问令牌无效', 'authentication_error');
   const started = Date.now();
-  let body = await bodyJson(req, MAX_PROXY_REQUEST_BYTES);
+  let body;
+  try { body = await bodyJson(req, MAX_PROXY_REQUEST_BYTES, client.id, res); }
+  catch (error) {
+    if (error instanceof RequestBodyBudgetError) return requestBodyBudgetErrorResponse(res, incomingProtocol, error);
+    throw error;
+  }
   if (abort.signal.aborted) return;
   const responsesCompact = incomingProtocol === 'responses' && url.pathname.endsWith('/responses/compact');
   if (incomingProtocol === 'gemini') {
@@ -1693,12 +1755,13 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     catch (error) { return protocolError(res, 400, incomingProtocol, error.message); }
     if (localSearch) {
       body = localSearch.body;
+      bridgeWebSearchAdaptations = [...(localSearch.spec.adaptations || [])];
       if (localSearch.enabled) {
         if (!config.bridgeWebSearchEnabled) {
           return protocolError(res, 400, incomingProtocol, 'Codex Web Search 已在桥接设置中关闭；请启用本地 Web Search，或将模型路由设为原生 Responses');
         }
         bridgeWebSearch = localSearch.spec;
-        bridgeWebSearchAdaptations = ['responses_web_search_to_mcp', ...(localSearch.spec.adaptations || [])];
+        bridgeWebSearchAdaptations.unshift('responses_web_search_to_mcp');
       }
     }
   }
@@ -1707,16 +1770,18 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   const requestKind = codexRequestKind(body, incomingProtocol);
   const responseOptions = responsesOutputOptions(responsesClientConfigBody, incomingProtocol);
   const chatOptions = chatOutputOptions(body, incomingProtocol);
-  const webSearchDegraded = incomingProtocol === 'responses' && !['responses', 'gemini'].includes(route.protocol) && hasHostedResponsesWebSearch(body.tools);
+  const webSearchDegraded = incomingProtocol === 'responses' && !['responses', 'gemini'].includes(route.protocol)
+    && hasHostedResponsesWebSearch(body.tools, body.input);
   const allowResponsesWebSearch = incomingProtocol === 'gemini' && route.protocol === 'responses' && hasGeminiGoogleSearch(body);
   const toolAdaptations = incomingProtocol === route.protocol ? []
     : incomingProtocol === 'responses' ? responsesToolAdaptations(body.tools, body.input, body.tool_choice)
       : incomingProtocol === 'claude' ? claudeToolAdaptations(body.tools, body.messages, stream, route.protocol)
         : incomingProtocol === 'gemini' ? geminiToolAdaptations(body, route.protocol)
           : [];
-  if (incomingProtocol === 'responses' && route.protocol === 'gemini' && hasHostedResponsesWebSearch(body.tools)) {
+  if (incomingProtocol === 'responses' && route.protocol === 'gemini' && hasHostedResponsesWebSearch(body.tools, body.input)) {
     toolAdaptations.push('responses_web_search_to_gemini_google_search');
   }
+  toolAdaptations.push(...crossProtocolToolAdaptations(body, incomingProtocol, route.protocol));
   if (bridgeWebSearch && incomingProtocol === 'claude') toolAdaptations.push('claude_web_search_to_mcp');
   toolAdaptations.push(...bridgeWebSearchAdaptations);
   let inputDegradations;
@@ -1838,8 +1903,10 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   let upstream;
   let credentialResponse;
   const maximumCredentialAttempts = credentials.length;
+  const attemptedCredentialIds = new Set();
   while (credential && credentialAttempts < maximumCredentialAttempts) {
     credentialAttempts++;
+    attemptedCredentialIds.add(credential.credentialId);
     const upstreamAttemptStartedAt = Date.now();
     activity.stage('waiting_upstream');
     try {
@@ -1892,7 +1959,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     activity.stage('reading_upstream_body');
     if (!upstream.ok) recordCredentialResponse(route.provider, credential, credentialResponse || upstream);
     if (![401, 403, 429].includes(upstream.status) || credentialAttempts >= maximumCredentialAttempts) break;
-    const replacement = credentialHealth.select(route.provider, credentials).credential;
+    const replacement = credentialHealth.select(route.provider, credentials, attemptedCredentialIds).credential;
     if (!replacement) break;
     await discardUpstreamResponse(upstream).catch(() => {});
     credential = replacement;
@@ -2274,10 +2341,7 @@ async function staticFile(req, res, url) {
   return;
 }
 
-await bootstrapConfigFromEnvironment();
-keepAlive.configure(resolveKeepAliveConfig(await loadConfig()));
-
-const server = createServer({
+export const server = createServer({
   maxHeaderSize: MAX_HTTP_HEADER_BYTES,
   connectionsCheckingInterval: CONNECTIONS_CHECKING_INTERVAL_MS,
   insecureHTTPParser: false,
@@ -2300,15 +2364,7 @@ const server = createServer({
   try {
     url = parseRequestTarget(req.url);
     const apiScope = publicApiScope(url.pathname);
-    res.setHeader('x-content-type-options', 'nosniff');
-    res.setHeader('x-frame-options', 'DENY');
-    res.setHeader('x-xss-protection', '0');
-    res.setHeader('x-permitted-cross-domain-policies', 'none');
-    res.setHeader('referrer-policy', 'no-referrer');
-    res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
-    res.setHeader('cross-origin-opener-policy', 'same-origin');
-    res.setHeader('content-security-policy', "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
-    if (requestProtocol(req) === 'https') res.setHeader('strict-transport-security', 'max-age=31536000');
+    applySecurityResponseHeaders(res, requestProtocol(req) === 'https');
     if (req.rawHeaders.length / 2 > MAX_HTTP_HEADERS) return json(res, 431, { error: `请求头字段不能超过 ${MAX_HTTP_HEADERS} 个` });
     const duplicateHeader = duplicatedSingletonHeader(req);
     if (duplicateHeader) {
@@ -2317,7 +2373,8 @@ const server = createServer({
       return json(res, 400, { error: message });
     }
     const publicImageMatch = url.pathname.match(/^\/_bridge\/images\/([a-f0-9]{64})$/);
-    const healthEndpoint = url.pathname === '/health' || url.pathname === '/healthz';
+    const healthKind = healthEndpointKind(url.pathname);
+    const healthEndpoint = Boolean(healthKind);
     if (healthEndpoint || url.pathname.startsWith('/api/') || publicImageMatch || apiScope) res.setHeader('cache-control', 'no-store');
     if (publicImageMatch) {
       if (!['GET', 'HEAD'].includes(req.method)) return json(res, 405, { error: '该接口仅支持 GET 或 HEAD' }, { allow: 'GET, HEAD' });
@@ -2345,7 +2402,10 @@ const server = createServer({
     }
     const config = await loadConfig();
     if (healthEndpoint) {
-      return json(res, 200, { ok: true, ready: serviceReady(config), configured: Boolean(config.password), uptime: Math.floor(process.uptime()) });
+      const response = healthResponse(healthKind, {
+        ready: serviceReady(config), configured: Boolean(config.password), uptime: process.uptime()
+      });
+      return json(res, response.status, response.body);
     }
     if (url.pathname.startsWith('/api/')) return await adminApi(req, res, url, config);
     if (apiScope) {
@@ -2456,7 +2516,7 @@ const server = createServer({
       const countTokensPath = `${apiScope.base}/messages/count_tokens`;
       if (url.pathname === countTokensPath) {
         if (req.method !== 'POST') return protocolError(res, 405, 'claude', '该接口仅支持 POST', 'invalid_request_error', { allow: 'POST' });
-        return await limitedTokenCountRequest(req, res, config, () => countClaudeTokens(req, res));
+        return await limitedTokenCountRequest(req, res, config, (client) => countClaudeTokens(req, res, client));
       }
       if (![`${apiScope.base}/messages`, `${apiScope.base}/responses`, `${apiScope.base}/responses/compact`, `${apiScope.base}/chat/completions`].includes(url.pathname)) {
         return json(res, 404, { error: '接口不存在' });
@@ -2489,23 +2549,72 @@ server.on('connection', (socket) => {
   activeHttpConnections++;
   socket.once('close', () => { activeHttpConnections--; });
 });
-server.on('error', (error) => {
-  console.error(`服务启动失败：${error.message}`);
-  process.exitCode = 1;
-});
-server.listen(PORT, HOST, () => console.log(`OpenCode Bridge 已启动：http://${HOST}:${PORT}`));
+if (RUNNING_AS_MAIN) {
+  server.on('error', (error) => {
+    console.error(`服务启动失败：${error.message}`);
+    process.exitCode = 1;
+  });
+}
+
+let startPromise = null;
+
+export async function startBridgeServer() {
+  if (server.listening) return server;
+  if (startPromise) return startPromise;
+  startPromise = (async () => {
+    await bootstrapConfigFromEnvironment();
+    keepAlive.configure(resolveKeepAliveConfig(await loadConfig()));
+    await new Promise((resolveStart, rejectStart) => {
+      const onError = (error) => {
+        error.bridgeListenFailure = true;
+        server.off('listening', onListening);
+        rejectStart(error);
+      };
+      const onListening = () => {
+        server.off('error', onError);
+        console.log(`OpenCode Bridge 已启动：http://${HOST}:${PORT}`);
+        resolveStart();
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(PORT, HOST);
+    });
+    return server;
+  })();
+  try {
+    return await startPromise;
+  } finally {
+    startPromise = null;
+  }
+}
+
+export async function stopBridgeServer({ force = false } = {}) {
+  keepAlive.close();
+  if (server.listening) {
+    await new Promise((resolveClose, rejectClose) => {
+      server.close((error) => error ? rejectClose(error) : resolveClose());
+      if (force) server.closeAllConnections();
+      else server.closeIdleConnections?.();
+    });
+  }
+  await closeRuntimeResources(force);
+}
 
 let shutdownStarted = false;
 let shutdownFinalized = false;
+
+async function closeRuntimeResources(force) {
+  await requestLogs.flush().catch((error) => console.error(`退出前刷新请求日志失败：${error.message}`));
+  await requestStats.flush().catch((error) => console.error(`退出前刷新请求统计失败：${error.message}`));
+  await Promise.all([closeProxyDispatchers({ force }), closeDirectUpstreamDispatcher({ force }), imageHandoff.close()]);
+}
 
 async function finalizeShutdown(exitCode, forceExit) {
   if (shutdownFinalized) return;
   shutdownFinalized = true;
   clearTimeout(forceExit);
-  await requestLogs.flush().catch((error) => console.error(`退出前刷新请求日志失败：${error.message}`));
-  await requestStats.flush().catch((error) => console.error(`退出前刷新请求统计失败：${error.message}`));
   const force = exitCode !== 0;
-  await Promise.all([closeProxyDispatchers({ force }), closeDirectUpstreamDispatcher({ force }), imageHandoff.close()]);
+  await closeRuntimeResources(force);
   process.exit(exitCode);
 }
 
@@ -2528,4 +2637,12 @@ function shutdown(signal) {
   server.closeIdleConnections?.();
 }
 
-for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => shutdown(signal));
+if (RUNNING_AS_MAIN) {
+  try {
+    await startBridgeServer();
+    for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => shutdown(signal));
+  } catch (error) {
+    if (!error.bridgeListenFailure) console.error(`服务启动失败：${error.message}`);
+    process.exitCode = 1;
+  }
+}

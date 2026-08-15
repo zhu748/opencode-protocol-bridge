@@ -257,7 +257,6 @@ function finishSummary(state) {
     reasoningEffortChangedRequests, reasoningEffortDroppedRequests, reasoningEffortInjectedRequests,
     durations, upstreamWaitValues, upstreamBodyValues, tokens
   } = state;
-  durations.sort((left, right) => left - right);
   const upstreamWait = timingSummary(upstreamWaitValues, upstreamWaitTotal);
   const upstreamBody = timingSummary(upstreamBodyValues, upstreamBodyTotal);
   return {
@@ -267,7 +266,7 @@ function finishSummary(state) {
     errors: requests - canceledRequests - success,
     successRate: requests > canceledRequests ? round(success / (requests - canceledRequests) * 100, 1) : null,
     averageDurationMs: durations.length ? Math.round(durationTotal / durations.length) : 0,
-    p95DurationMs: durations.length ? durations[Math.max(0, Math.ceil(durations.length * 0.95) - 1)] : 0,
+    p95DurationMs: percentile(durations, 0.95),
     upstreamWaitRequests: upstreamWait.requests,
     upstreamWaitCoverageRate: requests ? round(upstreamWait.requests / requests * 100, 1) : null,
     averageUpstreamWaitMs: upstreamWait.average,
@@ -300,12 +299,49 @@ function finishSummary(state) {
 }
 
 function timingSummary(values, total) {
-  values.sort((left, right) => left - right);
   return {
     requests: values.length,
     average: values.length ? Math.round(total / values.length) : 0,
-    p95: values.length ? Math.round(values[Math.max(0, Math.ceil(values.length * 0.95) - 1)]) : 0
+    p95: Math.round(percentile(values, 0.95))
   };
+}
+
+function percentile(values, quantile) {
+  if (!values.length) return 0;
+  const index = Math.max(0, Math.ceil(values.length * quantile) - 1);
+  if (values.length < 64) {
+    values.sort((left, right) => left - right);
+    return values[index];
+  }
+  let left = 0;
+  let right = values.length - 1;
+  while (left < right) {
+    const middle = (left + right) >>> 1;
+    const pivot = median(values[left], values[middle], values[right]);
+    let lower = left;
+    let cursor = left;
+    let upper = right;
+    while (cursor <= upper) {
+      if (values[cursor] < pivot) swap(values, lower++, cursor++);
+      else if (values[cursor] > pivot) swap(values, cursor, upper--);
+      else cursor++;
+    }
+    if (index < lower) right = lower - 1;
+    else if (index > upper) left = upper + 1;
+    else return values[index];
+  }
+  return values[left];
+}
+
+function median(left, middle, right) {
+  if (left > middle) [left, middle] = [middle, left];
+  if (middle > right) [middle, right] = [right, middle];
+  return left > middle ? left : middle;
+}
+
+function swap(values, left, right) {
+  if (left === right) return;
+  [values[left], values[right]] = [values[right], values[left]];
 }
 
 function timingValue(item, field) {

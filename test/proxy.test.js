@@ -127,9 +127,12 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     }
     if (req.url === '/chat/completions') {
       const toolNames = (current.body.tools || []).map((tool) => tool.function.name);
+      const codexExecName = toolNames.find((name) => name === 'functions__exec' || name.startsWith('functions__exec__'));
       const customName = toolNames.find((name) => name === 'shell' || name.startsWith('shell__custom_'));
       const toolSearchName = toolNames.find((name) => name.startsWith('tool_search__tool_search_')) || toolNames.find((name) => name === 'tool_search');
-      const toolCalls = customName && toolSearchName
+      const toolCalls = codexExecName
+        ? [{ id: 'call_codex_exec', type: 'function', function: { name: codexExecName, arguments: '{"input":"text(\\"SERVER_OK\\")"}' } }]
+        : customName && toolSearchName
         ? [
             { id: 'call_custom', type: 'function', function: { name: customName, arguments: '{"input":"dir /b"}' } },
             { id: 'call_search', type: 'function', function: { name: toolSearchName, arguments: '{"query":"tests"}' } }
@@ -1162,6 +1165,60 @@ test('Claude 请求经本地桥接转换为 Responses 并转换响应', { timeou
     assert.deepEqual(JSON.parse(captured.body.messages.at(-1).content), { tools: [loadedTool] });
     const adaptedLog = (await fetch(`http://127.0.0.1:${bridgePort}/api/logs`, { headers: { cookie } }).then((result) => result.json()))[0];
     assert.equal(adaptedLog.protocol, 'responses → chat (custom adapted, client_tool_search adapted, responses item metadata degraded, reasoning_effort_forced_maximum adapted)');
+
+    const solAdditionalTools = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
+      body: JSON.stringify({
+        model: 'chat-alias', stream: false, store: false, parallel_tool_calls: false,
+        text: { verbosity: 'low' },
+        input: [
+          { type: 'additional_tools', role: 'developer', tools: [{
+            type: 'namespace', name: 'functions', tools: [{
+              type: 'custom', name: 'exec', description: '执行代码',
+              format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' }
+            }]
+          }] },
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: '执行' }] }
+        ]
+      })
+    });
+    assert.equal(solAdditionalTools.status, 200);
+    assert.equal(solAdditionalTools.headers.get('x-opencode-tool-adaptations'), 'additional_tools_to_top_level,custom');
+    const solAdditionalBody = await solAdditionalTools.json();
+    assert.deepEqual(solAdditionalBody.output[0], {
+      id: 'ctc_0', type: 'custom_tool_call', status: 'completed', call_id: 'call_codex_exec',
+      namespace: 'functions', name: 'exec', input: 'text("SERVER_OK")'
+    });
+    assert.equal(solAdditionalBody.tools[0].type, 'namespace');
+    assert.equal(captured.body.tools[0].function.name, 'functions__exec');
+
+    const cachedOnlySearch = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
+      body: JSON.stringify({
+        model: 'chat-alias', stream: false, input: '不要联网，只执行普通任务',
+        tools: [
+          { type: 'web_search', external_web_access: false },
+          { type: 'function', name: 'echo', parameters: { type: 'object', properties: { text: { type: 'string' } } } }
+        ]
+      })
+    });
+    assert.equal(cachedOnlySearch.status, 200);
+    assert.match(cachedOnlySearch.headers.get('x-opencode-tool-adaptations') || '', /responses_web_search_external_access_disabled/);
+    assert.deepEqual(captured.body.tools.map((tool) => tool.function.name), ['echo']);
+    assert.equal(JSON.stringify(captured.body).includes('web_search'), false);
+
+    const callsBeforeForcedCachedSearch = upstreamRequestCount;
+    const forcedCachedOnlySearch = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },
+      body: JSON.stringify({
+        model: 'chat-alias', input: '必须搜索',
+        tools: [{ type: 'web_search', external_web_access: false }],
+        tool_choice: { type: 'web_search' }
+      })
+    });
+    assert.equal(forcedCachedOnlySearch.status, 400);
+    assert.match((await forcedCachedOnlySearch.json()).error.message, /external_web_access:false/);
+    assert.equal(upstreamRequestCount, callsBeforeForcedCachedSearch);
 
     const programmaticTools = await fetch(`http://127.0.0.1:${bridgePort}/zen/v1/responses`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': createdClient.token },

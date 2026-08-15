@@ -50,6 +50,12 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 30_000 },
     assert.equal(healthzBody.ok, healthBody.ok);
     assert.equal(healthzBody.ready, healthBody.ready);
     assert.equal(healthzBody.configured, healthBody.configured);
+    const livez = await fetch(`http://127.0.0.1:${port}/livez`);
+    assert.equal(livez.status, 200);
+    assert.equal((await livez.json()).ok, true);
+    const readyz = await fetch(`http://127.0.0.1:${port}/readyz`);
+    assert.equal(readyz.status, 503);
+    assert.equal((await readyz.json()).ok, false);
     const manyHeaders = Object.fromEntries(Array.from({ length: 140 }, (_, index) => [`x-test-${index}`, '1']));
     const excessiveHeaders = await fetch(`http://127.0.0.1:${port}/health`, { headers: manyHeaders });
     assert.equal(excessiveHeaders.status, 431);
@@ -166,7 +172,7 @@ test('服务可启动并提供健康检查与管理页面', { timeout: 30_000 },
     assert.match(setupBody.clientToken, /^[A-Za-z0-9]+$/);
     const storedConfig = await readFile(configFile, 'utf8');
     assert.doesNotMatch(storedConfig, new RegExp(setupBody.clientToken));
-    assert.match(storedConfig, /enc:v1:/);
+    assert.match(storedConfig, /enc:v2:/);
     const cookie = setup.headers.get('set-cookie').split(';')[0];
     const duplicatedApiKey = await rawHttpRequest(port,
       'GET /v1/models HTTP/1.1\r\nHost: localhost\r\nx-api-key: first-token\r\nx-api-key: second-token\r\nConnection: close\r\n\r\n');
@@ -1379,7 +1385,7 @@ test('可从 Render 环境变量引导完整配置且敏感值加密落盘', { t
     });
     assert.equal(authenticated.status, 400);
     const stored = await readFile(configFile, 'utf8');
-    assert.match(stored, /enc:v1:/);
+    assert.match(stored, /enc:v2:/);
     assert.doesNotMatch(stored, new RegExp(`${adminPassword}|${clientToken}|render-zen-secret`));
   } finally {
     child.kill();
@@ -2100,7 +2106,7 @@ test('面板多 Key 会安全加密、轮询并按名称统计', { timeout: 10_0
     assert.deepEqual(stats.credentialHealth.map((item) => item.state), ['healthy', 'healthy']);
     const stored = await readFile(configFile, 'utf8');
     assert.doesNotMatch(stored, /panel-key-one|panel-key-two/);
-    assert.equal((stored.match(/enc:v1:/g) || []).length >= 4, true);
+    assert.equal((stored.match(/enc:v2:/g) || []).length >= 4, true);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});
@@ -2855,6 +2861,9 @@ test('统计超过 100 条日志上限并在服务重启后恢复', { timeout: 3
     assert.equal(logs.length, 100);
     assert.equal(stats.summary.requests, 105);
     assert.equal(stats.retentionDays, 7);
+    assert.equal(stats.storage.format, 'ndjson-v1');
+    assert.equal(stats.storage.entries, 105);
+    assert.equal(stats.storage.maxBytes, 64 * 1024 * 1024);
     await new Promise((resolveWait) => setTimeout(resolveWait, 400));
 
     child.kill();
@@ -2864,6 +2873,7 @@ test('统计超过 100 条日志上限并在服务重启后恢复', { timeout: 3
     const restored = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie: restoredCookie } }).then((response) => response.json());
     assert.equal(restored.summary.requests, 105);
     assert.equal(restored.retainedRequests, 105);
+    assert.equal(restored.storage.entries, 105);
   } finally {
     if (child?.exitCode === null) {
       child.kill();

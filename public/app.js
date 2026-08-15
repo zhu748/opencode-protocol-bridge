@@ -2,6 +2,7 @@ import { compactIdentifier, filterRequestLogs, requestLogsToCsv } from './log-ut
 import { createLatestRequestGate, optionalLoad, summarizeSourceFailures } from './refresh-utils.js';
 import { escapeHtml } from './html-utils.js';
 import { createOpenCodeConfig } from './opencode-config.js';
+import { createCodexConfig, createCodexPowerShellEnvironment, selectCodexProvider } from './codex-config.js';
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -602,8 +603,11 @@ function renderStats(stats) {
   const retentionDays = Number(stats.retentionDays) || 7;
   const range = stats.window === 'all' ? `保留期内全部（${retentionDays} 天）` : stats.window === '24h' ? '最近 24 小时' : '最近 7 天';
   const trendRange = stats.timeline?.range === '24h' ? '最近 24 小时' : `最近 ${Number.parseInt(stats.timeline?.range, 10) || stats.timeline?.buckets?.length || retentionDays} 天`;
-  $('#stats-scope').textContent = `指标与分组：${range} · 趋势：${trendRange} · 持久化保留 ${formatNumber(stats.retainedRequests)} 条统计元数据 · 生成于 ${new Date(stats.generatedAt).toLocaleString()}${stats.persistenceError ? ' · 统计持久化异常' : ''}`;
-  $('#stats-scope').title = stats.persistenceError || '';
+  const capacityDropped = Number(stats.storage?.capacityDroppedEntries) || 0;
+  const capacityLimitedAt = stats.storage?.capacityLimitedAt;
+  const capacityNotice = capacityDropped ? ` · 已按容量淘汰 ${formatNumber(capacityDropped)} 条最旧记录` : '';
+  $('#stats-scope').textContent = `指标与分组：${range} · 趋势：${trendRange} · 持久化保留 ${formatNumber(stats.retainedRequests)} 条统计元数据${capacityNotice} · 生成于 ${new Date(stats.generatedAt).toLocaleString()}${stats.persistenceError ? ' · 统计持久化异常' : ''}`;
+  $('#stats-scope').title = [stats.persistenceError, capacityDropped ? `统计存储达到容量上限${capacityLimitedAt ? `，最近一次淘汰发生于 ${new Date(capacityLimitedAt).toLocaleString()}` : ''}` : ''].filter(Boolean).join('；');
   renderStatsRows('#stats-provider-rows', stats.byProvider);
   renderCredentialRows(stats.byCredential, stats.credentialHealth);
   renderStatsRows('#stats-model-rows', stats.byModel);
@@ -834,6 +838,8 @@ function renderRouteList(routes) {
 
 function renderExamples() {
   const root = location.origin;
+  const availableProviders = ['zen', 'go'].filter((provider) => config[`${provider}Configured`] === true);
+  const codexProvider = selectCodexProvider(availableProviders, config.defaultProvider);
   const command = (path, auth, body) => [
     `curl ${root}${path} \\`,
     `  -H "${auth}" \\`,
@@ -844,8 +850,13 @@ function renderExamples() {
   $('#responses-example').textContent = command('/zen/v1/responses', 'Authorization: Bearer YOUR_TOKEN', { model: 'gpt-5.6-terra', input: '你好' });
   $('#chat-example').textContent = command('/go/v1/chat/completions', 'Authorization: Bearer YOUR_TOKEN', { model: 'kimi-k2.6', messages: [{ role: 'user', content: '你好' }] });
   $('#gemini-example').textContent = command('/zen/v1/models/gemini-3.6-flash:generateContent', 'x-goog-api-key: YOUR_TOKEN', { contents: [{ role: 'user', parts: [{ text: '你好' }] }] });
+  $('#codex-example').textContent = createCodexConfig(root, {
+    provider: codexProvider,
+    upstreamStreamIdleTimeoutMs: config.upstreamStreamIdleTimeoutMs
+  });
+  $('#codex-env-example').textContent = createCodexPowerShellEnvironment();
   $('#opencode-example').textContent = JSON.stringify(createOpenCodeConfig(root, config.goModelCapabilities, config.imageHandoffModels, {
-    availableProviders: ['zen', 'go'].filter((provider) => config[`${provider}Configured`] === true),
+    availableProviders,
     defaultProvider: config.defaultProvider,
     imageHandoffTransport: config.imageHandoffTransport,
     zenCapabilities: config.zenModelCapabilities

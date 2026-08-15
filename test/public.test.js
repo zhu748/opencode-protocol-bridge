@@ -18,6 +18,16 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.deepEqual(missing, []);
   assert.equal(new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1])).size, [...html.matchAll(/\bid="([^"]+)"/g)].length, 'HTML id 不应重复');
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)/i, 'CSP 下不应使用内联脚本');
+  assert.doesNotMatch(html, /fonts\.(?:googleapis|gstatic)\.com/, '严格 CSP 下不应引用外部字体');
+  assert.match(html, /id="logout"[^>]*aria-label="退出登录"/);
+  assert.match(html, /id="refresh"[^>]*aria-label="刷新控制台数据"/);
+  assert.match(html, /id="toast"[^>]*role="status"[^>]*aria-live="polite"/);
+  assert.match(html, /id="codex-example"/);
+  assert.match(html, /id="codex-env-example"/);
+  assert.match(html, /保存到 ~\/\.codex\/config\.toml/);
+  assert.match(script, /from '\.\/codex-config\.js'/);
+  assert.match(script, /createCodexConfig\(root/);
+  assert.match(script, /upstreamStreamIdleTimeoutMs: config\.upstreamStreamIdleTimeoutMs/);
   assert.doesNotMatch(script, /updateCooldownCountdowns/);
   assert.match(script, /x-opencode-upstream-request-id|upstreamRequestId/);
   assert.match(script, /function filteredLogs\(\)/);
@@ -122,24 +132,27 @@ test('管理面板脚本引用的静态元素均存在', async () => {
 test('Render Blueprint 暴露批量 Key、逐项代理、远程图片交接、保活和 sing-box 变量', async () => {
   const blueprint = await readFile(resolve(projectDir, 'render.yaml'), 'utf8');
   assert.match(blueprint, /buildCommand: npm ci --omit=dev --ignore-scripts && npm run install:sing-box/);
-  assert.match(blueprint, /healthCheckPath: \/healthz/);
-  for (const name of ['OPENCODE_ZEN_KEYS', 'OPENCODE_GO_KEYS', 'OPENCODE_ZEN_PROXY_URLS', 'OPENCODE_GO_PROXY_URLS', 'OPENCODE_BRIDGE_MAX_ADMIN_MUTATIONS', 'OPENCODE_BRIDGE_MAX_ADMIN_MODEL_DISCOVERIES', 'OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS', 'OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS', 'OPENCODE_BRIDGE_SSE_HEARTBEAT_MS', 'OPENCODE_BRIDGE_KEEP_ALIVE_URL', 'OPENCODE_BRIDGE_KEEP_ALIVE_INTERVAL_SECONDS', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_MAX_BYTES', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_LOCAL_RETENTION_MS', 'OPENCODE_BRIDGE_SING_BOX_PATH', 'OPENCODE_BRIDGE_SING_BOX_VERSION']) {
+  assert.match(blueprint, /healthCheckPath: \/readyz/);
+  for (const name of ['OPENCODE_ZEN_KEYS', 'OPENCODE_GO_KEYS', 'OPENCODE_ZEN_PROXY_URLS', 'OPENCODE_GO_PROXY_URLS', 'OPENCODE_BRIDGE_MAX_ADMIN_MUTATIONS', 'OPENCODE_BRIDGE_MAX_ADMIN_MODEL_DISCOVERIES', 'OPENCODE_BRIDGE_MAX_HTTP_CONNECTIONS', 'OPENCODE_BRIDGE_STREAM_WRITE_TIMEOUT_MS', 'OPENCODE_BRIDGE_SSE_HEARTBEAT_MS', 'OPENCODE_BRIDGE_STATS_MAX_BYTES', 'OPENCODE_BRIDGE_KEEP_ALIVE_URL', 'OPENCODE_BRIDGE_KEEP_ALIVE_INTERVAL_SECONDS', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_PUBLIC_URL', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_MAX_BYTES', 'OPENCODE_BRIDGE_IMAGE_HANDOFF_LOCAL_RETENTION_MS', 'OPENCODE_BRIDGE_SING_BOX_PATH', 'OPENCODE_BRIDGE_SING_BOX_VERSION']) {
     assert.equal((blueprint.match(new RegExp(`key: ${name}\\b`, 'g')) || []).length, 1, `${name} 应出现一次`);
   }
   assert.match(blueprint, /key: OPENCODE_BRIDGE_KEEP_ALIVE_URL\s+sync: false/);
 });
 
 test('部署构建固定受支持的 Node 版本并排除本地密钥与运行数据', async () => {
-  const [dockerignore, dockerfile, nodeVersion, workflow, dependabot, manifestText, lockText, syntaxChecker, localLauncher] = await Promise.all([
+  const [dockerignore, dockerfile, nodeVersion, workflow, catalogWorkflow, dependabot, manifestText, lockText, syntaxChecker, localLauncher, compose, environmentExample] = await Promise.all([
     readFile(resolve(projectDir, '.dockerignore'), 'utf8'),
     readFile(resolve(projectDir, 'Dockerfile'), 'utf8'),
     readFile(resolve(projectDir, '.node-version'), 'utf8'),
     readFile(resolve(projectDir, '.github/workflows/ci.yml'), 'utf8'),
+    readFile(resolve(projectDir, '.github/workflows/catalog-drift.yml'), 'utf8'),
     readFile(resolve(projectDir, '.github/dependabot.yml'), 'utf8'),
     readFile(resolve(projectDir, 'package.json'), 'utf8'),
     readFile(resolve(projectDir, 'package-lock.json'), 'utf8'),
     readFile(resolve(projectDir, 'scripts/check-syntax.mjs'), 'utf8'),
-    readFile(resolve(projectDir, 'start-local.ps1'), 'utf8')
+    readFile(resolve(projectDir, 'start-local.ps1'), 'utf8'),
+    readFile(resolve(projectDir, 'compose.yaml'), 'utf8'),
+    readFile(resolve(projectDir, '.env.example'), 'utf8')
   ]);
   const manifest = JSON.parse(manifestText);
   const lock = JSON.parse(lockText);
@@ -148,6 +161,7 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
   assert.equal(manifest.engines.node, '^22.20.0 || ^24.11.0');
   assert.equal(lock.packages[''].engines.node, manifest.engines.node);
   assert.equal(manifest.scripts.check, 'node scripts/check-syntax.mjs && node --test');
+  assert.match(manifest.scripts['test:coverage'], /--test-coverage-lines=80/);
   for (const directory of ['src', 'public', 'scripts', 'test-fixtures']) assert.match(syntaxChecker, new RegExp(`['"]${directory}['"]`));
   assert.match(syntaxChecker, /readFile\(file, 'utf8'\)/);
   assert.match(syntaxChecker, /error\.code === 'ENOENT'/);
@@ -158,7 +172,8 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
   assert.match(localLauncher, /Node\.js 22\.20\+ or 24\.11\+/);
   assert.match(dockerfile, /^FROM node:24\.18\.1-alpine3\.24$/m);
   assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
-  assert.match(dockerfile, /HEALTHCHECK .*http:\/\/127\.0\.0\.1:8787\/healthz/);
+  assert.match(dockerfile, /COPY --chown=node:node/);
+  assert.match(dockerfile, /HEALTHCHECK .*http:\/\/127\.0\.0\.1:8787\/livez/);
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
   assert.match(workflow, /node-version: \[22\.23\.2, 24\.18\.1\]/);
   const actionReferences = [...workflow.matchAll(/\buses:\s+([^\s#]+)/g)].map((match) => match[1]);
@@ -175,6 +190,12 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
   assert.match(workflow, /npm run --silent sbom:prod > sbom\.cdx\.json/);
   assert.match(workflow, /name: production-sbom/);
   assert.match(workflow, /retention-days: 14/);
+  assert.match(workflow, /npm run test:coverage/);
+  assert.match(catalogWorkflow, /schedule:/);
+  assert.match(catalogWorkflow, /npm run check:catalogs/);
+  for (const reference of [...catalogWorkflow.matchAll(/\buses:\s+([^\s#]+)/g)].map((match) => match[1])) {
+    assert.match(reference, /^[^@\s]+@[a-f0-9]{40}$/);
+  }
   assert.equal(manifest.scripts['sbom:prod'], 'npm sbom --omit=dev --sbom-format=cyclonedx');
   for (const ecosystem of ['npm', 'docker', 'github-actions']) {
     assert.match(dependabot, new RegExp(`package-ecosystem: ${ecosystem}\\b`));
@@ -183,7 +204,15 @@ test('部署构建固定受支持的 Node 版本并排除本地密钥与运行�
   for (const pattern of ['.env', '.env.*', '*.key', '*.pem', '*.p12', '*.pfx', 'data/', 'node_modules/', 'vendor/']) {
     assert.ok(dockerignore.split(/\r?\n/).includes(pattern), `.dockerignore 应包含 ${pattern}`);
   }
-  assert.match(dockerfile, /COPY package\*\.json \.npmrc \.\//);
+  assert.match(dockerfile, /COPY --chown=node:node package\*\.json \.npmrc \.\//);
+  assert.match(dockerfile, /ARG OPENCODE_BRIDGE_SING_BOX_VERSION=1\.13\.16/);
+  assert.match(compose, /env_file:\s+[\s\S]*?path: \.env\s+required: false[\s\S]*?path: \.env\.local\s+required: false/);
+  assert.match(compose, /OPENCODE_BRIDGE_SING_BOX_SHA256: "\$\{OPENCODE_BRIDGE_SING_BOX_SHA256:-\}"/);
+  for (const name of [
+    'CONFIG_ENCRYPTION_KEY', 'OPENCODE_BRIDGE_ADMIN_PASSWORD', 'OPENCODE_BRIDGE_CLIENT_TOKEN',
+    'OPENCODE_BRIDGE_STATS_MAX_BYTES', 'OPENCODE_BRIDGE_SSE_HEARTBEAT_MS',
+    'OPENCODE_BRIDGE_KEEP_ALIVE_URL', 'OPENCODE_BRIDGE_WEB_SEARCH_PROVIDER'
+  ]) assert.match(environmentExample, new RegExp(`(?:^|\\n)#? ?${name}=`), `${name} 应在 .env.example 中出现`);
 });
 
 test('OpenAPI 文件是有效的 3.1 描述并覆盖所有公开端点', async () => {

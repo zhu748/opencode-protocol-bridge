@@ -18,6 +18,12 @@ const CHAT_PROMPT_CACHE_BLOCK_TYPES = new Set(['text', 'image_url', 'input_audio
 const WEB_SEARCH_COMPATIBILITY_NOTICE = 'Protocol bridge compatibility: this non-Responses upstream cannot execute the hosted web_search tool. Do not claim to have searched the web; use another available function tool or explain that web search is unavailable.';
 const CLAUDE_TOOL_ERROR_PREFIX = '[Claude tool_result is_error=true]';
 const CUSTOM_TOOL_INPUT_FIELD = 'input';
+const VERBOSITY_COMPATIBILITY_INSTRUCTIONS = Object.freeze({
+  low: 'Protocol bridge compatibility: keep the response concise and focused on the essential result.',
+  medium: 'Protocol bridge compatibility: use a balanced level of detail in the response.',
+  high: 'Protocol bridge compatibility: provide a thorough response with useful supporting detail.'
+});
+const SINGLE_TOOL_CALL_COMPATIBILITY_INSTRUCTION = 'Protocol bridge compatibility: call at most one function in this response.';
 const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 const NORMALIZED_CLAUDE_TOOL_REFERENCES = new WeakMap();
 const GEMINI_GENERATION_KEYS = new Set([
@@ -823,8 +829,14 @@ export function generationRequestAdaptations(body, incomingProtocol, targetProto
   const generation = incomingProtocol === 'gemini' && body?.generationConfig && typeof body.generationConfig === 'object'
     ? body.generationConfig
     : {};
+  const verbosity = incomingProtocol === 'responses'
+    ? optionalOpenAiEnum(body?.text?.verbosity, 'Responses text.verbosity', OPENAI_VERBOSITY_LEVELS)
+    : incomingProtocol === 'chat'
+      ? optionalOpenAiEnum(body?.verbosity, 'Chat verbosity', OPENAI_VERBOSITY_LEVELS)
+      : undefined;
   return [
-    ...(['responses', 'chat'].includes(targetProtocol) && generation.topK != null ? ['gemini_top_k_dropped'] : [])
+    ...(['responses', 'chat'].includes(targetProtocol) && generation.topK != null ? ['gemini_top_k_dropped'] : []),
+    ...(verbosity && ['claude', 'gemini'].includes(targetProtocol) ? [`verbosity_best_effort_${targetProtocol}`] : [])
   ];
 }
 
@@ -1422,6 +1434,17 @@ function portableToolResultContent(part) {
   return part.isError ? `${CLAUDE_TOOL_ERROR_PREFIX}${content ? `\n${content}` : ''}` : content;
 }
 
+function chatToolResultContent(part) {
+  const content = part.content;
+  if (!Array.isArray(content) || !content.every((block) => (
+    block && !Array.isArray(block) && typeof block === 'object'
+      && ['text', 'input_text', 'output_text'].includes(block.type)
+      && typeof block.text === 'string'
+  ))) return portableToolResultContent(part);
+  const text = content.map((block) => block.text).join('');
+  return part.isError ? `${CLAUDE_TOOL_ERROR_PREFIX}${text ? `\n${text}` : ''}` : text;
+}
+
 function optionalOpenAiString(value, label, { maximum } = {}) {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string' || !value || (maximum && value.length > maximum)) {
@@ -1889,17 +1912,52 @@ function customToolDescription(tool) {
   ].filter(Boolean).join('\n\n');
 }
 
-function mergeResponsesTools(tools, input) {
-  const result = [...asArray(tools)];
-  const keys = new Set(result.map(responsesToolKey).filter(Boolean));
+export function mergeResponsesTools(tools, input) {
+  const result = [];
+  const firstIndexByKey = new Map();
+  const sameDefinition = (left, right) => {
+    try { return canonicalJsonString(left) === canonicalJsonString(right); }
+    catch { return false; }
+  };
+  const append = (tool) => {
+    const key = responsesToolKey(tool);
+    if (!key || !firstIndexByKey.has(key)) {
+      if (key) firstIndexByKey.set(key, result.length);
+      result.push(tool);
+      return;
+    }
+    const index = firstIndexByKey.get(key);
+    const existing = result[index];
+    if (sameDefinition(existing, tool)) return;
+    if (existing?.type === 'namespace' && tool?.type === 'namespace'
+      && Array.isArray(existing.tools) && Array.isArray(tool.tools)) {
+      const children = [...existing.tools];
+      const firstChildByName = new Map(children.map((child, childIndex) => [child?.name, childIndex]));
+      for (const child of tool.tools) {
+        const childIndex = firstChildByName.get(child?.name);
+        if (childIndex === undefined) {
+          firstChildByName.set(child?.name, children.length);
+          children.push(child);
+        } else if (!sameDefinition(children[childIndex], child)) {
+          // 保留冲突定义，使后续 namespace 严格校验返回明确的重复工具错误。
+          children.push(child);
+        }
+      }
+      result[index] = { ...existing, tools: children };
+      return;
+    }
+    // 同名但不同的非 namespace 定义不能静默覆盖；保留给严格校验识别冲突。
+    result.push(tool);
+  };
+  for (const tool of asArray(tools)) {
+    const key = responsesToolKey(tool);
+    if (key && !firstIndexByKey.has(key)) firstIndexByKey.set(key, result.length);
+    // 顶层同名定义属于调用方自身的结构错误，必须全部保留给严格校验。
+    result.push(tool);
+  }
   for (const item of asArray(input)) {
     if (!['additional_tools', 'tool_search_output'].includes(item?.type) || !Array.isArray(item.tools)) continue;
-    for (const tool of item.tools) {
-      const key = responsesToolKey(tool);
-      if (key && keys.has(key)) continue;
-      if (key) keys.add(key);
-      result.push(tool);
-    }
+    for (const tool of item.tools) append(tool);
   }
   return result;
 }
@@ -1922,7 +1980,10 @@ function responsesAllowedToolSelectorKey(selector, label) {
   }
   if (selector.type === 'custom') {
     if (typeof selector.name !== 'string' || !selector.name) throw unsupportedFeature(`${label} 的 custom tool 缺少有效 name`);
-    return `custom\n${selector.name}`;
+    if (selector.namespace !== undefined && (typeof selector.namespace !== 'string' || !selector.namespace)) {
+      throw unsupportedFeature(`${label}.namespace 必须是非空字符串`);
+    }
+    return `custom\n${selector.namespace || ''}\n${selector.name}`;
   }
   if (selector.type === 'mcp') {
     if (typeof selector.server_label !== 'string' || !selector.server_label) throw unsupportedFeature(`${label} 的 MCP tool 缺少有效 server_label`);
@@ -1935,10 +1996,12 @@ function responsesAllowedToolSelectorKey(selector, label) {
 function responsesToolSelectorEntries(tool) {
   if (!tool || typeof tool !== 'object' || Array.isArray(tool)) return [];
   if (tool.type === 'namespace') {
-    return asArray(tool.tools).map((child) => ({ key: `function\n${tool.name || ''}\n${child?.name || ''}`, child }));
+    return asArray(tool.tools).map((child) => ({
+      key: `${child?.type === 'custom' ? 'custom' : 'function'}\n${tool.name || ''}\n${child?.name || ''}`, child
+    }));
   }
   if (tool.type === 'function') return [{ key: `function\n\n${tool.name || ''}`, tool }];
-  if (tool.type === 'custom') return [{ key: `custom\n${tool.name || ''}`, tool }];
+  if (tool.type === 'custom') return [{ key: `custom\n\n${tool.name || ''}`, tool }];
   if (tool.type === 'mcp') return [{ key: `mcp\n${tool.server_label || ''}`, tool }];
   if (RESPONSES_WEB_SEARCH_TOOL_TYPES.has(tool.type)) return [{ key: 'hosted\nweb_search', tool }];
   return [{ key: `hosted\n${tool.type || ''}`, tool }];
@@ -1967,7 +2030,9 @@ function selectResponsesAllowedTools(choice, tools) {
   const selected = [];
   for (const tool of source) {
     if (tool?.type === 'namespace') {
-      const children = asArray(tool.tools).filter((child) => selectedKeys.has(`function\n${tool.name || ''}\n${child?.name || ''}`));
+      const children = asArray(tool.tools).filter((child) => selectedKeys.has(
+        `${child?.type === 'custom' ? 'custom' : 'function'}\n${tool.name || ''}\n${child?.name || ''}`
+      ));
       if (children.length) selected.push({ ...tool, tools: children });
       continue;
     }
@@ -1987,6 +2052,25 @@ function selectedResponsesPortableToolNames(tools, aliasIndex) {
     }
   }
   return names;
+}
+
+function validResponsesCustomTool(tool, label, { rejectUnsupported = true } = {}) {
+  assertKnownObjectKeys(tool, new Set([
+    'type', 'name', 'description', 'format', 'allowed_callers', 'output_schema', 'defer_loading'
+  ]), label);
+  if (tool?.type !== 'custom' || typeof tool.name !== 'string' || !tool.name) {
+    throw unsupportedFeature(`${label} 必须是具有有效 name 的 custom tool`);
+  }
+  optionalBoolean(tool.defer_loading, `${label}.defer_loading`);
+  validateResponsesToolExecutionFields(tool, label);
+  if (rejectUnsupported) assertResponsesToolDirectCallable(tool, label);
+  if (tool.format !== undefined && (!tool.format || typeof tool.format !== 'object' || Array.isArray(tool.format))) {
+    throw unsupportedFeature(`${label} 的 format 必须是对象`);
+  }
+  if (tool.format?.type === 'grammar' && typeof tool.format.definition !== 'string') {
+    throw unsupportedFeature(`${label} 的 grammar 缺少 definition`);
+  }
+  return tool;
 }
 
 function responsesToolCompatibility(tools, { rejectUnsupported = true } = {}) {
@@ -2020,19 +2104,7 @@ function responsesToolCompatibility(tools, { rejectUnsupported = true } = {}) {
       continue;
     }
     if (tool?.type === 'custom') {
-      assertKnownObjectKeys(tool, new Set([
-        'type', 'name', 'description', 'format', 'allowed_callers', 'output_schema', 'defer_loading'
-      ]), `Responses custom tools[${namespaceIndex}]`);
-      if (typeof tool.name !== 'string' || !tool.name) throw unsupportedFeature(`Responses custom tools[${namespaceIndex}] 缺少有效 name`);
-      optionalBoolean(tool.defer_loading, `Responses custom tools[${namespaceIndex}].defer_loading`);
-      validateResponsesToolExecutionFields(tool, `Responses custom tools[${namespaceIndex}]`);
-      if (rejectUnsupported) assertResponsesToolDirectCallable(tool, `Responses custom tools[${namespaceIndex}]`);
-      if (tool.format !== undefined && (!tool.format || typeof tool.format !== 'object' || Array.isArray(tool.format))) {
-        throw unsupportedFeature(`Responses custom tools[${namespaceIndex}] 的 format 必须是对象`);
-      }
-      if (tool.format?.type === 'grammar' && typeof tool.format.definition !== 'string') {
-        throw unsupportedFeature(`Responses custom tools[${namespaceIndex}] 的 grammar 缺少 definition`);
-      }
+      validResponsesCustomTool(tool, `Responses custom tools[${namespaceIndex}]`, { rejectUnsupported });
       if (customNames.has(tool.name)) throw unsupportedFeature(`Responses custom tool 名称重复：${tool.name}`);
       customNames.add(tool.name);
       const alias = allocateAdaptedToolAlias(tool.name, 'custom', usedNames, namespaceIndex);
@@ -2086,19 +2158,33 @@ function responsesToolCompatibility(tools, { rejectUnsupported = true } = {}) {
     for (let toolIndex = 0; toolIndex < tool.tools.length; toolIndex++) {
       const child = tool.tools[toolIndex];
       const label = `Responses namespace ${tool.name}.tools[${toolIndex}]`;
-      validResponsesFunction(child, label);
-      if (rejectUnsupported) assertResponsesToolDirectCallable(child, label);
+      if (child?.type === 'custom') validResponsesCustomTool(child, label, { rejectUnsupported });
+      else {
+        validResponsesFunction(child, label);
+        if (rejectUnsupported) assertResponsesToolDirectCallable(child, label);
+      }
       const childIdentity = `${tool.name}\n${child.name}`;
-      if (namespaceChildren.has(childIdentity)) throw unsupportedFeature(`Responses namespace ${tool.name} 的 function tool 名称重复：${child.name}`);
+      if (namespaceChildren.has(childIdentity)) throw unsupportedFeature(`Responses namespace ${tool.name} 的工具名称重复：${child.name}`);
       namespaceChildren.add(childIdentity);
       const alias = allocateChatToolAlias(tool.name, child.name, usedNames, namespaceIndex, toolIndex);
-      aliases.push({ alias, namespace: tool.name, name: child.name });
+      aliases.push({ alias, namespace: tool.name, name: child.name, ...(child.type === 'custom' ? { kind: 'custom' } : {}) });
       const namespaceDescription = [
         `[Responses namespace: ${tool.name}]`,
         tool.description,
-        responsesPortableToolDescription(child)
+        responsesPortableToolDescription(child, child.type === 'custom' ? customToolDescription(child) : '')
       ].filter(Boolean).join('\n');
-      flattened.push({ name: alias, description: namespaceDescription, schema: child.parameters || {}, strict: child.strict });
+      flattened.push(child.type === 'custom'
+        ? {
+            name: alias,
+            description: namespaceDescription,
+            schema: {
+              type: 'object',
+              properties: { [CUSTOM_TOOL_INPUT_FIELD]: { type: 'string', description: 'Complete free-form input for the custom tool.' } },
+              required: [CUSTOM_TOOL_INPUT_FIELD],
+              additionalProperties: false
+            }
+          }
+        : { name: alias, description: namespaceDescription, schema: child.parameters || {}, strict: child.strict });
     }
   }
 
@@ -2108,8 +2194,8 @@ function responsesToolCompatibility(tools, { rejectUnsupported = true } = {}) {
   return { tools: flattened, aliases, droppedWebSearch };
 }
 
-export function hasHostedResponsesWebSearch(tools) {
-  return asArray(tools).some((tool) => RESPONSES_WEB_SEARCH_TOOL_TYPES.has(tool?.type));
+export function hasHostedResponsesWebSearch(tools, input) {
+  return mergeResponsesTools(tools, input).some((tool) => RESPONSES_WEB_SEARCH_TOOL_TYPES.has(tool?.type));
 }
 
 function responsesRequestForGeminiSearch(body) {
@@ -2130,9 +2216,11 @@ function responsesRequestForGeminiSearch(body) {
   const filterTools = (tools) => Array.isArray(tools)
     ? tools.filter((tool) => !RESPONSES_WEB_SEARCH_TOOL_TYPES.has(tool?.type))
     : tools;
-  const input = Array.isArray(body.input) ? body.input.map((item) => item?.type === 'tool_search_output' && Array.isArray(item.tools)
-    ? { ...item, tools: filterTools(item.tools) }
-    : item) : body.input;
+  const input = Array.isArray(body.input) ? body.input.flatMap((item) => {
+    if (!['additional_tools', 'tool_search_output'].includes(item?.type) || !Array.isArray(item.tools)) return [item];
+    const tools = filterTools(item.tools);
+    return item.type === 'additional_tools' && tools.length === 0 ? [] : [{ ...item, tools }];
+  }) : body.input;
   return {
     body: { ...body, tools: filterTools(body.tools), ...(Array.isArray(body.input) ? { input } : {}) },
     googleSearch: enabled
@@ -2149,7 +2237,7 @@ export function responsesToolAdaptations(tools, input, toolChoice) {
   const definitions = activeSource.flatMap((tool) => tool?.type === 'namespace' ? asArray(tool.tools) : [tool]);
   return [
     ...(asArray(input).some((item) => item?.type === 'additional_tools') ? ['additional_tools_to_top_level'] : []),
-    ...(activeSource.some((tool) => tool?.type === 'custom') ? ['custom'] : []),
+    ...(definitions.some((tool) => tool?.type === 'custom') ? ['custom'] : []),
     ...(activeSource.some((tool) => tool?.type === 'tool_search' && tool.execution === 'client') ? ['client_tool_search'] : []),
     ...(activeSource.some((tool) => tool?.type === 'tool_search' && tool.execution !== 'client') ? ['hosted_tool_search'] : []),
     ...(toolChoice?.type === 'allowed_tools' ? ['allowed_tools_filtered'] : []),
@@ -2157,6 +2245,33 @@ export function responsesToolAdaptations(tools, input, toolChoice) {
     ...(definitions.some((tool) => tool?.output_schema !== undefined) ? ['output_schema_to_description'] : []),
     ...(definitions.some((tool) => Array.isArray(tool?.allowed_callers) && tool.allowed_callers.includes('direct')
       && tool.allowed_callers.includes('programmatic')) ? ['allowed_callers_direct_only'] : [])
+  ];
+}
+
+export function crossProtocolToolAdaptations(body, incomingProtocol, targetProtocol) {
+  if (incomingProtocol === targetProtocol || targetProtocol !== 'gemini') return [];
+  let definitions = [];
+  if (incomingProtocol === 'responses') {
+    definitions = mergeResponsesTools(body?.tools, body?.input)
+      .flatMap((tool) => tool?.type === 'namespace' ? asArray(tool.tools) : [tool]);
+  } else if (incomingProtocol === 'claude') {
+    definitions = asArray(body?.tools);
+  } else if (incomingProtocol === 'chat') {
+    definitions = [
+      ...asArray(body?.tools).map((tool) => tool?.function),
+      ...asArray(body?.functions)
+    ];
+  }
+  const hasCallableFunctions = definitions.some((tool) => tool?.type === 'function' || tool?.type === 'custom'
+    || (typeof tool?.name === 'string' && tool.name));
+  const parallelDisabled = incomingProtocol === 'responses' || incomingProtocol === 'chat'
+    ? body?.parallel_tool_calls === false
+    : incomingProtocol === 'claude'
+      ? body?.tool_choice?.disable_parallel_tool_use === true
+      : false;
+  return [
+    ...(definitions.some((tool) => tool?.strict === true) ? ['strict_tool_schema_best_effort_gemini'] : []),
+    ...(hasCallableFunctions && parallelDisabled ? ['parallel_tool_calls_false_best_effort_gemini'] : [])
   ];
 }
 
@@ -2253,22 +2368,22 @@ function createResponsesAliasIndex(aliases) {
   const uniqueChildByName = new Map();
   for (const entry of aliases) {
     byAlias.set(entry.alias, entry);
-    if (entry.kind) {
+    if (entry.namespace) {
+      let names = byNamespace.get(entry.namespace);
+      if (!names) {
+        names = new Map();
+        byNamespace.set(entry.namespace, names);
+      }
+      names.set(entry.name, entry.alias);
+      uniqueChildByName.set(entry.name, uniqueChildByName.has(entry.name) ? null : entry);
+    } else if (entry.kind) {
       let names = byKind.get(entry.kind);
       if (!names) {
         names = new Map();
         byKind.set(entry.kind, names);
       }
       names.set(entry.kind === 'tool_search' ? '' : entry.name, entry.alias);
-      continue;
     }
-    let names = byNamespace.get(entry.namespace);
-    if (!names) {
-      names = new Map();
-      byNamespace.set(entry.namespace, names);
-    }
-    names.set(entry.name, entry.alias);
-    uniqueChildByName.set(entry.name, uniqueChildByName.has(entry.name) ? null : entry);
   }
   return { byAlias, byNamespace, byKind, uniqueChildByName };
 }
@@ -2290,11 +2405,13 @@ export function createResponsesToolIdentityResolver(tools) {
   const directNames = new Set(asArray(tools).filter((tool) => tool?.type === 'function').map((tool) => tool.name));
   return (chatName) => {
     const exact = aliasIndex.byAlias.get(chatName);
-    if (exact?.kind === 'custom') return { kind: 'custom', name: exact.name };
+    if (exact?.kind === 'custom') return { kind: 'custom', ...(exact.namespace ? { namespace: exact.namespace } : {}), name: exact.name };
     if (exact?.kind === 'tool_search') return { kind: 'tool_search' };
     if (exact) return { namespace: exact.namespace, name: exact.name };
     const child = aliasIndex.uniqueChildByName.get(chatName);
-    if (!directNames.has(chatName) && child) return { namespace: child.namespace, name: child.name };
+    if (!directNames.has(chatName) && child) return {
+      ...(child.kind === 'custom' ? { kind: 'custom' } : {}), namespace: child.namespace, name: child.name
+    };
     return { name: chatName };
   };
 }
@@ -2735,7 +2852,12 @@ export function normalizeRequest(body, protocol) {
     } else if (body.tool_choice && typeof body.tool_choice === 'object' && body.tool_choice.type === 'function') {
       normalized.toolChoice = { type: 'tool', name: responsesToolAlias(body.tool_choice.namespace, body.tool_choice.name, historyAliasIndex) };
     } else if (body.tool_choice && typeof body.tool_choice === 'object' && body.tool_choice.type === 'custom') {
-      normalized.toolChoice = { type: 'tool', name: adaptedResponsesToolAlias('custom', body.tool_choice.name, historyAliasIndex) };
+      normalized.toolChoice = {
+        type: 'tool',
+        name: body.tool_choice.namespace
+          ? responsesToolAlias(body.tool_choice.namespace, body.tool_choice.name, historyAliasIndex)
+          : adaptedResponsesToolAlias('custom', body.tool_choice.name, historyAliasIndex)
+      };
     } else if (body.tool_choice && typeof body.tool_choice === 'object' && body.tool_choice.type === 'tool_search') {
       normalized.toolChoice = { type: 'tool', name: adaptedResponsesToolAlias('tool_search', '', historyAliasIndex) };
     } else if (compatibility.droppedWebSearch && (body.tool_choice === 'required' || RESPONSES_WEB_SEARCH_TOOL_TYPES.has(body.tool_choice?.type))) {
@@ -2771,10 +2893,16 @@ export function normalizeRequest(body, protocol) {
         }
       } else if (item.type === 'custom_tool_call') {
         if (typeof item.name !== 'string' || !item.name) throw unsupportedFeature(`Responses input[${index}] 的 custom_tool_call 缺少 name`);
+        if (item.namespace !== undefined && (typeof item.namespace !== 'string' || !item.namespace)) {
+          throw unsupportedFeature(`Responses input[${index}] 的 custom_tool_call.namespace 必须是非空字符串`);
+        }
         if (typeof item.input !== 'string') throw unsupportedFeature(`Responses input[${index}] 的 custom_tool_call.input 必须是字符串`);
         normalized.messages.push({ role: 'assistant', parts: [{
           type: 'tool_call', id: responsesInputCallId(item, `Responses input[${index}] custom_tool_call`),
-          name: adaptedResponsesToolAlias('custom', item.name, historyAliasIndex), arguments: { [CUSTOM_TOOL_INPUT_FIELD]: item.input }
+          name: item.namespace
+            ? responsesToolAlias(item.namespace, item.name, historyAliasIndex)
+            : adaptedResponsesToolAlias('custom', item.name, historyAliasIndex),
+          arguments: { [CUSTOM_TOOL_INPUT_FIELD]: item.input }
         }] });
       } else if (item.type === 'custom_tool_call_output') {
         const callId = requiredInputString(item.call_id, `Responses input[${index}] custom_tool_call_output.call_id`);
@@ -3343,7 +3471,7 @@ function validateResponsesInputItemKeys(item, index) {
     reasoning: ['type', 'id', 'status', 'summary', 'content', 'encrypted_content', 'phase'],
     function_call: ['type', 'id', 'status', 'call_id', 'name', 'namespace', 'arguments', 'caller', 'phase'],
     function_call_output: ['type', 'id', 'status', 'call_id', 'output', 'caller', 'phase'],
-    custom_tool_call: ['type', 'id', 'status', 'call_id', 'name', 'input', 'phase'],
+    custom_tool_call: ['type', 'id', 'status', 'call_id', 'namespace', 'name', 'input', 'phase'],
     custom_tool_call_output: ['type', 'id', 'status', 'call_id', 'name', 'output', 'phase'],
     tool_search_call: ['type', 'id', 'status', 'call_id', 'execution', 'arguments', 'phase'],
     tool_search_output: ['type', 'id', 'status', 'call_id', 'execution', 'tools', 'phase'],
@@ -3773,6 +3901,35 @@ function appendChatAssistantMessage(messages, next) {
   }
 }
 
+function claudeToolResultContent(content, { imageHandoffEnabled = false } = {}) {
+  if (!Array.isArray(content)) return content;
+  if (content.length === 0) return '';
+  const responseOutputTypes = new Set(['text', 'input_text', 'output_text', 'input_image', 'input_file']);
+  if (!content.every((part) => part && typeof part === 'object' && !Array.isArray(part) && responseOutputTypes.has(part.type))) {
+    return canonicalJsonString(content);
+  }
+  const parts = normalizeParts(content, { rejectUnknown: true });
+  return parts.map((part) => {
+    if (part.type === 'text' || part.type === 'refusal') return { type: 'text', text: portablePartText(part) };
+    if (part.type === 'image') return imageHandoffEnabled
+      ? { type: 'text', text: imageHandoffNotice(part) }
+      : { type: 'image', source: part.source };
+    if (part.type === 'file') {
+      if (!part.source) throw unsupportedFeature('工具结果文件内容块缺少可转换的 URL、file_id 或 base64 数据');
+      if (part.source.type === 'file') {
+        throw unsupportedFeature('Claude Messages 无法表达工具结果中的 Responses file_id；请改用 URL/base64，或将模型路由设为 responses');
+      }
+      return {
+        type: 'document', source: part.source,
+        ...(part.title || part.filename ? { title: part.title || part.filename } : {}),
+        ...(part.context ? { context: part.context } : {}),
+        ...(part.citations !== undefined ? { citations: part.citations } : {})
+      };
+    }
+    throw unsupportedFeature(`Claude Messages 无法表达工具结果内容块：${part.type || 'unknown'}`);
+  });
+}
+
 function claudeContent(parts, { includeReasoning = false, reasoningAsText = false, imageHandoffEnabled = false } = {}) {
   return parts.flatMap((part) => {
     const cacheControl = part.cacheControl || (part.promptCacheBreakpoint ? { type: 'ephemeral' } : undefined);
@@ -3796,7 +3953,7 @@ function claudeContent(parts, { includeReasoning = false, reasoningAsText = fals
       ...(cacheControl ? { cache_control: cacheControl } : {})
     };
     if (part.type === 'tool_result') return {
-      type: 'tool_result', tool_use_id: part.id, content: part.content,
+      type: 'tool_result', tool_use_id: part.id, content: claudeToolResultContent(part.content, { imageHandoffEnabled }),
       ...(part.isError !== undefined ? { is_error: part.isError } : {}),
       ...(cacheControl ? { cache_control: cacheControl } : {})
     };
@@ -3958,10 +4115,20 @@ function geminiRequestPart(part, role, toolNames, options) {
   throw unsupportedFeature(`Gemini GenerateContent 无法表达内容块：${part.type || 'unknown'}`);
 }
 
+function compatibilityInstructionText(request, { singleToolCall = false } = {}) {
+  return [
+    request.verbosity ? VERBOSITY_COMPATIBILITY_INSTRUCTIONS[request.verbosity] : '',
+    singleToolCall ? SINGLE_TOOL_CALL_COMPATIBILITY_INSTRUCTION : ''
+  ].filter(Boolean).join('\n\n');
+}
+
+function appendCompatibilityInstruction(system, instruction) {
+  if (!instruction) return system;
+  if (Array.isArray(system)) return [...system, { type: 'text', text: instruction }];
+  return [system, instruction].filter(Boolean).join('\n\n');
+}
+
 function geminiToolConfig(request, tools) {
-  if (request.parallelToolCalls === false) {
-    throw unsupportedFeature('Gemini GenerateContent 无法禁止并行函数调用；请移除 parallel_tool_calls/disable_parallel_tool_use 或改用原协议模型');
-  }
   if (!request.toolChoice) return undefined;
   const choice = request.toolChoice;
   if (choice.type === 'none') return { functionCallingConfig: { mode: 'NONE' } };
@@ -3982,13 +4149,9 @@ function geminiOutputGenerationConfig(request) {
 function formatGeminiRequest(request, options) {
   assertPortableResponsesReasoning(request, 'Gemini GenerateContent');
   unsupportedGenerationOptions(request, 'Gemini GenerateContent', [
-    'metadata', 'serviceTier', 'speed', 'safetyIdentifier', 'user', 'moderation', 'verbosity',
+    'metadata', 'serviceTier', 'speed', 'safetyIdentifier', 'user', 'moderation',
   ]);
   const tools = portableCrossProtocolTools(request, 'Gemini GenerateContent');
-  const unsupportedTool = tools.find((tool) => tool.strict !== undefined);
-  if (unsupportedTool) {
-    throw unsupportedFeature(`Gemini GenerateContent 无法无损表达工具 ${unsupportedTool.name} 的 strict 配置`);
-  }
 
   // Resolve functionResponse names only from calls that have already appeared.
   // Pre-populating this map would silently accept an invalid result-before-call
@@ -4026,6 +4189,9 @@ function formatGeminiRequest(request, options) {
     parametersJsonSchema: cleanSchema(tool.schema || {})
   }));
   const toolConfig = geminiToolConfig(request, tools);
+  const system = appendCompatibilityInstruction(request.system, compatibilityInstructionText(request, {
+    singleToolCall: request.parallelToolCalls === false && tools.length > 0
+  }));
   const geminiTools = [
     ...(functionDeclarations.length ? [{ functionDeclarations }] : []),
     ...(request.geminiGoogleSearch ? [{ googleSearch: {} }] : [])
@@ -4033,7 +4199,7 @@ function formatGeminiRequest(request, options) {
   return {
     model: request.model,
     stream: request.stream,
-    ...(request.system ? { systemInstruction: { parts: [{ text: request.system }] } } : {}),
+    ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
     contents,
     ...(geminiTools.length ? { tools: geminiTools } : {}),
     ...(toolConfig ? { toolConfig } : {}),
@@ -4058,7 +4224,7 @@ export function formatRequest(request, protocol, options = {}) {
     assertPortableResponsesReasoning(request, 'Claude Messages');
     unsupportedGenerationOptions(request, 'Claude Messages', [
       'seed', 'presencePenalty', 'frequencyPenalty', 'topLogprobs',
-      'safetyIdentifier', 'user', 'verbosity', 'moderation'
+      'safetyIdentifier', 'user', 'moderation'
     ]);
     const targetSpeed = request.speed || claudeSpeedForOpenAiServiceTier(request.serviceTier);
     if (request.serviceTier && !targetSpeed) {
@@ -4087,12 +4253,13 @@ export function formatRequest(request, protocol, options = {}) {
       ...(request.outputFormat ? { format: { type: 'json_schema', schema: request.outputFormat.schema } } : {}),
       ...(reasoning.effort ? { effort: reasoning.effort } : {})
     };
-    const system = request.systemMessages?.some((item) => item.cacheControl || item.promptCacheBreakpoint)
+    const rawSystem = request.systemMessages?.some((item) => item.cacheControl || item.promptCacheBreakpoint)
       ? request.systemMessages.map((item) => {
         const cacheControl = item.cacheControl || (item.promptCacheBreakpoint ? { type: 'ephemeral' } : undefined);
         return { type: 'text', text: item.text, ...(cacheControl ? { cache_control: cacheControl } : {}) };
       })
       : request.system;
+    const system = appendCompatibilityInstruction(rawSystem, compatibilityInstructionText(request));
     const automaticCacheControl = request.cacheControl
       || (request.responsesPromptCache?.mode === 'implicit' ? { type: 'ephemeral' } : undefined);
     return {
@@ -4323,7 +4490,7 @@ export function formatRequest(request, protocol, options = {}) {
     }
     const text = textFragments.join('');
     for (const result of results) {
-      const content = portableToolResultContent(result);
+      const content = chatToolResultContent(result);
       messages.push({
         role: 'tool', tool_call_id: result.id,
         content: promptCacheEnabled && result.cacheControl
@@ -4980,7 +5147,11 @@ export function formatResponse(response, protocol, responsesOptions = {}) {
       }
       if (part.type === 'tool_call') {
         const identity = resolveToolIdentity(part.name);
-        if (identity.kind === 'custom') return { id: `ctc_${index}`, type: 'custom_tool_call', status: itemStatus, call_id: part.id, name: identity.name, input: customToolInput(part.arguments) };
+        if (identity.kind === 'custom') return {
+          id: `ctc_${index}`, type: 'custom_tool_call', status: itemStatus, call_id: part.id,
+          ...(identity.namespace ? { namespace: identity.namespace } : {}),
+          name: identity.name, input: customToolInput(part.arguments)
+        };
         if (identity.kind === 'tool_search') return { id: `tsc_${index}`, type: 'tool_search_call', status: itemStatus, execution: 'client', call_id: part.id, arguments: toolSearchArguments(part.arguments) };
         return { id: `fc_${index}`, type: 'function_call', status: itemStatus, call_id: part.id, ...identity, arguments: canonicalJsonString(part.arguments) };
       }

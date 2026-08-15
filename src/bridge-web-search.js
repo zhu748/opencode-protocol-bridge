@@ -143,12 +143,10 @@ function responsesSearchFilters(tool) {
 function normalizeResponsesSearchTool(tool) {
   const unsupported = Object.keys(tool).filter((field) => !RESPONSES_WEB_SEARCH_FIELDS.has(field));
   if (unsupported.length) throw new Error(`桥接本地 Web Search 暂不支持 Responses ${tool.type} 字段：${unsupported.join(', ')}`);
-  if (tool.external_web_access === false) {
-    throw new Error('本地 Web Search 会访问实时公网，无法保持 Responses external_web_access:false 的仅缓存语义；请使用原生 Responses 路由');
-  }
-  if (tool.external_web_access !== undefined && tool.external_web_access !== true) {
+  if (tool.external_web_access !== undefined && typeof tool.external_web_access !== 'boolean') {
     throw new Error('Responses web_search.external_web_access 必须是布尔值');
   }
+  const externalAccessDisabled = tool.external_web_access === false;
   const contextSize = tool.search_context_size ?? 'medium';
   if (!['low', 'medium', 'high'].includes(contextSize)) {
     throw new Error('Responses web_search.search_context_size 仅支持 low、medium 或 high');
@@ -179,6 +177,7 @@ function normalizeResponsesSearchTool(tool) {
   const location = responsesSearchLocation(tool);
   const requestedCharacters = returnTokenBudget ? Math.min(returnTokenBudget * 4, MAX_TOOL_RESULT_CHARS) : profile.defaultContextMaxCharacters;
   const adaptations = [];
+  if (externalAccessDisabled) adaptations.push('responses_web_search_external_access_disabled');
   if (contentTypes.includes('image')) adaptations.push('responses_web_search_image_results_dropped');
   if (returnTokenBudget && returnTokenBudget * 4 > MAX_TOOL_RESULT_CHARS) adaptations.push('responses_web_search_token_budget_bounded');
   if (tool.image_settings !== undefined) adaptations.push('responses_web_search_image_settings_dropped');
@@ -192,6 +191,7 @@ function normalizeResponsesSearchTool(tool) {
     defaultContextMaxCharacters: requestedCharacters,
     sourceType: tool.type,
     outputProtocol: 'responses',
+    externalAccessDisabled,
     adaptations
   };
 }
@@ -382,8 +382,26 @@ function responsesAllowedSearchChoice(choice) {
   };
 }
 
+function responsesInputTools(input) {
+  return asArray(input).flatMap((item) => (
+    ['additional_tools', 'tool_search_output'].includes(item?.type) && Array.isArray(item.tools)
+      ? item.tools
+      : []
+  ));
+}
+
+function filterResponsesInputTools(input, keep) {
+  if (!Array.isArray(input)) return input;
+  return input.flatMap((item) => {
+    if (!['additional_tools', 'tool_search_output'].includes(item?.type) || !Array.isArray(item.tools)) return [item];
+    const tools = item.tools.filter(keep);
+    if (item.type === 'additional_tools' && tools.length === 0) return [];
+    return [{ ...item, tools }];
+  });
+}
+
 export function responsesWebSearchForChat(body) {
-  const tools = asArray(body?.tools);
+  const tools = [...asArray(body?.tools), ...responsesInputTools(body?.input)];
   const matches = tools.filter((tool) => objectValue(tool) && RESPONSES_WEB_SEARCH_TYPES.has(tool.type));
   if (!matches.length) return null;
   if (matches.length !== 1) throw new Error('Responses 请求不能同时声明多个 Web Search 工具');
@@ -398,13 +416,24 @@ export function responsesWebSearchForChat(body) {
   const requiredOnlySearch = choice === 'required' && remainingTools.length === 0;
   const explicitlyOtherTool = objectValue(choice) && ['function', 'custom', 'tool_search'].includes(choice.type);
   const allowedOnlySearch = allowedChoice?.includesSearch && allowedChoice.remainingSelectors.length === 0;
-  const enabled = choice !== 'none' && !explicitlyOtherTool && (!allowedChoice || allowedChoice.includesSearch);
-  if (explicitlyForced || requiredOnlySearch || (allowedOnlySearch && allowedChoice.mode === 'required')) spec.force = true;
-  const history = portableResponsesSearchHistory(body.input);
-  const nextBody = { ...body, tools: remainingTools, input: history.input };
+  const searchRequired = explicitlyForced || requiredOnlySearch || (allowedOnlySearch && allowedChoice.mode === 'required');
+  if (spec.externalAccessDisabled && searchRequired) {
+    throw new Error('跨协议转换无法执行 Responses external_web_access:false 的仅缓存搜索；请允许实时 Web Search、取消强制搜索或将模型路由设为 responses');
+  }
+  const enabled = !spec.externalAccessDisabled
+    && choice !== 'none' && !explicitlyOtherTool && (!allowedChoice || allowedChoice.includesSearch);
+  if (searchRequired) spec.force = true;
+  const filteredInput = filterResponsesInputTools(body.input, (tool) => tool !== matches[0]);
+  const history = portableResponsesSearchHistory(filteredInput);
+  const nextBody = {
+    ...body,
+    tools: asArray(body?.tools).filter((tool) => tool !== matches[0]),
+    input: history.input
+  };
   if (explicitlyForced || requiredOnlySearch) nextBody.tool_choice = 'auto';
   else if (allowedOnlySearch) {
     nextBody.tools = [];
+    nextBody.input = filterResponsesInputTools(nextBody.input, () => false);
     nextBody.tool_choice = 'auto';
   }
   else if (allowedChoice?.includesSearch) nextBody.tool_choice = { ...choice, tools: allowedChoice.remainingSelectors };
