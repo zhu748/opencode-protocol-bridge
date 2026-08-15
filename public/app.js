@@ -1,4 +1,4 @@
-import { compactIdentifier, filterRequestLogs, formatCooldownRemaining, requestLogsToCsv } from './log-utils.js';
+import { compactIdentifier, filterRequestLogs, requestLogsToCsv } from './log-utils.js';
 import { createLatestRequestGate, optionalLoad, summarizeSourceFailures } from './refresh-utils.js';
 import { escapeHtml } from './html-utils.js';
 import { createOpenCodeConfig } from './opencode-config.js';
@@ -506,12 +506,6 @@ function renderLatency(item) {
   return `<div class="stats-latency" title="${escapeHtml(`格式为平均 / P95；${phaseCoverage}`)}"><strong>总计 ${averageAndP95(item.averageDurationMs, item.p95DurationMs)}</strong><small>等待 ${wait}</small><small>响应体 ${body}</small></div>`;
 }
 
-function updateCooldownCountdowns() {
-  $$('.cooldown-countdown').forEach((node) => {
-    node.textContent = formatCooldownRemaining(node.dataset.cooldownUntil);
-  });
-}
-
 function renderStatsRows(selector, items) {
   $(selector).innerHTML = items.length ? items.map((item) => `<tr><td class="stats-dimension" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td><td>${formatNumber(item.requests)}</td><td>${formatPercentage(item.successRate)}</td><td>${formatNumber(item.totalTokens)}</td><td>${formatPercentage(item.cacheReadRate)}</td><td>${renderLatency(item)}</td></tr>`).join('') : '<tr><td colspan="6" class="stats-empty">暂无数据</td></tr>';
 }
@@ -521,8 +515,7 @@ function renderCredentialRows(history, health) {
   const healthByName = new Map((health || []).map((item) => [item.name, item]));
   const names = [...new Set([...healthByName.keys(), ...historyByName.keys()])];
   const stateLabels = {
-    healthy: ['正常', 'credential-healthy'], probing: ['恢复探测', 'credential-probing'], degraded: ['观察中', 'credential-degraded'],
-    cooldown: ['冷却', 'credential-cooldown'], unknown: ['未探测', 'credential-unknown'],
+    healthy: ['正常', 'credential-healthy'], degraded: ['观察中', 'credential-degraded'], unknown: ['未探测', 'credential-unknown'],
     historical: ['历史', 'credential-unknown']
   };
   const failureLabels = { auth: '鉴权失败', rate_limit: '上游限流', transient: '上游 5xx', network: '网络故障' };
@@ -534,14 +527,12 @@ function renderCredentialRows(history, health) {
     const statusDetail = current?.lastFailureKind ? failureLabels[current.lastFailureKind] || '请求失败' : current?.lastStatus ? `HTTP ${current.lastStatus}` : '等待首次请求';
     const eventTime = current?.lastFailureAt || current?.lastSuccessAt;
     const eventLabel = current?.lastFailureAt ? statusDetail : current?.lastSuccessAt ? '最近成功' : current ? '尚无探测' : '已不在当前配置';
-    const cooldown = current?.cooldownUntil
-      ? `<small>至 ${escapeHtml(new Date(current.cooldownUntil).toLocaleString())} · <span class="cooldown-countdown" data-cooldown-until="${escapeHtml(current.cooldownUntil)}">${escapeHtml(formatCooldownRemaining(current.cooldownUntil))}</span></small>`
-      : `<small>${escapeHtml(statusDetail)}</small>`;
+    const status = `<small>${escapeHtml(statusDetail)}</small>`;
     const recent = eventTime ? `${escapeHtml(eventLabel)}<small>${escapeHtml(new Date(eventTime).toLocaleString())}</small>` : escapeHtml(eventLabel);
     const reset = current && !['healthy', 'unknown'].includes(state)
       ? `<button class="mini-btn reset-credential-health" data-provider="${escapeHtml(current.provider)}" data-credential-id="${escapeHtml(current.credentialId)}" type="button">重置</button>`
       : '';
-    return `<tr><td>${escapeHtml(name)}</td><td><div class="credential-health-state"><span class="credential-state ${stateClass}">${stateLabel}</span>${reset}</div>${cooldown}</td><td>${formatNumber(current?.consecutiveFailures || 0)}</td><td>${formatNumber(usage.requests)}</td><td>${formatPercentage(usage.successRate)}</td><td>${formatNumber(usage.totalTokens)}</td><td>${formatPercentage(usage.cacheReadRate)}</td><td>${renderLatency(usage)}</td><td class="credential-event">${recent}</td></tr>`;
+    return `<tr><td>${escapeHtml(name)}</td><td><div class="credential-health-state"><span class="credential-state ${stateClass}">${stateLabel}</span>${reset}</div>${status}</td><td>${formatNumber(current?.consecutiveFailures || 0)}</td><td>${formatNumber(usage.requests)}</td><td>${formatPercentage(usage.successRate)}</td><td>${formatNumber(usage.totalTokens)}</td><td>${formatPercentage(usage.cacheReadRate)}</td><td>${renderLatency(usage)}</td><td class="credential-event">${recent}</td></tr>`;
   }).join('') : '<tr><td colspan="9" class="stats-empty">暂无已配置或历史 Key</td></tr>';
 }
 
@@ -1415,5 +1406,4 @@ window.addEventListener('beforeunload', (event) => {
   event.returnValue = '';
 });
 
-setInterval(updateCooldownCountdowns, 1000);
 boot().catch((error) => { $('#auth').classList.remove('hidden'); $('#auth-error').textContent = `无法连接服务：${error.message}`; });

@@ -28,6 +28,7 @@ import { normalizeRequestedModel } from './model-capabilities.js';
 import { clientAbortController, clientAbortSignal } from './request-abort.js';
 import { assertJsonComplexity } from './json-complexity.js';
 import { SharedOperationPool } from './shared-operation.js';
+import { DeferredToolContextStore } from './deferred-tool-context-store.js';
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
@@ -86,6 +87,7 @@ let activeTokenCountRequests = 0;
 const activeClientRequests = new Map();
 const activeClientTokenCountRequests = new Map();
 const activeInferenceRecords = new Map();
+const deferredBridgeSearchContexts = new DeferredToolContextStore();
 let recentClaudePrompt = null;
 let statsMigrationPromise = null;
 let cachedStatusStats = null;
@@ -431,13 +433,8 @@ function selectProviderCredential(config, provider) {
   return credentialHealth.select(provider, providerCredentials(config, provider));
 }
 
-function credentialUnavailableMessage(provider, selection) {
-  if (selection.reason === 'cooldown') return `OpenCode ${provider === 'go' ? 'Go' : 'Zen'} 的全部 Key 正在冷却，请稍后重试`;
+function credentialUnavailableMessage(provider) {
   return `尚未配置 OpenCode ${provider === 'go' ? 'Go' : 'Zen'} 密钥`;
-}
-
-function applyCredentialRetryHeader(res, selection) {
-  if (selection.reason === 'cooldown') res.setHeader('retry-after', String(Math.max(1, Math.ceil(selection.retryAfterMs / 1000))));
 }
 
 function applyUpstreamResponseHeaders(res, response) {
@@ -1157,8 +1154,7 @@ async function adminApiOperation(req, res, url, config) {
       try {
         const result = await discoverModels(config, provider, signal);
         if (!result.response) {
-          applyCredentialRetryHeader(res, result.selection);
-          return await json(res, result.selection.reason === 'cooldown' ? 503 : 400, { error: credentialUnavailableMessage(provider, result.selection) });
+          return await json(res, 400, { error: credentialUnavailableMessage(provider) });
         }
         if (result.attempts > 1) res.setHeader('x-opencode-key-attempts', String(result.attempts));
         const response = result.response;
@@ -1190,8 +1186,7 @@ async function adminApiOperation(req, res, url, config) {
     try { proxyUrl = normalizeProxyUrl(proxyCandidate); }
     catch (error) { return json(res, 400, { error: `代理地址无效：${error.message}` }); }
     if (!apiKey) {
-      applyCredentialRetryHeader(res, selection);
-      return json(res, selection.reason === 'cooldown' ? 503 : 400, { error: selection.reason === 'cooldown' ? credentialUnavailableMessage(provider, selection) : `${provider.toUpperCase()} 密钥未填写` });
+      return json(res, 400, { error: `${provider.toUpperCase()} 密钥未填写` });
     }
     const signal = clientAbortSignal(req, res);
     let responseReceived = false;
@@ -1314,7 +1309,56 @@ function withoutBridgeWebSearchTool(body) {
   return next;
 }
 
-async function callChatWithBridgeWebSearch({ provider, credential, body, signal, timeoutMs, forwardHeaders, search, searchProvider, sessionId, model }) {
+function chatResponseWithoutBridgeSearchCalls(body, usage) {
+  const choices = Array.isArray(body?.choices) ? body.choices.map((choice, index) => {
+    if (index !== 0 || !choice?.message || typeof choice.message !== 'object' || Array.isArray(choice.message)) return choice;
+    const toolCalls = Array.isArray(choice.message.tool_calls)
+      ? choice.message.tool_calls.filter((call) => call?.function?.name !== BRIDGE_WEB_SEARCH_NAME)
+      : [];
+    return { ...choice, message: { ...choice.message, tool_calls: toolCalls } };
+  }) : [];
+  return { ...body, choices, usage: mergedChatUsage(body?.usage, usage) };
+}
+
+function rememberDeferredBridgeSearchContext(scope, assistant, results) {
+  const clientToolCallIds = (Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [])
+    .filter((call) => call?.function?.name !== BRIDGE_WEB_SEARCH_NAME && typeof call?.id === 'string' && call.id)
+    .map((call) => call.id);
+  if (!clientToolCallIds.length) return;
+  return deferredBridgeSearchContexts.remember(scope, clientToolCallIds, {
+    assistant,
+    results,
+    clientToolCallIds
+  });
+}
+
+function withDeferredBridgeSearchContext(body, scope) {
+  if (!Array.isArray(body?.messages)) return body;
+  const completedToolCallIds = new Set(body.messages
+    .filter((message) => message?.role === 'tool' && typeof message.tool_call_id === 'string' && message.tool_call_id)
+    .map((message) => message.tool_call_id));
+  const found = deferredBridgeSearchContexts.find(scope, [...completedToolCallIds]);
+  if (!found) return body;
+  const matched = found.value;
+  if (!matched.clientToolCallIds.every((toolCallId) => completedToolCallIds.has(toolCallId))) return body;
+  const matchedToolCallIds = new Set(matched.clientToolCallIds);
+  const assistantIndex = body.messages.findIndex((message) => message?.role === 'assistant'
+    && Array.isArray(message.tool_calls)
+    && message.tool_calls.some((call) => matchedToolCallIds.has(call?.id)));
+  if (assistantIndex < 0) return body;
+  deferredBridgeSearchContexts.consume(found.id);
+  return {
+    ...body,
+    messages: [
+      ...body.messages.slice(0, assistantIndex),
+      matched.assistant,
+      ...matched.results,
+      ...body.messages.slice(assistantIndex + 1)
+    ]
+  };
+}
+
+async function callChatWithBridgeWebSearch({ provider, credential, body, signal, timeoutMs, forwardHeaders, search, searchProvider, sessionId, model, scope }) {
   const timeoutController = new AbortController();
   const timeout = setTimeout(() => {
     timeoutController.abort(new DOMException('本地 Web Search 工具循环超时', 'TimeoutError'));
@@ -1325,6 +1369,7 @@ async function callChatWithBridgeWebSearch({ provider, credential, body, signal,
   let calls = 0;
   const searches = [];
   const usage = { seen: false };
+  let lastCredentialResponse;
   try {
     for (let turns = 0; turns < search.maxUses + 3; turns++) {
       const response = await callUpstream({
@@ -1336,12 +1381,14 @@ async function callChatWithBridgeWebSearch({ provider, credential, body, signal,
         timeoutMs,
         forwardHeaders
       });
-      if (!response.ok) return { response, calls, searches };
+      lastCredentialResponse = response;
+      if (!response.ok) return { response, credentialResponse: response, calls, searches };
       let payload;
       try { payload = await readResponseJsonPayload(response); }
       catch (error) {
         return {
           response: bridgeWebSearchFailureResponse(`本地 Web Search 读取 Chat 上游响应失败：${error.message}`, error.code || 'upstream_response_error'),
+          credentialResponse: response,
           calls,
           searches
         };
@@ -1350,18 +1397,25 @@ async function callChatWithBridgeWebSearch({ provider, credential, body, signal,
       const localCalls = bridgeWebSearchCalls(payload.value);
       if (!localCalls.length) {
         const value = { ...payload.value, usage: mergedChatUsage(payload.value?.usage, usage) };
-        return { response: clonedJsonResponse(response, value), calls, searches };
+        return { response: clonedJsonResponse(response, value), credentialResponse: response, calls, searches };
       }
-      if (hasNonBridgeToolCalls(payload.value)) {
+      const hasClientToolCalls = hasNonBridgeToolCalls(payload.value);
+      const assistant = payload.value?.choices?.[0]?.message;
+      if (!assistant || typeof assistant !== 'object' || Array.isArray(assistant)) {
+        return { response: bridgeWebSearchFailureResponse('Chat 上游 Web Search 工具响应缺少 assistant message', 'upstream_invalid_response'), credentialResponse: response, calls, searches };
+      }
+      const assistantToolCalls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
+      const toolCallIds = assistantToolCalls.map((call) => call?.id);
+      if (assistantToolCalls.some((call) => call?.type !== 'function'
+        || typeof call.id !== 'string' || !call.id
+        || typeof call.function?.name !== 'string' || !call.function.name)
+        || new Set(toolCallIds).size !== toolCallIds.length) {
         return {
-          response: bridgeWebSearchFailureResponse('模型在同一轮同时调用了本地 Web Search 与客户端工具；请重试该请求，或在 Claude Code 中关闭并行工具调用', 'bridge_web_search_parallel_tools'),
+          response: bridgeWebSearchFailureResponse('Chat 上游返回了无效或重复的并行工具调用 ID', 'upstream_invalid_response'),
+          credentialResponse: response,
           calls,
           searches
         };
-      }
-      const assistant = payload.value?.choices?.[0]?.message;
-      if (!assistant || typeof assistant !== 'object' || Array.isArray(assistant)) {
-        return { response: bridgeWebSearchFailureResponse('Chat 上游 Web Search 工具响应缺少 assistant message', 'upstream_invalid_response'), calls, searches };
       }
       const availableSearches = Math.max(0, search.maxUses - calls);
       const searchesToRun = Math.min(localCalls.length, availableSearches);
@@ -1393,6 +1447,22 @@ async function callChatWithBridgeWebSearch({ provider, credential, body, signal,
       }));
       const results = executions.map((item) => item.tool);
       searches.push(...executions.map((item) => item.searchEvent).filter(Boolean));
+      if (hasClientToolCalls) {
+        if (!rememberDeferredBridgeSearchContext(scope, assistant, results)) {
+          return {
+            response: bridgeWebSearchFailureResponse('本地 Web Search 续轮上下文超过内存安全上限', 'bridge_web_search_context_too_large'),
+            credentialResponse: response,
+            calls,
+            searches
+          };
+        }
+        return {
+          response: clonedJsonResponse(response, chatResponseWithoutBridgeSearchCalls(payload.value, usage)),
+          credentialResponse: response,
+          calls,
+          searches
+        };
+      }
       current = {
         ...current,
         messages: [...(Array.isArray(current.messages) ? current.messages : []), assistant, ...results]
@@ -1409,7 +1479,7 @@ async function callChatWithBridgeWebSearch({ provider, credential, body, signal,
         }];
       }
     }
-    return { response: bridgeWebSearchFailureResponse('本地 Web Search 工具循环超过安全上限', 'bridge_web_search_loop_limit'), calls, searches };
+    return { response: bridgeWebSearchFailureResponse('本地 Web Search 工具循环超过安全上限', 'bridge_web_search_loop_limit'), credentialResponse: lastCredentialResponse, calls, searches };
   } finally {
     clearTimeout(timeout);
   }
@@ -1666,6 +1736,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
       ? reasoningStates.inject(body, incomingProtocol, route.protocol, reasoningStateScope)
       : body;
     upstreamBody = prepareUpstreamRequest(conversionBody, incomingProtocol, route.protocol, route.upstreamModel, { toolChoiceFallback: route.toolChoiceFallback, imageHandoffEnabled });
+    if (route.protocol === 'chat') upstreamBody = withDeferredBridgeSearchContext(upstreamBody, reasoningStateScope);
     if (bridgeWebSearch) upstreamBody = withBridgeWebSearchTool(upstreamBody, bridgeWebSearch);
     if (config.forceMaximumReasoningEffort && !responsesCompact) {
       const forcedBody = withMaximumReasoningEffort(upstreamBody, route.protocol, route.upstreamModel, route.provider);
@@ -1701,8 +1772,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
   const selection = credentialHealth.select(route.provider, credentials);
   let credential = selection.credential;
   if (!credential) {
-    applyCredentialRetryHeader(res, selection);
-    return protocolError(res, 503, incomingProtocol, credentialUnavailableMessage(route.provider, selection), selection.reason === 'cooldown' ? 'overloaded_error' : 'configuration_error');
+    return protocolError(res, 503, incomingProtocol, credentialUnavailableMessage(route.provider), 'configuration_error');
   }
   if (promptRewrite) {
     const finalText = upstreamSystemText(upstreamBody, route.protocol);
@@ -1766,6 +1836,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     ...(upstreamBodyStartedAt ? { upstreamBodyMs: Math.max(0, Date.now() - upstreamBodyStartedAt) } : {})
   }, config);
   let upstream;
+  let credentialResponse;
   const maximumCredentialAttempts = credentials.length;
   while (credential && credentialAttempts < maximumCredentialAttempts) {
     credentialAttempts++;
@@ -1783,9 +1854,11 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
           search: bridgeWebSearch,
           searchProvider: config.bridgeWebSearchProvider,
           sessionId: requestId,
-          model: route.upstreamModel
+          model: route.upstreamModel,
+          scope: reasoningStateScope
         });
         upstream = result.response;
+        credentialResponse = result.credentialResponse || upstream;
         bridgeWebSearchCalls += result.calls;
         bridgeWebSearchEvents.push(...result.searches);
       } else {
@@ -1800,6 +1873,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
           anthropicBetaEndpoint: usesAnthropicBetaEndpoint(url, incomingProtocol, route.protocol),
           operation: responsesCompact ? 'compact' : 'create'
         });
+        credentialResponse = upstream;
       }
     } catch (error) {
       upstreamWaitMs += Math.max(0, Date.now() - upstreamAttemptStartedAt);
@@ -1816,7 +1890,7 @@ async function proxyRequest(req, res, url, config, client, forcedProvider, reque
     }
     upstreamWaitMs += Math.max(0, Date.now() - upstreamAttemptStartedAt);
     activity.stage('reading_upstream_body');
-    if (!upstream.ok) recordCredentialResponse(route.provider, credential, upstream);
+    if (!upstream.ok) recordCredentialResponse(route.provider, credential, credentialResponse || upstream);
     if (![401, 403, 429].includes(upstream.status) || credentialAttempts >= maximumCredentialAttempts) break;
     const replacement = credentialHealth.select(route.provider, credentials).credential;
     if (!replacement) break;
@@ -2306,8 +2380,7 @@ const server = createServer({
           try {
             const result = await discoverModels(config, provider, modelSignal);
             if (!result.response) {
-              applyCredentialRetryHeader(res, result.selection);
-              return json(res, 503, { error: { message: credentialUnavailableMessage(provider, result.selection), type: result.selection.reason === 'cooldown' ? 'overloaded_error' : 'configuration_error' } });
+              return json(res, 503, { error: { message: credentialUnavailableMessage(provider), type: 'configuration_error' } });
             }
             if (result.attempts > 1) res.setHeader('x-opencode-key-attempts', String(result.attempts));
             const upstream = result.response;
@@ -2338,7 +2411,7 @@ const server = createServer({
             const settled = await Promise.allSettled(configuredProviders.map(async (item) => {
               const result = await discoverModels(config, item, modelSignal);
               if (!result.response) {
-                throw Object.assign(new Error(credentialUnavailableMessage(item, result.selection)), {
+                throw Object.assign(new Error(credentialUnavailableMessage(item)), {
                   provider: item, credentialAttempts: result.attempts, selection: result.selection
                 });
               }
@@ -2359,11 +2432,6 @@ const server = createServer({
             const attemptCounts = settled.map((result) => result.status === 'fulfilled' ? result.value.attempts : result.reason.credentialAttempts || 0);
             if (attemptCounts.some((attempts) => attempts > 1)) res.setHeader('x-opencode-key-attempts', String(attemptCounts.reduce((total, attempts) => total + attempts, 0)));
             if (!models.length && errors.length) {
-              const cooling = settled.flatMap((result) => result.status === 'rejected' && result.reason.selection?.reason === 'cooldown' ? [result.reason.selection] : []);
-              if (cooling.length === settled.length) {
-                applyCredentialRetryHeader(res, { reason: 'cooldown', retryAfterMs: Math.min(...cooling.map((selection) => selection.retryAfterMs)) });
-                return json(res, 503, { error: { message: '已配置的 OpenCode Key 均在冷却，请稍后重试', type: 'overloaded_error' } });
-              }
               return json(res, 502, { error: { message: errors.join('；'), type: 'upstream_error' } });
             }
             return json(res, 200, { object: 'list', data: models, ...(errors.length ? { warnings: errors } : {}) });
@@ -2371,8 +2439,7 @@ const server = createServer({
           try {
             const result = await discoverModels(config, provider, modelSignal);
             if (!result.response) {
-              applyCredentialRetryHeader(res, result.selection);
-              return json(res, 503, { error: { message: credentialUnavailableMessage(provider, result.selection), type: result.selection.reason === 'cooldown' ? 'overloaded_error' : 'configuration_error' } });
+              return json(res, 503, { error: { message: credentialUnavailableMessage(provider), type: 'configuration_error' } });
             }
             if (result.attempts > 1) res.setHeader('x-opencode-key-attempts', String(result.attempts));
             const upstream = result.response;

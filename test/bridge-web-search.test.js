@@ -358,7 +358,7 @@ test('Claude Web Search 的最终消息可重新编码为 Claude SSE', async () 
   assert.match(stream, /event: message_stop/);
 });
 
-test('Claude Code 的 typed Web Search 可经 Chat 上游完成完整工具循环', { timeout: 20_000 }, async () => {
+test('Claude Code 与 Codex 的 Web Search 可经 Chat 上游完成完整及混合工具循环', { timeout: 20_000 }, async () => {
   const chatRequests = [];
   const searchRequests = [];
   let activeSearches = 0;
@@ -387,13 +387,15 @@ test('Claude Code 的 typed Web Search 可经 Chat 上游完成完整工具循�
     const returnedSearches = new Set(body.messages.filter((message) => message.role === 'tool').map((message) => message.tool_call_id));
     const hasSearchResult = returnedSearches.has('call_search') && returnedSearches.has('call_search_second');
     if (!hasSearchResult) {
+      const mixedClientTools = Array.isArray(body.tools) && body.tools.some((tool) => tool?.function?.name === 'read_file');
       return sendJson(res, {
         id: 'chatcmpl_search_call', object: 'chat.completion', model: body.model,
         choices: [{ index: 0, finish_reason: 'tool_calls', message: {
           role: 'assistant', content: null,
           tool_calls: [
             { id: 'call_search', type: 'function', function: { name: 'web_search', arguments: '{"query":"北京天气"}' } },
-            { id: 'call_search_second', type: 'function', function: { name: 'web_search', arguments: '{"query":"北京未来三天天气"}' } }
+            { id: 'call_search_second', type: 'function', function: { name: 'web_search', arguments: '{"query":"北京未来三天天气"}' } },
+            ...(mixedClientTools ? [{ id: 'call_read', type: 'function', function: { name: 'read_file', arguments: '{"path":"README.md"}' } }] : [])
           ]
         } }],
         usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 }
@@ -439,7 +441,7 @@ test('Claude Code 的 typed Web Search 可经 Chat 上游完成完整工具循�
     const configured = await fetch(`http://127.0.0.1:${bridgePort}/api/config`, {
       method: 'PUT', headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({
-        defaultProvider: 'zen', zenKey: 'upstream-secret', goKey: '', clientToken: '', modelRoutes: {
+        defaultProvider: 'zen', zenKey: 'upstream-secret', goKey: 'upstream-go-secret', clientToken: '', modelRoutes: {
           'search-chat': { provider: 'zen', protocol: 'chat', upstreamModel: 'search-chat' }
         },
         bridgeWebSearchEnabled: true
@@ -557,6 +559,51 @@ test('Claude Code 的 typed Web Search 可经 Chat 上游完成完整工具循�
     assert.equal(codexEvents.at(-1).response.tool_usage.web_search.num_requests, 2);
     assert.equal(chatRequests.length, 8);
     assert.equal(searchRequests.length, 8);
+
+    const mixedTools = [
+      codexBody.tools[0],
+      {
+        type: 'function', name: 'read_file', description: '读取工作区文件',
+        parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false }
+      }
+    ];
+    const mixed = await fetch(`http://127.0.0.1:${bridgePort}/go/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${setupBody.clientToken}` },
+      body: JSON.stringify({ model: 'search-chat', input: '搜索天气并读取 README', tools: mixedTools, stream: false })
+    });
+    assert.equal(mixed.status, 200);
+    const mixedJson = await mixed.json();
+    assert.equal(mixedJson.output.filter((item) => item.type === 'web_search_call').length, 2);
+    assert.equal(mixedJson.output.filter((item) => item.type === 'function_call' && item.name === 'read_file').length, 1);
+    assert.equal(mixedJson.output.filter((item) => item.type === 'message').length, 0);
+    assert.equal(mixedJson.tool_usage.web_search.num_requests, 2);
+    assert.equal(chatRequests.length, 9);
+    assert.equal(searchRequests.length, 10);
+
+    const resumed = await fetch(`http://127.0.0.1:${bridgePort}/go/v1/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${setupBody.clientToken}` },
+      body: JSON.stringify({
+        model: 'search-chat',
+        input: [
+          { role: 'user', content: [{ type: 'input_text', text: '搜索天气并读取 README' }] },
+          ...mixedJson.output,
+          { type: 'function_call_output', call_id: 'call_read', output: 'README 文件内容' }
+        ],
+        tools: mixedTools,
+        stream: false
+      })
+    });
+    assert.equal(resumed.status, 200);
+    const resumedJson = await resumed.json();
+    assert.match(resumedJson.output.find((item) => item.type === 'message').content[0].text, /北京未来几天/);
+    assert.equal(chatRequests.length, 10);
+    assert.ok(chatRequests[9].messages.some((message) => message.role === 'tool' && message.tool_call_id === 'call_search'));
+    assert.ok(chatRequests[9].messages.some((message) => message.role === 'tool' && message.tool_call_id === 'call_read'));
+    assert.equal(searchRequests.length, 10);
+    const stats = await fetch(`http://127.0.0.1:${bridgePort}/api/stats`, { headers: { cookie } }).then((result) => result.json());
+    const goHealth = stats.credentialHealth.find((item) => item.provider === 'go');
+    assert.equal(goHealth.state, 'healthy');
+    assert.equal(goHealth.cooldownUntil, null);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});

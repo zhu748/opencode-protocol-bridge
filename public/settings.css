@@ -827,12 +827,6 @@
   text-decoration: underline;
 }
 
-.cooldown-countdown {
-  color: var(--orange);
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-}
-
 /* Metrics & Stats Analytics Visualization Panel */
 .stats-toolbar {
   display: flex;

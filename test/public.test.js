@@ -18,7 +18,7 @@ test('管理面板脚本引用的静态元素均存在', async () => {
   assert.deepEqual(missing, []);
   assert.equal(new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1])).size, [...html.matchAll(/\bid="([^"]+)"/g)].length, 'HTML id 不应重复');
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)/i, 'CSP 下不应使用内联脚本');
-  assert.match(script, /setInterval\(updateCooldownCountdowns, 1000\)/);
+  assert.doesNotMatch(script, /updateCooldownCountdowns/);
   assert.match(script, /x-opencode-upstream-request-id|upstreamRequestId/);
   assert.match(script, /function filteredLogs\(\)/);
   assert.match(script, /function credentialLabel\(item\)/);

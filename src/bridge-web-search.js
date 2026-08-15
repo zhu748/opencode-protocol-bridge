@@ -836,7 +836,8 @@ export function withResponsesBridgeWebSearchMetadata(response, searches) {
   }));
   let textItemIndex = output.findLastIndex((item) => item?.type === 'message'
     && Array.isArray(item.content) && item.content.some((part) => part?.type === 'output_text'));
-  if (textItemIndex < 0 && sources.length) {
+  const waitingForClientTool = output.some((item) => ['function_call', 'custom_tool_call'].includes(item?.type));
+  if (textItemIndex < 0 && sources.length && !waitingForClientTool) {
     output.push({ id: `msg_${Date.now().toString(36)}`, type: 'message', status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: '', annotations: [] }] });
     textItemIndex = output.length - 1;
   }

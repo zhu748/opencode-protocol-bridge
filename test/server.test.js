@@ -1084,7 +1084,7 @@ test('流式上游中途断开会向客户端发送协议错误并写入失败�
   }
 });
 
-test('非流式上游正文断开会累计 Key 网络失败并进入冷却', { timeout: 10_000 }, async () => {
+test('非流式上游正文断开会累计 Key 网络失败但不阻断后续请求', { timeout: 10_000 }, async () => {
   let upstreamCalls = 0;
   let markDelayedBodyStarted;
   let markDelayedErrorBodyStarted;
@@ -1168,28 +1168,16 @@ test('非流式上游正文断开会累计 Key 网络失败并进入冷却', { t
     }
 
     const stats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
-    assert.equal(stats.credentialHealth[0].state, 'cooldown');
+    assert.equal(stats.credentialHealth[0].state, 'degraded');
     assert.equal(stats.credentialHealth[0].consecutiveFailures, 3);
     assert.equal(stats.credentialHealth[0].lastFailureKind, 'network');
 
-    const blocked = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
+    const continued = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
-      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'blocked' }] })
+      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'continue' }] })
     });
-    assert.equal(blocked.status, 503);
-    assert.equal(upstreamCalls, 3);
-
-    const reset = await fetch(`http://127.0.0.1:${port}/api/credential-health/reset`, {
-      method: 'POST', headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ provider: 'zen', credentialId: 'environment:1' })
-    });
-    assert.equal(reset.status, 200);
-    const recovered = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
-      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer Api123' },
-      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'recover' }] })
-    });
-    assert.equal(recovered.status, 200);
-    assert.equal((await recovered.json()).choices[0].message.content, 'done');
+    assert.equal(continued.status, 200);
+    assert.equal((await continued.json()).choices[0].message.content, 'done');
     assert.equal(upstreamCalls, 4);
 
     const malformed = await fetch(`http://127.0.0.1:${port}/zen/v1/chat/completions`, {
@@ -2122,7 +2110,7 @@ test('面板多 Key 会安全加密、轮询并按名称统计', { timeout: 10_0
   }
 });
 
-test('鉴权失败的环境 Key 会在当前请求内切换并进入冷却', { timeout: 10_000 }, async () => {
+test('鉴权失败的环境 Key 会在当前请求内切换并降低后续优先级', { timeout: 10_000 }, async () => {
   const authorizations = [];
   const upstream = createHttpServer((req, res) => {
     const authorization = req.headers.authorization;
@@ -2180,7 +2168,7 @@ test('鉴权失败的环境 Key 会在当前请求内切换并进入冷却', { t
     const stats = await fetch(`http://127.0.0.1:${port}/api/stats`, { headers: { cookie } }).then((response) => response.json());
     const rejected = stats.credentialHealth.find((item) => item.credentialId === 'environment:1');
     const healthy = stats.credentialHealth.find((item) => item.credentialId === 'environment:2');
-    assert.equal(rejected.state, 'cooldown');
+    assert.equal(rejected.state, 'degraded');
     assert.equal(rejected.lastFailureKind, 'auth');
     assert.equal(healthy.state, 'healthy');
     assert.equal(stats.summary.requests, 2);
@@ -2445,9 +2433,9 @@ test('推理 5xx 不会重放，但模型发现会安全切换 Key', { timeout: 
       headers: { authorization: 'Bearer Api123' }
     });
     assert.equal(combined.status, 200);
-    assert.equal(combined.headers.get('x-opencode-key-attempts'), '2');
+    assert.equal(combined.headers.get('x-opencode-key-attempts'), null);
     assert.deepEqual((await combined.json()).data.map((item) => item.id), ['opencode-go/gpt-test']);
-    assert.deepEqual(authorizations, ['Bearer first-key', 'Bearer second-key', 'Bearer first-key', 'Bearer second-key', 'Bearer first-key']);
+    assert.deepEqual(authorizations, ['Bearer first-key', 'Bearer second-key', 'Bearer first-key', 'Bearer first-key']);
   } finally {
     child.kill();
     await once(child, 'exit').catch(() => {});

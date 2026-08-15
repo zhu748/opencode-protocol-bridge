@@ -37,17 +37,6 @@ export function compactIdentifier(value) {
   return text.length > 22 ? `${text.slice(0, 10)}…${text.slice(-8)}` : text;
 }
 
-export function formatCooldownRemaining(value, now = Date.now()) {
-  const remaining = Math.max(0, Date.parse(value) - now);
-  if (!Number.isFinite(remaining) || remaining <= 0) return '可重新探测';
-  const seconds = Math.ceil(remaining / 1000);
-  if (seconds < 60) return `剩余 ${seconds} 秒`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `剩余 ${minutes} 分 ${seconds % 60} 秒`;
-  const hours = Math.floor(minutes / 60);
-  return `剩余 ${hours} 小时 ${minutes % 60} 分`;
-}
-
 function csvCell(value) {
   let text = String(value ?? '');
   if (/^\s*[=+\-@]/.test(text)) text = `'${text}`;

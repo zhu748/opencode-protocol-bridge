@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compactIdentifier, filterRequestLogs, formatCooldownRemaining, requestLogsToCsv } from '../public/log-utils.js';
+import { compactIdentifier, filterRequestLogs, requestLogsToCsv } from '../public/log-utils.js';
 
 const logs = [
   { time: '2026-08-04T11:30:00Z', requestId: 'local-success', upstreamRequestId: 'trace-a', provider: 'zen', status: 200, model: 'model-a', clientName: '工作机' },
@@ -74,13 +74,4 @@ test('CSV 导出限定元数据字段并防止公式注入', () => {
 test('请求 ID 缩略保留首尾，短 ID 保持原样', () => {
   assert.equal(compactIdentifier('short-id'), 'short-id');
   assert.equal(compactIdentifier('1234567890abcdefghij1234567890'), '1234567890…34567890');
-});
-
-test('冷却倒计时覆盖秒、分钟、小时、过期和非法时间', () => {
-  const now = Date.parse('2026-08-04T12:00:00Z');
-  assert.equal(formatCooldownRemaining('2026-08-04T12:00:07Z', now), '剩余 7 秒');
-  assert.equal(formatCooldownRemaining('2026-08-04T12:02:07Z', now), '剩余 2 分 7 秒');
-  assert.equal(formatCooldownRemaining('2026-08-04T14:05:00Z', now), '剩余 2 小时 5 分');
-  assert.equal(formatCooldownRemaining('2026-08-04T11:59:59Z', now), '可重新探测');
-  assert.equal(formatCooldownRemaining('invalid', now), '可重新探测');
 });
