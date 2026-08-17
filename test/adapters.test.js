@@ -1604,6 +1604,22 @@ test('Responses 与 Chat 非流式响应保留公共追踪元数据', () => {
   assert.equal('system_fingerprint' in chat, false);
 });
 
+test('Chat 可空 tool_calls 在请求历史与上游响应中等价于未调用工具', () => {
+  const request = prepareUpstreamRequest({
+    model: 'alias',
+    messages: [{ role: 'assistant', content: '继续处理', tool_calls: null }, { role: 'user', content: '继续' }]
+  }, 'chat', 'responses', 'gpt-test');
+  assert.equal(request.input.some((item) => item.type === 'function_call'), false);
+
+  const response = formatResponse(normalizeResponse({
+    id: 'chat_nullable_tools', model: 'deepseek-v4-flash',
+    choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: '完成', tool_calls: null } }],
+    usage: { prompt_tokens: 2, completion_tokens: 1 }
+  }, 'chat', '', { rejectUnknown: true }), 'responses');
+  assert.equal(response.output.length, 1);
+  assert.equal(response.output[0].content[0].text, '完成');
+});
+
 test('非流式上游响应缺少协议最小结构时拒绝伪成功', () => {
   assert.throws(() => normalizeResponse(null, 'responses'), /JSON 对象/);
   assert.throws(() => normalizeResponse({}, 'claude'), /content 数组/);

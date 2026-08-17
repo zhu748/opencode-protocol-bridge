@@ -1839,7 +1839,7 @@ async function* canonicalEvents(response, protocol, fallbackModel, { rejectUnsup
     }
     if (refusalDelta) yield { type: 'text_delta', sourceIndex: 'refusal', delta: refusalDelta };
     const streamToolCalls = choice?.delta?.tool_calls;
-    if (streamToolCalls !== undefined && !Array.isArray(streamToolCalls)) throw invalidChatStream('choices[0].delta.tool_calls 必须是数组');
+    if (streamToolCalls != null && !Array.isArray(streamToolCalls)) throw invalidChatStream('choices[0].delta.tool_calls 必须是数组或 null');
     let toolDeltas = streamToolCalls || [];
     if (choice?.delta?.function_call !== undefined) {
       const legacy = choice.delta.function_call;

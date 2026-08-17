@@ -3024,8 +3024,8 @@ export function normalizeRequest(body, protocol) {
       if (message.audio !== undefined && message.audio !== null) {
         throw unsupportedFeature(`跨协议转换无法保留 Chat messages[${index}].audio 历史音频；请重发可转换的文本内容或将模型路由设为 chat`);
       }
-      if (message.tool_calls !== undefined && !Array.isArray(message.tool_calls)) {
-        throw unsupportedFeature(`Chat messages[${index}].tool_calls 必须是数组`);
+      if (message.tool_calls != null && !Array.isArray(message.tool_calls)) {
+        throw unsupportedFeature(`Chat messages[${index}].tool_calls 必须是数组或 null`);
       }
       for (const field of ['refusal', 'reasoning_content', 'reasoning']) {
         if (message[field] !== undefined && message[field] !== null && typeof message[field] !== 'string') {
@@ -5031,7 +5031,7 @@ export function normalizeResponse(body, protocol, fallbackModel = '', { rejectUn
   const reasoningDetails = normalizedChatReasoningDetails(message.reasoning_details);
   if (reasoningDetails.length) parts.unshift(...reasoningDetails);
   else if (messageReasoning) parts.unshift({ type: 'reasoning', text: messageReasoning });
-  if (message.tool_calls !== undefined && !Array.isArray(message.tool_calls)) throw new Error('上游 Chat message.tool_calls 必须是数组');
+  if (message.tool_calls != null && !Array.isArray(message.tool_calls)) throw new Error('上游 Chat message.tool_calls 必须是数组或 null');
   for (const [index, call] of asArray(message.tool_calls).entries()) {
     if (!call || Array.isArray(call) || typeof call !== 'object') throw new Error(`上游 Chat message.tool_calls[${index}] 必须是对象`);
     if (call.type !== undefined && call.type !== 'function') throw new Error(`上游 Chat message.tool_calls[${index}].type 无法跨协议转换：${call.type}`);

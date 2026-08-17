@@ -2123,6 +2123,17 @@ test('Chat 流中的非文本内容块不会被静默丢弃', async () => {
   );
 });
 
+test('Chat 流式 tool_calls null 等价于当前增量没有工具调用', async () => {
+  const source = responseFrom([
+    ['message', { id: 'chat_nullable_tools', model: 'deepseek', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: null }, finish_reason: null }] }],
+    ['message', { id: 'chat_nullable_tools', model: 'deepseek', choices: [{ index: 0, delta: { content: '完成' }, finish_reason: null }] }],
+    ['message', { id: 'chat_nullable_tools', model: 'deepseek', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }]
+  ]);
+  const output = await collect(translateSse(source, 'chat', 'responses', 'alias'));
+  assert.match(output, /"delta":"完成"/);
+  assert.match(output, /response\.completed/);
+});
+
 test('Chat 流式多候选、非零候选索引和损坏增量不会被静默转换', async () => {
   const cases = [
     {
